@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Trading Platform — Login</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Syne:wght@700;800&display=swap" rel="stylesheet"/>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+          background: #080c10;
+          min-height: 100vh;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-family: 'JetBrains Mono', monospace;
+        }
+        body::before {
+          content: '';
+          position: fixed; inset: 0;
+          background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,212,170,0.012) 2px, rgba(0,212,170,0.012) 4px);
+          pointer-events: none; z-index: 0;
+        }
+        .card {
+          position: relative; z-index: 1;
+          background: #0d1117;
+          border: 1px solid #1e2a38;
+          border-radius: 12px;
+          padding: 44px 40px;
+          width: 100%; max-width: 380px;
+        }
+        .logo { font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 800; color: #fff; letter-spacing: -0.5px; margin-bottom: 6px; }
+        .logo span { color: #00d4aa; }
+        .subtitle { font-size: 11px; color: #4a5568; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 36px; }
+        .field { margin-bottom: 16px; }
+        label { display: block; font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase; color: #4a5568; margin-bottom: 6px; }
+        input {
+          width: 100%; padding: 10px 14px;
+          background: #080c10; border: 1px solid #1e2a38; border-radius: 6px;
+          color: #cdd9e5; font-family: 'JetBrains Mono', monospace; font-size: 13px;
+          outline: none; transition: border-color 0.2s;
+        }
+        input:focus { border-color: #00d4aa; }
+        input::placeholder { color: #2d3748; }
+        .btn {
+          width: 100%; padding: 11px;
+          background: #00d4aa; border: none; border-radius: 6px;
+          color: #080c10; font-family: 'JetBrains Mono', monospace;
+          font-size: 13px; font-weight: 700; letter-spacing: 0.5px;
+          cursor: pointer; margin-top: 8px; transition: background 0.2s;
+        }
+        .btn:hover { background: #00bfa0; }
+        .error {
+          background: rgba(255,61,113,0.08); border: 1px solid rgba(255,61,113,0.25);
+          border-radius: 6px; padding: 10px 14px; color: #ff3d71;
+          font-size: 12px; margin-bottom: 20px; display: none;
+        }
+        .success {
+          background: rgba(0,212,170,0.08); border: 1px solid rgba(0,212,170,0.25);
+          border-radius: 6px; padding: 10px 14px; color: #00d4aa;
+          font-size: 12px; margin-bottom: 20px; display: none;
+        }
+        .footer { margin-top: 28px; padding-top: 20px; border-top: 1px solid #1e2a38; font-size: 10px; color: #2d3748; text-align: center; letter-spacing: 0.5px; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <div class="logo">⚡ TRADING<span>PLATFORM</span></div>
+    <div class="subtitle">Secure Dashboard Access</div>
+
+    <div class="error" id="errorMsg">Invalid username or password</div>
+    <div class="success" id="successMsg">Logged out successfully</div>
+
+    <form action="/login" method="post">
+        <div class="field">
+            <label>Username</label>
+            <input type="text" name="username" placeholder="Enter username" autofocus/>
+        </div>
+        <div class="field">
+            <label>Password</label>
+            <input type="password" name="password" placeholder="Enter password"/>
+        </div>
+        <!-- CSRF token for Spring Security -->
+        <input type="hidden" id="csrfToken" name="_csrf" value=""/>
+        <button type="submit" class="btn">LOGIN →</button>
+    </form>
+
+    <div class="footer">Indian Intraday Trading Platform · Secured</div>
+</div>
+
+<script>
+    // Show error/logout messages from URL params
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('error'))  document.getElementById('errorMsg').style.display  = 'block';
+    if (params.has('logout')) document.getElementById('successMsg').style.display = 'block';
+
+    // Fetch CSRF token from Spring Security endpoint
+    fetch('/csrf-token')
+      .then(r => r.json())
+      .then(data => {
+        if (data.token) document.getElementById('csrfToken').value = data.token;
+      })
+      .catch(() => {});
+</script>
+</body>
+</html>

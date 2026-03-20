@@ -1,0 +1,162 @@
+spring:
+  application:
+    name: trading-platform
+
+  # ── Database ──────────────────────────────────────────────────────
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+
+  # ── JPA ───────────────────────────────────────────────────────────
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+      # dialect removed — Hibernate 6 auto-detects MySQL
+
+  # ── Flyway ────────────────────────────────────────────────────────
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+  # ── Redis ─────────────────────────────────────────────────────────
+  data:
+    redis:
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT}
+      password: ${REDIS_PASSWORD}
+      timeout: 2000ms
+
+  # ── Async Thread Pool ─────────────────────────────────────────────
+  task:
+    execution:
+      pool:
+        core-size: 8
+        max-size: 32
+        queue-capacity: 5000
+        keep-alive: 60s
+      thread-name-prefix: trading-
+
+# ── Dashboard Auth ────────────────────────────────────────────────
+dashboard:
+  username: ${DASHBOARD_USERNAME:admin}
+  password: ${DASHBOARD_PASSWORD:changeme}
+
+# ── Zerodha ───────────────────────────────────────────────────────
+zerodha:
+  api-key: ${ZERODHA_API_KEY}
+  api-secret: ${ZERODHA_API_SECRET}
+  user-id: ${ZERODHA_USER_ID}
+  account-id: ${ZERODHA_ACCOUNT_ID}
+  password: ${ZERODHA_PASSWORD}
+  totp-secret: ${ZERODHA_TOTP_SECRET:}
+  redirect-url: ${ZERODHA_REDIRECT_URL:http://localhost:8081/api/auth/callback}
+  auto-login: true
+  websocket:
+    max-reconnects: 20
+    reconnect-delay-ms: 5000
+
+# ── Trading Parameters ────────────────────────────────────────────
+trading:
+  capital: ${TRADING_CAPITAL:100000}
+  risk-per-trade: 0.01
+  max-position-pct: 0.20
+  trade-window-start: "09:40"
+  trade-window-end: "14:40"
+  entry-mode: ${ENTRY_MODE:AGGRESSIVE}
+  strong-trend-risk: 0.01
+  moderate-trend-risk: 0.005
+
+# ── Circuit Breaker ───────────────────────────────────────────────
+circuit-breaker:
+  max-trades-per-day: 2
+  daily-loss-cap-pct: -3.0
+  weekly-drawdown-cap-pct: -6.0
+  monthly-drawdown-cap-pct: -12.0
+
+# ── Scanner Parameters ────────────────────────────────────────────
+scanner:
+  min-volume: 500000
+  min-price: 50
+  bb-width-max: 2.0
+  max-sl-pct: 2.0
+  cooldown-seconds: 1800
+  retest-tolerance: 0.003
+  min-gap-pct: 0.5
+  entry-mode: ${ENTRY_MODE:AGGRESSIVE}
+
+# ── Market Direction Parameters ──────────────────────────────────
+market:
+  atr-min-pct: 0.5
+  atr-max-pct: 2.5
+  trend-candles: 10
+  doji-body-pct: 0.10
+
+# ── Sector Parameters ─────────────────────────────────────────────
+sector:
+  min-aligned-pct: 60
+  min-relative-strength: 1.0
+
+# ── Notifications ─────────────────────────────────────────────────
+notifications:
+  telegram:
+    enabled: false
+    bot-token: ${TELEGRAM_BOT_TOKEN:}
+    chat-id: ${TELEGRAM_CHAT_ID:}
+
+# ── Server ────────────────────────────────────────────────────────
+server:
+  port: 8081
+
+# ── Actuator ──────────────────────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+      base-path: /internal/actuator
+  endpoint:
+    health:
+      show-details: when-authorized
+
+# ── Resilience4j ──────────────────────────────────────────────────
+resilience4j:
+  retry:
+    instances:
+      zerodha-api:
+        max-attempts: 3
+        wait-duration: 500ms
+        exponential-backoff-multiplier: 2.0
+
+# ── App ───────────────────────────────────────────────────────────
+app:
+  allowed-origins: http://localhost:8081,http://127.0.0.1:8081
+
+# ── Logging ───────────────────────────────────────────────────────
+logging:
+  level:
+    com.trading: INFO
+    com.zerodhatech: WARN
+    org.springframework: WARN
+    org.hibernate: WARN
+    com.zaxxer: WARN
+  pattern:
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  # Write logs to file so IntelliJ console buffer doesn't matter
+  file:
+    name: logs/trading-platform.log
+  logback:
+    rollingpolicy:
+      max-file-size: 50MB
+      max-history: 7
+      file-name-pattern: logs/trading-platform.%d{yyyy-MM-dd}.%i.log
