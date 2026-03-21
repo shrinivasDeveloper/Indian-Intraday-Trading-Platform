@@ -84,12 +84,6 @@
         </dependency>
 
         <!-- Playwright for automated login -->
-        <dependency>
-            <groupId>com.microsoft.playwright</groupId>
-            <artifactId>playwright</artifactId>
-            <version>1.43.0</version>
-        </dependency>
-
         <!-- TOTP for 2FA -->
         <dependency>
             <groupId>com.eatthepath</groupId>
