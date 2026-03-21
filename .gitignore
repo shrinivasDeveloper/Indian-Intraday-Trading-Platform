@@ -1,2 +1,33 @@
+# 🔐 Secrets
 .env
+*.env
+
+# 🧠 IDE
 .idea/
+*.iml
+.vscode/
+
+# 🏗 Build
+target/
+build/
+
+# 📦 Logs
+logs/
+*.log
+
+# 🧪 Playwright
+playwright-report/
+test-results/
+
+# 🖥 OS junk
+.DS_Store
+Thumbs.db
+
+# 📂 Temp files
+*.tmp
+*.swp
+
+# 🔑 Keys (very important)
+*.pem
+*.key
+*.crt
