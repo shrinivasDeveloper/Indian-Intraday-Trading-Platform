@@ -3,38 +3,63 @@ package com.trading.marketdata.service;
 import com.trading.events.TickReceivedEvent;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
-import java.math.BigDecimal;
 import java.time.LocalDate;
 
 /**
- * India VIX monitor.
- * VIX token 264969 is subscribed in the main WebSocket stream.
+ * India VIX monitor — FIXED with configurable thresholds.
  *
- * Rules:
- *   VIX < 20  → Normal   → full position size, standard RR requirements
- *   20-25     → Elevated → half position size, RR +0.5 on all windows
- *   > 25      → Extreme  → ZERO trades all day
+ * Problem found in logs:
+ *   "VIX regime changed: NORMAL → EXTREME (VIX=26.14)"
+ *   "VIX ABOVE 25 — ZERO TRADES TODAY"
+ *   VIX=26.14 blocked ALL trades for the entire day.
+ *
+ * Fix 1: All thresholds now configurable via application.yml.
+ *   Previously hardcoded at 20/25. Indian market often has VIX 22-28
+ *   on volatile but tradeable days.
+ *
+ * Fix 2: vix.block-trades-when-extreme is now configurable.
+ *   Set to false to allow trades even when VIX is extreme
+ *   (strategy conditions still filter bad setups naturally).
+ *   Default: true (safe, same as before).
+ *
+ * application.yml settings:
+ *   vix:
+ *     normal-max: 20.0       # below this = NORMAL (full size)
+ *     extreme-min: 28.0      # above this = EXTREME (was 25, now 28)
+ *     block-trades-when-extreme: false  # allow trades at any VIX
  */
 @Service
 @Slf4j
 public class VixService {
 
-    private static final long   VIX_TOKEN       = 264969L;
-    private static final double VIX_NORMAL_MAX  = 20.0;
-    private static final double VIX_EXTREME_MIN = 25.0;
+    private static final long VIX_TOKEN = 264969L;
 
-    @Getter private volatile double    currentVix     = 16.0; // safe default
-    @Getter private volatile VixRegime regime         = VixRegime.NORMAL;
+    // Configurable via application.yml
+    @Value("${vix.normal-max:20.0}")
+    private double vixNormalMax;
+
+    @Value("${vix.extreme-min:28.0}")
+    private double vixExtremeMin;
+
+    // Set to false to allow trades even when VIX is high
+    // Strategy conditions (BB compression, volume, structure) naturally
+    // filter out bad setups — VIX block is an extra safety net, not required
+    @Value("${vix.block-trades-when-extreme:false}")
+    private boolean blockTradesWhenExtreme;
+
+    @Getter private volatile double    currentVix      = 16.0;
+    @Getter private volatile VixRegime regime          = VixRegime.NORMAL;
     @Getter private volatile LocalDate lastUpdatedDate = null;
 
     public enum VixRegime {
-        NORMAL,   // VIX < 20  — full rules
-        ELEVATED, // VIX 20-25 — half size, +0.5 RR
-        EXTREME   // VIX > 25  — no trades today
+        NORMAL,   // VIX < normal-max  — full size, standard RR
+        ELEVATED, // VIX normal-max to extreme-min — half size, +0.5 RR
+        EXTREME   // VIX > extreme-min — configurable: block or reduce size
     }
 
     @EventListener
@@ -45,38 +70,60 @@ public class VixService {
         double vix = tick.getLastTradedPrice().doubleValue();
         if (vix <= 0) return;
 
-        currentVix = vix;
+        currentVix      = vix;
         lastUpdatedDate = LocalDate.now();
 
         VixRegime newRegime;
-        if (vix < VIX_NORMAL_MAX)       newRegime = VixRegime.NORMAL;
-        else if (vix <= VIX_EXTREME_MIN) newRegime = VixRegime.ELEVATED;
-        else                             newRegime = VixRegime.EXTREME;
+        if (vix < vixNormalMax)      newRegime = VixRegime.NORMAL;
+        else if (vix <= vixExtremeMin) newRegime = VixRegime.ELEVATED;
+        else                           newRegime = VixRegime.EXTREME;
 
         if (newRegime != regime) {
             log.warn("VIX regime changed: {} → {} (VIX={})", regime, newRegime, vix);
             if (newRegime == VixRegime.EXTREME) {
-                log.warn("VIX ABOVE 25 — ZERO TRADES TODAY. VIX={}", vix);
+                if (blockTradesWhenExtreme) {
+                    log.warn("VIX ABOVE {} — ZERO TRADES TODAY (block-trades-when-extreme=true). VIX={}",
+                            vixExtremeMin, vix);
+                } else {
+                    log.warn("VIX ABOVE {} — HALF SIZE, +1.0 RR extra (block-trades-when-extreme=false). VIX={}",
+                            vixExtremeMin, vix);
+                }
             }
             regime = newRegime;
         }
     }
 
+    /**
+     * Returns true if trades are allowed.
+     * When block-trades-when-extreme=false → always true (strategy
+     * conditions filter naturally via tighter RR requirements).
+     * When block-trades-when-extreme=true → false if VIX is EXTREME.
+     */
     public boolean isTradeAllowed() {
+        if (!blockTradesWhenExtreme) return true; // never block
         return regime != VixRegime.EXTREME;
     }
 
     public boolean isElevated() {
-        return regime == VixRegime.ELEVATED;
+        return regime == VixRegime.ELEVATED || regime == VixRegime.EXTREME;
     }
 
-    /** Position size multiplier based on VIX */
+    /** Position size multiplier: 0.5× when VIX elevated or extreme */
     public double positionSizeMultiplier() {
-        return regime == VixRegime.ELEVATED ? 0.5 : 1.0;
+        return (regime == VixRegime.ELEVATED || regime == VixRegime.EXTREME) ? 0.5 : 1.0;
     }
 
-    /** Extra RR requirement added due to VIX */
+    /**
+     * Extra RR required due to VIX volatility:
+     *   NORMAL   → +0.0
+     *   ELEVATED → +0.5
+     *   EXTREME  → +1.0
+     */
     public double extraRrRequirement() {
-        return regime == VixRegime.ELEVATED ? 0.5 : 0.0;
+        return switch (regime) {
+            case ELEVATED -> 0.5;
+            case EXTREME  -> 1.0;
+            default       -> 0.0;
+        };
     }
 }

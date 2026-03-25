@@ -27,40 +27,53 @@
           border: 1px solid #1e2a38;
           border-radius: 12px;
           padding: 44px 40px;
-          width: 100%; max-width: 380px;
+          width: 100%; max-width: 400px;
         }
         .logo { font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 800; color: #fff; letter-spacing: -0.5px; margin-bottom: 6px; }
         .logo span { color: #00d4aa; }
         .subtitle { font-size: 11px; color: #4a5568; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 36px; }
         .field { margin-bottom: 16px; }
         label { display: block; font-size: 10px; letter-spacing: 1.2px; text-transform: uppercase; color: #4a5568; margin-bottom: 6px; }
-        input {
+        input[type="text"], input[type="password"] {
           width: 100%; padding: 10px 14px;
           background: #080c10; border: 1px solid #1e2a38; border-radius: 6px;
           color: #cdd9e5; font-family: 'JetBrains Mono', monospace; font-size: 13px;
           outline: none; transition: border-color 0.2s;
         }
-        input:focus { border-color: #00d4aa; }
+        input[type="text"]:focus, input[type="password"]:focus { border-color: #00d4aa; }
         input::placeholder { color: #2d3748; }
+
+        /* Remember me checkbox */
+        .remember-row {
+          display: flex; align-items: center; gap: 10px;
+          margin-bottom: 20px; cursor: pointer;
+        }
+        .remember-row input[type="checkbox"] {
+          width: 16px; height: 16px; cursor: pointer;
+          accent-color: #00d4aa;
+        }
+        .remember-row span { font-size: 11px; color: #4a5568; }
+
         .btn {
           width: 100%; padding: 11px;
           background: #00d4aa; border: none; border-radius: 6px;
           color: #080c10; font-family: 'JetBrains Mono', monospace;
           font-size: 13px; font-weight: 700; letter-spacing: 0.5px;
-          cursor: pointer; margin-top: 8px; transition: background 0.2s;
+          cursor: pointer; transition: background 0.2s;
         }
         .btn:hover { background: #00bfa0; }
-        .error {
-          background: rgba(255,61,113,0.08); border: 1px solid rgba(255,61,113,0.25);
-          border-radius: 6px; padding: 10px 14px; color: #ff3d71;
+
+        /* Message boxes */
+        .msg {
+          border-radius: 6px; padding: 10px 14px;
           font-size: 12px; margin-bottom: 20px; display: none;
         }
-        .success {
-          background: rgba(0,212,170,0.08); border: 1px solid rgba(0,212,170,0.25);
-          border-radius: 6px; padding: 10px 14px; color: #00d4aa;
-          font-size: 12px; margin-bottom: 20px; display: none;
-        }
+        .msg.error   { background: rgba(255,61,113,0.08); border: 1px solid rgba(255,61,113,0.25); color: #ff3d71; }
+        .msg.success { background: rgba(0,212,170,0.08);  border: 1px solid rgba(0,212,170,0.25);  color: #00d4aa; }
+        .msg.warn    { background: rgba(255,165,2,0.08);  border: 1px solid rgba(255,165,2,0.25);  color: #ffa502; }
+
         .footer { margin-top: 28px; padding-top: 20px; border-top: 1px solid #1e2a38; font-size: 10px; color: #2d3748; text-align: center; letter-spacing: 0.5px; }
+        .session-info { margin-top: 12px; font-size: 10px; color: #2d3748; text-align: center; }
     </style>
 </head>
 <body>
@@ -68,10 +81,13 @@
     <div class="logo">⚡ TRADING<span>PLATFORM</span></div>
     <div class="subtitle">Secure Dashboard Access</div>
 
-    <div class="error" id="errorMsg">Invalid username or password</div>
-    <div class="success" id="successMsg">Logged out successfully</div>
+    <!-- Messages -->
+    <div class="msg error"   id="errorMsg">Invalid username or password</div>
+    <div class="msg success" id="successMsg">Logged out successfully</div>
+    <div class="msg warn"    id="sessionMsg">⏱ Session expired — please login again</div>
 
-    <form action="/login" method="post">
+    <!-- Login form -->
+    <form action="/login" method="post" id="loginForm">
         <div class="field">
             <label>Username</label>
             <input type="text" name="username" placeholder="Enter username" autofocus/>
@@ -80,27 +96,34 @@
             <label>Password</label>
             <input type="password" name="password" placeholder="Enter password"/>
         </div>
-        <!-- CSRF token for Spring Security -->
-        <input type="hidden" id="csrfToken" name="_csrf" value=""/>
+
+        <!-- FIX: Remember Me checkbox — stays logged in for 30 days -->
+        <label class="remember-row">
+            <input type="checkbox" name="remember-me" id="rememberMe" checked/>
+            <span>Keep me logged in for 30 days</span>
+        </label>
+
         <button type="submit" class="btn">LOGIN →</button>
     </form>
 
+    <div class="session-info">Session stays active for 8 hours · Remember Me = 30 days</div>
     <div class="footer">Indian Intraday Trading Platform · Secured</div>
 </div>
 
 <script>
-    // Show error/logout messages from URL params
+    // Show appropriate message based on URL params
     const params = new URLSearchParams(window.location.search);
-    if (params.has('error'))  document.getElementById('errorMsg').style.display  = 'block';
-    if (params.has('logout')) document.getElementById('successMsg').style.display = 'block';
+    if (params.has('error'))   document.getElementById('errorMsg').style.display   = 'block';
+    if (params.has('logout'))  document.getElementById('successMsg').style.display = 'block';
+    if (params.has('session')) document.getElementById('sessionMsg').style.display = 'block';
 
-    // Fetch CSRF token from Spring Security endpoint
-    fetch('/csrf-token')
-      .then(r => r.json())
-      .then(data => {
-        if (data.token) document.getElementById('csrfToken').value = data.token;
-      })
-      .catch(() => {});
+    // If API returned 401 (session expired while on dashboard),
+    // the dashboard redirects here with ?session=expired
+    if (params.get('session') === 'expired') {
+        document.getElementById('sessionMsg').style.display = 'block';
+        // Pre-check remember-me for convenience
+        document.getElementById('rememberMe').checked = true;
+    }
 </script>
 </body>
 </html>

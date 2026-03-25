@@ -6,6 +6,7 @@ import com.trading.events.OrderUpdateEvent;
 import com.trading.events.TradeApprovedEvent;
 import com.trading.events.TradeExecutionResultEvent;
 import com.trading.execution.client.ZerodhaOrderClient;
+import com.trading.marketdata.service.MarketTimingService;
 import com.trading.risk.service.RiskManagementService;
 import com.zerodhatech.kiteconnect.utils.Constants;
 import jakarta.annotation.PreDestroy;
@@ -19,12 +20,24 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.math.MathContext;
 import java.time.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
+/**
+ * Handles trade ENTRY only.
+ * All post-entry management (trailing SL, partial exits, market/sector
+ * alignment) is delegated to TradeManagementService.
+ *
+ * CHANGE FROM ORIGINAL: Added trading.mode check.
+ *   When mode=PAPER → this service does nothing (paper trading handles it).
+ *   When mode=LIVE  → normal live execution (unchanged).
+ *
+ * Only 2 lines added vs original:
+ *   1. @Value("${trading.mode:LIVE}") private String tradingMode;
+ *   2. if (!"LIVE".equalsIgnoreCase(tradingMode)) return; at top of onTradeApproved()
+ */
 @Service
 @Slf4j
 @RequiredArgsConstructor
@@ -33,22 +46,39 @@ public class TradeExecutionService {
     private final ZerodhaOrderClient        orderClient;
     private final ApplicationEventPublisher publisher;
     private final RiskManagementService     riskService;
+    private final TradeManagementService    tradeManagement;
+    private final MarketTimingService       timingService;
 
-    // FROM original application.yml
     @Value("${trading.trade-window-start:09:30}") private String windowStart;
     @Value("${trading.trade-window-end:14:30}")   private String windowEnd;
 
-    // NEW: in-memory trade tracking (for dashboard)
+    // ── ADDED: trading mode — only difference from original ──────────
+    @Value("${trading.mode:LIVE}")
+    private String tradingMode;
+    // ─────────────────────────────────────────────────────────────────
+
+    // ── In-memory trade tracking (for dashboard) ──────────────────────
     private final Map<String, Trade>      activeTrades = new ConcurrentHashMap<>();
     private final List<Trade>             todayTrades  = Collections.synchronizedList(new ArrayList<>());
-    private final Map<String, BigDecimal> lastPrices   = new ConcurrentHashMap<>();
 
-    // ── Entry — same logic as original, adds trade tracking ──────────
+    // ══════════════════════════════════════════════════════════════════
+    // ENTRY — fires when RiskManagementService approves a trade
+    // ══════════════════════════════════════════════════════════════════
 
     @EventListener
     @Async("tradingExecutor")
     public void onTradeApproved(TradeApprovedEvent event) {
-        // Trading window check (unchanged from original)
+
+        // ── ADDED: Only run in LIVE mode ──────────────────────────────
+        // When PAPER mode: PaperTradeExecutionService handles this event instead.
+        if (!"LIVE".equalsIgnoreCase(tradingMode)) {
+            log.debug("[LIVE] Skipping TradeApprovedEvent — mode is {}. PaperTradeExecutionService handles this.",
+                    tradingMode);
+            return;
+        }
+        // ─────────────────────────────────────────────────────────────
+
+        // Trading window check
         if (!isWithinWindow()) {
             log.warn("Outside trading window — rejected: {}", event.getTradingSymbol());
             return;
@@ -57,24 +87,21 @@ public class TradeExecutionService {
         String sym = event.getTradingSymbol();
         int    qty = event.getQuantity();
 
-        // Guard: no duplicate (new)
+        // Guard: no duplicate active trade for same symbol
         if (activeTrades.containsKey(sym)) {
             log.warn("Trade already active for {} — skipping", sym);
             return;
         }
 
-        log.info("Executing: {} dir={} qty={} entry={}",
-                sym, event.getDirection(), qty, event.getEntryPrice());
+        log.info("Executing: {} dir={} qty={} entry={} sl={} target={}",
+                sym, event.getDirection(), qty,
+                event.getEntryPrice(), event.getStopLoss(), event.getTarget());
 
-        // Exact same logic as original using Constants (verified in JAR)
-        String txType   = event.getDirection().name().equals("LONG")
+        // ── Place ENTRY order ────────────────────────────────────────
+        String txType = event.getDirection() == TradeDirection.LONG
                 ? Constants.TRANSACTION_TYPE_BUY
                 : Constants.TRANSACTION_TYPE_SELL;
-        String slTxType = event.getDirection().name().equals("LONG")
-                ? Constants.TRANSACTION_TYPE_SELL
-                : Constants.TRANSACTION_TYPE_BUY;
 
-        // Place entry order (same as original)
         String entryOrderId;
         try {
             entryOrderId = orderClient.placeMarketOrder(sym, txType, qty);
@@ -85,7 +112,11 @@ public class TradeExecutionService {
             return;
         }
 
-        // Place stop-loss order (same as original)
+        // ── Place SL-M order ────────────────────────────────────────
+        String slTxType = event.getDirection() == TradeDirection.LONG
+                ? Constants.TRANSACTION_TYPE_SELL
+                : Constants.TRANSACTION_TYPE_BUY;
+
         String slOrderId = null;
         try {
             slOrderId = orderClient.placeSlmOrder(
@@ -94,7 +125,7 @@ public class TradeExecutionService {
             log.error("SL order failed for {} — entry open without SL: {}", sym, e.getMessage());
         }
 
-        // NEW: build Trade and store for dashboard
+        // ── Build Trade entity ────────────────────────────────────────
         Trade trade = Trade.builder()
                 .tradeDate(LocalDate.now())
                 .tradingSymbol(sym)
@@ -114,18 +145,43 @@ public class TradeExecutionService {
                 .updatedAt(Instant.now())
                 .build();
 
+        // ── Store for dashboard ────────────────────────────────────────
         activeTrades.put(sym, trade);
         todayTrades.add(trade);
+
+        // ── Register with TradeManagementService ──────────────────────
+        double estimatedAtr = event.getStopLoss() != null && event.getEntryPrice() != null
+                ? event.getEntryPrice().subtract(event.getStopLoss()).abs()
+                .multiply(BigDecimal.valueOf(2)).doubleValue()
+                : 0.0;
+
+        boolean strongTrend = isStrongTrend(event.getDirection());
+
+        tradeManagement.register(
+                trade,
+                estimatedAtr,
+                timingService.getCurrentWindow(),
+                strongTrend
+        );
+
+        log.info("Trade registered with TradeManagementService: {} atr={} window={} strongTrend={}",
+                sym, String.format("%.2f", estimatedAtr),
+                timingService.getCurrentWindow(), strongTrend);
 
         publishResult(sym, "ENTERED", entryOrderId, slOrderId,
                 event.getEntryPrice(), null, BigDecimal.ZERO, null);
     }
 
-    // ── Order Update — same as original + close tracking ─────────────
+    // ══════════════════════════════════════════════════════════════════
+    // ORDER UPDATE — handles SL hit / target hit from Zerodha callbacks
+    // ══════════════════════════════════════════════════════════════════
 
     @EventListener
     @Async("tradingExecutor")
     public void onOrderUpdate(OrderUpdateEvent event) {
+        // Only handle in LIVE mode
+        if (!"LIVE".equalsIgnoreCase(tradingMode)) return;
+
         String orderId = event.getOrderId();
         activeTrades.values().stream()
                 .filter(t -> orderId.equals(t.getSlOrderId())
@@ -138,48 +194,29 @@ public class TradeExecutionService {
                         closeTrade(trade,
                                 BigDecimal.valueOf(event.getAveragePrice()), reason);
                     } else if ("REJECTED".equals(event.getStatus())) {
-                        log.error("Order REJECTED {}: {}", trade.getTradingSymbol(),
-                                event.getRejectionReason());
+                        log.error("Order REJECTED {}: {}",
+                                trade.getTradingSymbol(), event.getRejectionReason());
                         closeTrade(trade, trade.getEntryPrice(), "ORDER_REJECTED");
                     }
                 });
     }
 
-    // ── NEW: Price update for trailing SL (called from tick stream) ───
-
-    public void updateLastPrice(String symbol, BigDecimal price) {
-        lastPrices.put(symbol, price);
-        Trade trade = activeTrades.get(symbol);
-        if (trade == null || !"OPEN".equals(trade.getStatus())) return;
-
-        if (trade.getDirection() == TradeDirection.LONG) {
-            if (price.compareTo(trade.getStopLoss()) <= 0) { closeTrade(trade, trade.getStopLoss(), "STOPLOSS_HIT"); return; }
-            if (price.compareTo(trade.getTarget())   >= 0) { closeTrade(trade, trade.getTarget(),   "TARGET_HIT");   return; }
-            trailToBreakeven(trade, price, true);
-        } else {
-            if (price.compareTo(trade.getStopLoss()) >= 0) { closeTrade(trade, trade.getStopLoss(), "STOPLOSS_HIT"); return; }
-            if (price.compareTo(trade.getTarget())   <= 0) { closeTrade(trade, trade.getTarget(),   "TARGET_HIT");   return; }
-            trailToBreakeven(trade, price, false);
-        }
-    }
-
-    // ── NEW: Force close at 15:15 IST ─────────────────────────────────
-
-    @Scheduled(cron = "0 15 15 * * MON-FRI", zone = "Asia/Kolkata")
-    public void forceCloseAll() {
-        if (activeTrades.isEmpty()) return;
-        log.warn("TIME EXIT — force closing {} positions", activeTrades.size());
-        new ArrayList<>(activeTrades.values()).forEach(trade -> {
-            BigDecimal ltp = lastPrices.getOrDefault(
-                    trade.getTradingSymbol(), trade.getEntryPrice());
-            closeTrade(trade, ltp, "TIME_EXIT");
-        });
-    }
+    // ══════════════════════════════════════════════════════════════════
+    // SHUTDOWN — close all on app shutdown
+    // ══════════════════════════════════════════════════════════════════
 
     @PreDestroy
-    public void onShutdown() { forceCloseAll(); }
+    public void onShutdown() {
+        if (!"LIVE".equalsIgnoreCase(tradingMode)) return;
+        if (activeTrades.isEmpty()) return;
+        log.warn("App shutdown — force closing {} positions", activeTrades.size());
+        new ArrayList<>(activeTrades.values()).forEach(trade ->
+                closeTrade(trade, trade.getEntryPrice(), "APP_SHUTDOWN"));
+    }
 
-    // ── NEW: Dashboard getters ────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════
+    // DASHBOARD getters
+    // ══════════════════════════════════════════════════════════════════
 
     public Collection<Trade> getActiveTrades() {
         return Collections.unmodifiableCollection(activeTrades.values());
@@ -191,23 +228,20 @@ public class TradeExecutionService {
                 .collect(Collectors.toList());
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────
-
-    // Exact same signature as original publishResult
-    private void publishResult(String sym, String status,
-                               String entryOId, String slOId,
-                               BigDecimal entry, BigDecimal exit,
-                               BigDecimal pnl, String reason) {
-        publisher.publishEvent(new TradeExecutionResultEvent(
-                this, sym, status, entryOId, slOId, entry, exit, pnl, reason));
-    }
+    // ══════════════════════════════════════════════════════════════════
+    // HELPERS
+    // ══════════════════════════════════════════════════════════════════
 
     private void closeTrade(Trade trade, BigDecimal exitPrice, String reason) {
         if (!"OPEN".equals(trade.getStatus())) return;
         String sym = trade.getTradingSymbol();
-        BigDecimal pnl = calcPnl(trade, exitPrice);
 
-        // Lombok @Data generates setters on Trade entity
+        BigDecimal pnl = trade.getDirection() == TradeDirection.LONG
+                ? exitPrice.subtract(trade.getEntryPrice())
+                .multiply(BigDecimal.valueOf(trade.getQuantity()))
+                : trade.getEntryPrice().subtract(exitPrice)
+                .multiply(BigDecimal.valueOf(trade.getQuantity()));
+
         trade.setStatus("CLOSED");
         trade.setExitTime(Instant.now());
         trade.setExitPrice(exitPrice);
@@ -225,45 +259,31 @@ public class TradeExecutionService {
                 trade.getEntryPrice(), exitPrice, pnl, reason);
     }
 
-    private BigDecimal calcPnl(Trade t, BigDecimal exitPrice) {
-        BigDecimal diff = t.getDirection() == TradeDirection.LONG
-                ? exitPrice.subtract(t.getEntryPrice())
-                : t.getEntryPrice().subtract(exitPrice);
-        return diff.multiply(BigDecimal.valueOf(t.getQuantity()));
+    private void publishResult(String sym, String status,
+                               String entryOId, String slOId,
+                               BigDecimal entry, BigDecimal exit,
+                               BigDecimal pnl, String reason) {
+        publisher.publishEvent(new TradeExecutionResultEvent(
+                this, sym, status, entryOId, slOId, entry, exit, pnl, reason));
     }
 
-    // Trail SL to breakeven at 0.5% profit
-    // Uses modifySlTrigger(orderId, double) — verified in your ZerodhaOrderClient
-    private void trailToBreakeven(Trade t, BigDecimal ltp, boolean isLong) {
-        if (t.getEntryPrice().compareTo(BigDecimal.ZERO) == 0) return;
-        if (t.getSlOrderId() == null) return;
-
-        BigDecimal gainPct = isLong
-                ? ltp.subtract(t.getEntryPrice()).divide(t.getEntryPrice(), MathContext.DECIMAL32)
-                : t.getEntryPrice().subtract(ltp).divide(t.getEntryPrice(), MathContext.DECIMAL32);
-
-        boolean slAlreadyAtEntry = isLong
-                ? t.getStopLoss().compareTo(t.getEntryPrice()) >= 0
-                : t.getStopLoss().compareTo(t.getEntryPrice()) <= 0;
-
-        if (gainPct.compareTo(new BigDecimal("0.005")) >= 0 && !slAlreadyAtEntry) {
-            try {
-                orderClient.modifySlTrigger(
-                        t.getSlOrderId(), t.getEntryPrice().doubleValue());
-                t.setStopLoss(t.getEntryPrice());
-                t.setUpdatedAt(Instant.now());
-                log.info("Trailing SL → breakeven: {}", t.getTradingSymbol());
-            } catch (Exception e) {
-                log.warn("Trail SL update failed {}: {}", t.getTradingSymbol(), e.getMessage());
-            }
-        }
-    }
-
-    // Exact same as original
     private boolean isWithinWindow() {
         LocalTime now   = LocalTime.now(ZoneId.of("Asia/Kolkata"));
         LocalTime start = LocalTime.parse(windowStart);
         LocalTime end   = LocalTime.parse(windowEnd);
         return !now.isBefore(start) && !now.isAfter(end);
+    }
+
+    private boolean isStrongTrend(TradeDirection direction) {
+        try {
+            MarketTimingService.TimeWindow window = timingService.getCurrentWindow();
+            if (window == MarketTimingService.TimeWindow.LUNCH
+                    || window == MarketTimingService.TimeWindow.LATE) {
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

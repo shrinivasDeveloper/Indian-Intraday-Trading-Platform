@@ -10,6 +10,7 @@ import com.trading.risk.service.CircuitBreakerService;
 import com.trading.scanner.service.SevenGateScannerService;
 import com.trading.sector.service.SectorClassificationService;
 import com.trading.sector.service.SectorStrengthService;
+import com.trading.strategy.StrategyEvaluatorService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,103 +23,87 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.*;
 
+/**
+ * DashboardController — updated.
+ *
+ * New additions (all original endpoints preserved):
+ *   - strategyStatus panel in /snapshot
+ *   - perStrategyPnl in /snapshot
+ *   - GET /api/dashboard/strategy-performance
+ *
+ * isTopSector / isBottomSector now included in sector data
+ * (from updated SectorStrengthService).
+ */
 @RestController
 @RequestMapping("/api/dashboard")
-@RequiredArgsConstructor
 @Slf4j
+@RequiredArgsConstructor
 public class DashboardController {
 
-    private final MarketDirectionService      marketDirection;
-    private final CircuitBreakerService       circuitBreaker;
-    private final MarketDataService           marketDataService;
-    private final SectorStrengthService       sectorStrength;
-    private final SectorClassificationService sectorClassify;
     private final TradeExecutionService       tradeExecution;
     private final TradeManagementService      tradeManagement;
+    private final MarketDataService           marketDataService;
     private final VixService                  vixService;
     private final MarketTimingService         timingService;
+    private final MarketDirectionService      marketDir;
+    private final CircuitBreakerService       circuitBreaker;
     private final SevenGateScannerService     scanner;
+    private final SectorStrengthService       sectorStrength;
+    private final SectorClassificationService sectorClassify;
+    private final StrategyEvaluatorService    strategyEvaluator;
 
-    @Value("${trading.capital:100000}")
-    private String capitalStr;
+    @Value("${trading.capital:100000}") private BigDecimal capital;
 
-    @Value("${zerodha.account-id:}")
-    private String accountId;
-
-    // ── Full snapshot ─────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════
+    // GET /api/dashboard/snapshot
+    // ══════════════════════════════════════════════════════════════════════
 
     @GetMapping("/snapshot")
     public ResponseEntity<Map<String, Object>> snapshot() {
         Map<String, Object> data = new LinkedHashMap<>();
-        BigDecimal capital = new BigDecimal(capitalStr);
+        data.put("timestamp", Instant.now().toString());
 
-        // ── System ────────────────────────────────────────────────────
-        Map<String, Object> system = new LinkedHashMap<>();
-        system.put("websocketConnected",   marketDataService.isConnected());
-        system.put("circuitBreakerActive", circuitBreaker.isActive());
-        system.put("circuitBreakerReason", nullSafe(circuitBreaker.getDisableReason()));
-        system.put("currentWindow",        timingService.getCurrentWindowName());
-        system.put("entryAllowed",         timingService.isEntryAllowed());
-        system.put("vix",                  vixService.getCurrentVix());
-        system.put("vixRegime",            vixService.getRegime().name());
-        system.put("accountId",            accountId);
-        system.put("timestamp",            Instant.now().toString());
-        data.put("system", system);
+        // ── Market ───────────────────────────────────────────────────────
+        MarketDirectionService.MarketDirectionResult dir = marketDir.getCurrentDirection();
+        Map<String, Object> market = new LinkedHashMap<>();
+        market.put("direction",     dir.direction().name());
+        market.put("label",         regimeLabel(dir.direction()));
+        market.put("niftyBullish",  dir.niftyBullish());
+        market.put("niftyBearish",  dir.niftyBearish());
+        market.put("niftyEma20",    round2(dir.niftyEma20()));
+        market.put("niftyEma50",    round2(dir.niftyEma50()));
+        market.put("niftyEma200",   round2(dir.niftyEma200()));
+        market.put("niftyAtrPct",   round2(dir.niftyAtrPct()));
+        market.put("failReason",    nullSafe(dir.failReason()));
+        market.put("vix",           vixService.getCurrentVix());
+        market.put("vixRegime",     vixService.getRegime().name());
+        market.put("window",        timingService.getCurrentWindowName());
+        market.put("entryAllowed",  timingService.isEntryAllowed());
+        data.put("market", market);
 
-        // ── Regime ────────────────────────────────────────────────────
-        MarketDirectionService.MarketDirectionResult dir =
-                marketDirection.getCurrentDirection();
-        Map<String, Object> regime = new LinkedHashMap<>();
-        regime.put("name",            dir.direction().name());
-        regime.put("label",           regimeLabel(dir.direction()));
-        regime.put("tradeable",       dir.isTradeable());
-        regime.put("longFavourable",  dir.isLong());
-        regime.put("shortFavourable", dir.isShort());
-        regime.put("failReason",      nullSafe(dir.failReason()));
-        regime.put("niftyAtrPct",     dir.niftyAtrPct());
-//        regime.put("bankNiftyAtrPct", dir.bankNiftyAtrPct());
-        regime.put("niftyEma20",      dir.niftyEma20());
-        regime.put("niftyEma50",      dir.niftyEma50());
-        regime.put("niftyEma200",     dir.niftyEma200());
-        data.put("regime", regime);
-
-        // ── Market direction detail ───────────────────────────────────
-        Map<String, Object> mktDir = new LinkedHashMap<>();
-        mktDir.put("niftyEma20",      dir.niftyEma20());
-        mktDir.put("niftyEma50",      dir.niftyEma50());
-        mktDir.put("niftyEma200",     dir.niftyEma200());
-        mktDir.put("niftyAtrPct",     dir.niftyAtrPct());
-//        mktDir.put("bankNiftyAtrPct", dir.bankNiftyAtrPct());
-        data.put("marketDirection", mktDir);
-
-        // ── P&L ───────────────────────────────────────────────────────
+        // ── P&L ──────────────────────────────────────────────────────────
         BigDecimal dailyPnl   = circuitBreaker.getDailyPnl();
         BigDecimal weeklyPnl  = circuitBreaker.getWeeklyPnl();
         BigDecimal monthlyPnl = circuitBreaker.getMonthlyPnl();
-        double     dailyPct   = pct(dailyPnl, capital);
-
         Map<String, Object> pnl = new LinkedHashMap<>();
         pnl.put("capital",         capital);
         pnl.put("dailyPnl",        dailyPnl);
         pnl.put("weeklyPnl",       weeklyPnl);
         pnl.put("monthlyPnl",      monthlyPnl);
-        pnl.put("dailyPct",        dailyPct);
+        pnl.put("dailyPct",        pct(dailyPnl, capital));
         pnl.put("tradesToday",     circuitBreaker.getTradesToday());
         pnl.put("maxTradesPerDay", circuitBreaker.getMaxPerDay());
         pnl.put("cbActive",        circuitBreaker.isActive());
         pnl.put("cbReason",        nullSafe(circuitBreaker.getDisableReason()));
-        pnl.put("vix",             vixService.getCurrentVix());
-        pnl.put("currentWindow",   timingService.getCurrentWindowName());
         data.put("pnl", pnl);
 
-        // ── Sectors ───────────────────────────────────────────────────
+        // ── Sectors ──────────────────────────────────────────────────────
         List<Map<String, Object>> sectors = new ArrayList<>();
-        for (String sectorName : sectorClassify.getAllSectorNames()) {
-            SectorStrengthService.SectorData sd = sectorStrength.getSector(sectorName);
+        for (String sn : sectorClassify.getAllSectorNames()) {
+            SectorStrengthService.SectorData sd = sectorStrength.getSector(sn);
             Map<String, Object> s = new LinkedHashMap<>();
-            s.put("name",             sectorName);
-            // Use alignedBullish/Bearish — no .classification() method
-            s.put("classification",   sectorClassification(sd));
+            s.put("name",             sn);
+            s.put("classification",   sectorLabel(sd));
             s.put("changePercent",    round2(sd.changePercent()));
             s.put("relativeStrength", round2(sd.relativeStrength()));
             s.put("greenPct",         String.format("%.1f", sd.greenPct()));
@@ -127,56 +112,58 @@ public class DashboardController {
             s.put("redStocks",        sd.redStocks());
             s.put("alignedBullish",   sd.alignedBullish());
             s.put("alignedBearish",   sd.alignedBearish());
+            s.put("isTopSector",      sd.isTopSector());
+            s.put("isBottomSector",   sd.isBottomSector());
             sectors.add(s);
         }
         data.put("sectors", sectors);
 
-        // ── Active trades with live unrealized P&L ────────────────────
+        // ── Active trades ────────────────────────────────────────────────
         Map<String, BigDecimal> prices = marketDataService.getLastPricesSimple();
-
         List<Map<String, Object>> activeTrades = new ArrayList<>();
         for (TradeManagementService.ManagedTrade mt : tradeManagement.getActiveTrades()) {
             var t = mt.trade();
-            BigDecimal ltp = prices.getOrDefault(
-                    t.getTradingSymbol(), t.getEntryPrice());
-
-            BigDecimal unrealizedPnl = t.getDirection().name().equals("LONG")
-                    ? ltp.subtract(t.getEntryPrice())
-                    .multiply(BigDecimal.valueOf(mt.remainingQty()))
-                    : t.getEntryPrice().subtract(ltp)
-                    .multiply(BigDecimal.valueOf(mt.remainingQty()));
-
+            BigDecimal ltp = prices.getOrDefault(t.getTradingSymbol(), t.getEntryPrice());
+            BigDecimal unrealPnl = t.getDirection().name().equals("LONG")
+                    ? ltp.subtract(t.getEntryPrice()).multiply(BigDecimal.valueOf(mt.remainingQty()))
+                    : t.getEntryPrice().subtract(ltp).multiply(BigDecimal.valueOf(mt.remainingQty()));
             double rDist = mt.rDistance().doubleValue();
-            double rMult = rDist > 0
-                    ? unrealizedPnl.doubleValue() / rDist / mt.remainingQty()
-                    : 0;
-
-            String phase = rMult >= 2.0 ? "Trail 0.5ATR"
-                    : rMult >= 1.5          ? "Trail 1ATR"
-                    : rMult >= 1.0          ? "Breakeven"
-                    :                         "Survival";
-
+            double rMult = rDist > 0 ? unrealPnl.doubleValue() / rDist / mt.remainingQty() : 0;
+            String phase = rMult >= 4.0 ? "Trail 0.5ATR (4R+)"
+                    : rMult >= 3.0 ? "Trailing (3R+)"
+                    : rMult >= 1.0 ? "Breakeven"
+                    : "Survival";
             Map<String, Object> tr = new LinkedHashMap<>();
             tr.put("tradingSymbol",  t.getTradingSymbol());
             tr.put("direction",      t.getDirection().name());
+            tr.put("strategyName",   t.getStrategyName());
             tr.put("quantity",       t.getQuantity());
             tr.put("remainingQty",   mt.remainingQty());
             tr.put("entryPrice",     t.getEntryPrice());
             tr.put("ltp",            ltp);
             tr.put("stopLoss",       t.getStopLoss());
             tr.put("target",         t.getTarget());
-            tr.put("unrealizedPnl",  unrealizedPnl);
-            tr.put("rMultiple",      String.format("%.2f", rMult));
+            tr.put("unrealizedPnl",  unrealPnl);
+            tr.put("rMultiple",      String.format("%.2fR", rMult));
             tr.put("tradePhase",     phase);
+            tr.put("slAtBreakeven",  mt.slAtBreakeven());
+            tr.put("trailActive",    mt.trailActive());
             tr.put("status",         "OPEN");
             activeTrades.add(tr);
         }
         data.put("activeTrades", activeTrades);
 
-        // ── Today's trades ────────────────────────────────────────────
+        // ── Today's closed trades ─────────────────────────────────────────
         data.put("todayTrades", tradeExecution.getTodayTrades(LocalDate.now()));
 
-        // ── Armed stocks ──────────────────────────────────────────────
+        // ── Strategy status panel (NEW) ───────────────────────────────────
+        Map<String, Object> strategyStatus = new LinkedHashMap<>();
+        strategyStatus.put("firedToday",      strategyEvaluator.getFiredToday());
+        strategyStatus.put("perStrategyPnl",  buildStrategyPnl());
+        strategyStatus.put("strategySummary", buildStrategySummary());
+        data.put("strategyStatus", strategyStatus);
+
+        // ── Armed stocks (7-gate scanner) ─────────────────────────────────
         Map<String, Object> armedMap = new LinkedHashMap<>();
         scanner.getArmedStocks().forEach((sym, armed) -> {
             Map<String, Object> a = new LinkedHashMap<>();
@@ -193,26 +180,21 @@ public class DashboardController {
             a.put("isReentry",       armed.isReentry());
             armedMap.put(sym, a);
         });
-        data.put("armedStocks", armedMap);
+        data.put("armedStocks",     armedMap);
+        data.put("gateRejections",  scanner.getGateRejections());
 
-        // ── Gate rejections ───────────────────────────────────────────
-        data.put("gateRejections", scanner.getGateRejections());
-
-        // ── Gate status (overview tab) ────────────────────────────────
+        // ── Gate status ───────────────────────────────────────────────────
         Map<Integer, String> gateStatus = new LinkedHashMap<>();
         gateStatus.put(1, dir.isTradeable() ? "PASS" : "FAIL");
-        gateStatus.put(2, "WAIT");
-        gateStatus.put(3, "WAIT");
-        gateStatus.put(4, "WAIT");
-        gateStatus.put(5, "WAIT");
-        gateStatus.put(6, "WAIT");
-        gateStatus.put(7, "WAIT");
+        for (int i = 2; i <= 7; i++) gateStatus.put(i, "WAIT");
         data.put("gateStatus", gateStatus);
 
         return ResponseEntity.ok(data);
     }
 
-    // ── Live prices ───────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════
+    // GET /api/dashboard/prices
+    // ══════════════════════════════════════════════════════════════════════
 
     @GetMapping("/prices")
     public ResponseEntity<Map<String, Object>> prices() {
@@ -222,7 +204,9 @@ public class DashboardController {
         return ResponseEntity.ok(resp);
     }
 
-    // ── Circuit breaker reset ─────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════
+    // POST /api/dashboard/circuit-breaker/reset
+    // ══════════════════════════════════════════════════════════════════════
 
     @PostMapping("/circuit-breaker/reset")
     public ResponseEntity<String> resetCb() {
@@ -231,11 +215,76 @@ public class DashboardController {
         return ResponseEntity.ok("Circuit breaker reset successfully");
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════
+    // GET /api/dashboard/strategy-performance (NEW)
+    // ══════════════════════════════════════════════════════════════════════
 
-    private double pct(BigDecimal pnl, BigDecimal capital) {
-        if (capital == null || capital.compareTo(BigDecimal.ZERO) == 0) return 0;
-        return pnl.divide(capital, 4, RoundingMode.HALF_UP)
+    @GetMapping("/strategy-performance")
+    public ResponseEntity<Map<String, Object>> strategyPerformance() {
+        Map<String, Object> resp = new LinkedHashMap<>();
+        resp.put("perStrategyPnl",  buildStrategyPnl());
+        resp.put("firedToday",      strategyEvaluator.getFiredToday());
+        resp.put("strategySummary", buildStrategySummary());
+        resp.put("timestamp",       Instant.now().toString());
+        return ResponseEntity.ok(resp);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Helpers
+    // ══════════════════════════════════════════════════════════════════════
+
+    /** Per-strategy P&L breakdown from today's trades */
+    private Map<String, Object> buildStrategyPnl() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        Map<String, Double>  pnlMap   = new LinkedHashMap<>();
+        Map<String, Integer> countMap = new LinkedHashMap<>();
+        Map<String, Integer> winsMap  = new LinkedHashMap<>();
+
+        for (var trade : tradeExecution.getTodayTrades(LocalDate.now())) {
+            String strat = trade.getStrategyName() != null ? trade.getStrategyName() : "UNKNOWN";
+            double pnl   = trade.getNetPnl() != null ? trade.getNetPnl().doubleValue() : 0;
+            pnlMap.merge(strat, pnl, Double::sum);
+            countMap.merge(strat, 1, Integer::sum);
+            if (pnl > 0) winsMap.merge(strat, 1, Integer::sum);
+        }
+
+        pnlMap.forEach((strat, pnl) -> {
+            int cnt  = countMap.getOrDefault(strat, 0);
+            int wins = winsMap.getOrDefault(strat, 0);
+            Map<String, Object> s = new LinkedHashMap<>();
+            s.put("pnl",     String.format("%.2f", pnl));
+            s.put("trades",  cnt);
+            s.put("wins",    wins);
+            s.put("losses",  cnt - wins);
+            s.put("winRate", cnt > 0 ? String.format("%.1f%%", (double) wins / cnt * 100) : "0%");
+            result.put(strat, s);
+        });
+        return result;
+    }
+
+    /** How many signals each strategy fired today */
+    private List<Map<String, Object>> buildStrategySummary() {
+        Set<String> fired = strategyEvaluatorService().getFiredToday();
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (String name : List.of("SCANNER_7GATE", "AUTO_MODE",
+                "RANGE_BREAKOUT_3TOUCH", "ORB_VWAP_SECTOR")) {
+            long count = fired.stream().filter(k -> k.endsWith(":" + name)).count();
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("strategy",   name);
+            m.put("signalsFired", count);
+            list.add(m);
+        }
+        return list;
+    }
+
+    // Spring injects this — helper to avoid duplicate @RequiredArgsConstructor field
+    private StrategyEvaluatorService strategyEvaluatorService() {
+        return strategyEvaluator;
+    }
+
+    private double pct(BigDecimal pnl, BigDecimal cap) {
+        if (cap == null || cap.compareTo(BigDecimal.ZERO) == 0) return 0;
+        return pnl.divide(cap, 4, RoundingMode.HALF_UP)
                 .multiply(BigDecimal.valueOf(100)).doubleValue();
     }
 
@@ -243,9 +292,7 @@ public class DashboardController {
         return BigDecimal.valueOf(val).setScale(2, RoundingMode.HALF_UP);
     }
 
-    private String nullSafe(String val) {
-        return val != null ? val : "";
-    }
+    private String nullSafe(String v) { return v != null ? v : ""; }
 
     private String regimeLabel(MarketDirectionService.Direction d) {
         return switch (d) {
@@ -255,8 +302,7 @@ public class DashboardController {
         };
     }
 
-    /** Derive a classification string from SectorData fields */
-    private String sectorClassification(SectorStrengthService.SectorData sd) {
+    private String sectorLabel(SectorStrengthService.SectorData sd) {
         if (sd.alignedBullish()) return "STRONG";
         if (sd.alignedBearish()) return "WEAK";
         return "NEUTRAL";
