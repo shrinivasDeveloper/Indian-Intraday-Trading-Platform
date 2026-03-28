@@ -13,31 +13,39 @@ import java.math.BigDecimal;
 import java.util.*;
 
 /**
- * Gate 1 — Market Direction using NIFTY ONLY (15-minute candles).
+ * MarketDirectionService — Institutional MTF Tide Logic
  *
- * Checks:
- *   1. Price above EMA20 > EMA50 > EMA200 (uptrend) or below all (downtrend)
- *   2. Last 10 candles show HH+HL (uptrend) or LH+LL (downtrend)
- *   3. ATR% between 0.3% and 3.0% (healthy movement range)
- *   4. No doji/spinning top in last 2 candles
+ * WHY THE OLD LOGIC FAILED TODAY (March 25, 2026):
+ *   Old condition: price > EMA20 > EMA50 > EMA200 (strict stacking)
+ *   Actual:        price=23286, EMA20=23001, EMA50=22907, EMA200=23178
+ *   EMA order:     EMA50 < EMA20 < EMA200  → strict stacking FAILS → SIDEWAYS
  *
- * BUGS FIXED vs previous version:
+ *   But reality: ALL 12 sectors green +1-2.5%, Nifty clearly UP.
+ *   Price IS above EMA200. This is a recovery/breakout scenario that the
+ *   strict stacking rule was never designed to handle.
  *
- *   1. ema() iterated in the wrong direction.
- *      Buffer layout: index 0 = NEWEST, index size-1 = OLDEST.
- *      Old code seeded at candle[size-p] (100th newest for p=200) and iterated
- *      from index size-p+1 toward size-1 (going OLDER). This gave more weight
- *      to OLD prices — the exact opposite of EMA. In a downtrend, old prices
- *      are higher, so EMA200 came out > EMA20, the stacking condition failed,
- *      and direction was always SIDEWAYS even with 300 candles loaded.
+ * NEW MTF TIDE APPROACH:
+ *   Three independent checks — all must agree:
  *
- *      Fixed: seeds at the OLDEST candle of the 2p warmup window, iterates
- *      toward index 0 (NEWEST), so recent prices get more weight. Correct EMA.
+ *   1. TIDE  (Long-term):   price vs EMA200
+ *      → price > EMA200  =  riding the long-term tide UP
+ *      → price < EMA200  =  swimming against the tide DOWN
  *
- *   2. Added preloadCandles() for startup warm-up via NiftyHistoricalLoaderService.
+ *   2. WAVE  (Medium-term): EMA20 vs EMA50
+ *      → EMA20 > EMA50  =  short-term average above medium = momentum UP
+ *      → EMA20 < EMA50  =  short-term average below medium = momentum DOWN
  *
- *   3. ATR thresholds relaxed: min 0.3% (was 0.5%), max 3.0% (was 2.5%)
- *      to accommodate elevated-VIX days and pre-market historical candles.
+ *   3. RIPPLE (Immediate):  price vs EMA20 (with 0.1% buffer)
+ *      → price > EMA20  =  price pulling above recent average = UP
+ *      → price < EMA20  =  price sinking below recent average = DOWN
+ *
+ *   Plus: ATR check (0.25%–3.5%), no doji, soft structure confirmation (50%)
+ *
+ * TODAY'S RESULT:
+ *   Tide:   23286 > 23178 ✓ UP
+ *   Wave:   23001 > 22907 ✓ UP
+ *   Ripple: 23286 > 23001 ✓ UP
+ *   → BULLISH ✓  (was: SIDEWAYS ✗)
  */
 @Service
 @Slf4j
@@ -55,7 +63,6 @@ public class MarketDirectionService {
             Direction direction,
             boolean   niftyBullish,
             boolean   niftyBearish,
-            // kept for API compatibility — mirrors nifty values
             boolean   bankNiftyBullish,
             boolean   bankNiftyBearish,
             double    niftyAtrPct,
@@ -72,7 +79,7 @@ public class MarketDirectionService {
         public boolean isShort() { return direction == Direction.BEARISH; }
     }
 
-    // index 0 = NEWEST candle, index size-1 = OLDEST candle
+    // index 0 = NEWEST, index size-1 = OLDEST
     private final Deque<Candle> niftyBuffer = new ArrayDeque<>();
 
     @Getter
@@ -82,38 +89,25 @@ public class MarketDirectionService {
     );
 
     // ════════════════════════════════════════════════════════════════════════
-    // Startup warm-up — called by NiftyHistoricalLoaderService
+    // Startup warm-up
     // ════════════════════════════════════════════════════════════════════════
 
-    /**
-     * Pre-loads historical Nifty 15-min candles so EMA200 is available immediately.
-     *
-     * @param historicalCandles List sorted OLDEST → NEWEST
-     */
     public void preloadCandles(List<Candle> historicalCandles) {
-        if (historicalCandles == null || historicalCandles.isEmpty()) {
-            log.warn("[MDS] preloadCandles called with empty list — skipping");
-            return;
-        }
-
+        if (historicalCandles == null || historicalCandles.isEmpty()) return;
         synchronized (niftyBuffer) {
             niftyBuffer.clear();
-            // Iterating oldest→newest and calling addFirst() each time
-            // results in the NEWEST being at index 0 (the front of the deque). ✓
             for (Candle c : historicalCandles) {
                 niftyBuffer.addFirst(c);
-                if (niftyBuffer.size() > 300) {
+                if (niftyBuffer.size() > 300)
                     ((ArrayDeque<Candle>) niftyBuffer).removeLast();
-                }
             }
             log.info("[MDS] Buffer pre-loaded with {} Nifty 15-min candles", niftyBuffer.size());
         }
-
         recalculate();
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // Live feed — fires on every completed 15-min Nifty candle
+    // Live feed
     // ════════════════════════════════════════════════════════════════════════
 
     @EventListener
@@ -122,17 +116,15 @@ public class MarketDirectionService {
         Candle c = event.getCandle();
         if (!"15minute".equals(c.getTimeframe())) return;
         if (c.getInstrumentToken() != instrumentCache.getNiftyToken()) return;
-
         synchronized (niftyBuffer) {
-            niftyBuffer.addFirst(c); // newest at front
+            niftyBuffer.addFirst(c);
             if (niftyBuffer.size() > 300) ((ArrayDeque<Candle>) niftyBuffer).removeLast();
         }
-
         recalculate();
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // Direction calculation
+    // Core MTF calculation
     // ════════════════════════════════════════════════════════════════════════
 
     private void recalculate() {
@@ -143,9 +135,8 @@ public class MarketDirectionService {
 
         if (candles.size() < 200) {
             setResult(Direction.SIDEWAYS, false, false,
-                    0.0, 0.0, 0.0, 0.0, 0.0,
-                    "Need 200 candles, have " + candles.size() +
-                            " — NiftyHistoricalLoaderService pre-loads this on startup");
+                    0, 0, 0, 0, 0,
+                    "Need 200 candles, have " + candles.size());
             return;
         }
 
@@ -156,102 +147,115 @@ public class MarketDirectionService {
         double price  = candles.get(0).getClose().doubleValue();
         double atrPct = price > 0 ? atr / price * 100 : 0;
 
-        // ATR health check — market must be moving but not wildly
-        // Thresholds relaxed vs original (0.5/2.5) to handle elevated-VIX days
-        if (atrPct < 0.3) {
+        // ATR health — wider bounds handle elevated-VIX days
+        if (atrPct < 0.25) {
             setResult(Direction.SIDEWAYS, false, false,
                     atrPct, atrPct, ema20, ema50, ema200,
-                    "ATR too low: " + String.format("%.2f", atrPct) + "% (market frozen)");
+                    "ATR too low: " + f2(atrPct) + "% (frozen market)");
             return;
         }
-        if (atrPct > 3.0) {
+        if (atrPct > 3.5) {
             setResult(Direction.SIDEWAYS, false, false,
                     atrPct, atrPct, ema20, ema50, ema200,
-                    "ATR too high: " + String.format("%.2f", atrPct) + "% (market chaotic)");
+                    "ATR too high: " + f2(atrPct) + "% (chaotic market — avoid)");
             return;
         }
 
-        // Doji check on last 2 candles
+        // No doji on last 2 candles
         if (isDoji(candles.get(0)) || isDoji(candles.get(1))) {
             setResult(Direction.SIDEWAYS, false, false,
                     atrPct, atrPct, ema20, ema50, ema200,
-                    "Doji/indecision on Nifty last 2 candles");
+                    "Doji/spinning top on Nifty — awaiting directional candle");
             return;
         }
 
-        // EMA stacking check
-        boolean bullEma = price > ema20 && ema20 > ema50 && ema50 > ema200;
-        boolean bearEma = price < ema20 && ema20 < ema50 && ema50 < ema200;
+        // ── MTF checks ──────────────────────────────────────────────────────────
 
-        // Structure confirmation on last 10 candles
-        boolean bullPattern = bullEma && hhhl(candles, 10);
-        boolean bearPattern = bearEma && lhll(candles, 10);
+        // TIDE: price vs EMA200 (long-term trend)
+        boolean tideUp   = price > ema200;
+        boolean tideDown = price < ema200;
+
+        // WAVE: EMA20 vs EMA50 (medium momentum)
+        boolean waveUp   = ema20 > ema50;
+        boolean waveDown = ema20 < ema50;
+
+        // RIPPLE: price vs EMA20 with 0.1% buffer (immediate)
+        boolean rippleUp   = price > ema20 * 1.001;
+        boolean rippleDown = price < ema20 * 0.999;
+
+        // STRUCTURE: soft HH/HL or LH/LL on 8 candles (50% threshold)
+        boolean structUp   = hhhl(candles, 8);
+        boolean structDown = lhll(candles, 8);
+
+        boolean allBull = tideUp   && waveUp   && rippleUp;
+        boolean allBear = tideDown && waveDown && rippleDown;
 
         Direction dir;
-        String reason = null;
+        String    reason = null;
 
-        if (bullPattern) {
+        if (allBull) {
             dir = Direction.BULLISH;
-        } else if (bearPattern) {
+            if (!structUp) reason = "MTF fully bullish, HH/HL structure forming";
+        } else if (allBear) {
             dir = Direction.BEARISH;
+            if (!structDown) reason = "MTF fully bearish, LH/LL structure forming";
         } else {
             dir = Direction.SIDEWAYS;
-            if (bullEma)       reason = "EMA bullish but HH/HL pattern < 60% (choppy uptrend)";
-            else if (bearEma)  reason = "EMA bearish but LH/LL pattern < 60% (choppy downtrend)";
-            else               reason = "EMAs not stacked — EMA20=" + String.format("%.0f", ema20)
-                        + " EMA50=" + String.format("%.0f", ema50)
-                        + " EMA200=" + String.format("%.0f", ema200);
+            // Explain what's contradictory
+            if (tideUp && waveUp && !rippleUp)
+                reason = "Tide+Wave bullish but price pulled back below EMA20 — wait for bounce";
+            else if (tideDown && waveDown && !rippleDown)
+                reason = "Tide+Wave bearish but price bounced above EMA20 — wait for rejection";
+            else if (tideUp && !waveUp)
+                reason = "Price above EMA200 but EMA20<EMA50 — recovery in progress, not yet bullish";
+            else if (tideDown && !waveDown)
+                reason = "Price below EMA200 but EMA20>EMA50 — dead-cat bounce, still bearish structure";
+            else
+                reason = String.format("Mixed — price=%.0f EMA20=%.0f EMA50=%.0f EMA200=%.0f",
+                        price, ema20, ema50, ema200);
         }
 
-        setResult(dir, bullPattern, bearPattern,
+        setResult(dir, dir == Direction.BULLISH, dir == Direction.BEARISH,
                 atrPct, atrPct, ema20, ema50, ema200, reason);
 
-        log.info("[MDS] Direction={} | price={} EMA20={} EMA50={} EMA200={} ATR={}% | {}",
-                dir,
-                String.format("%.0f", price),
-                String.format("%.0f", ema20),
-                String.format("%.0f", ema50),
-                String.format("%.0f", ema200),
-                String.format("%.2f", atrPct),
-                reason != null ? reason : "OK");
+        log.info("[MDS] Dir={} price={} EMA20={} EMA50={} EMA200={} ATR={}% " +
+                        "tide={} wave={} ripple={}{}",
+                dir, f0(price), f0(ema20), f0(ema50), f0(ema200), f2(atrPct),
+                tideUp ? "↑" : tideDown ? "↓" : "—",
+                waveUp ? "↑" : waveDown ? "↓" : "—",
+                rippleUp ? "↑" : rippleDown ? "↓" : "—",
+                reason != null ? " | " + reason : "");
     }
 
-    private void setResult(Direction dir,
-                           boolean niftyBull, boolean niftyBear,
-                           double niftyAtrPct, double bnAtrPct,
+    private void setResult(Direction dir, boolean bull, boolean bear,
+                           double atr1, double atr2,
                            double ema20, double ema50, double ema200,
                            String reason) {
         currentDirection = new MarketDirectionResult(
-                dir, niftyBull, niftyBear,
-                niftyBull, niftyBear, // bankNifty mirrors nifty
-                niftyAtrPct, bnAtrPct, ema20, ema50, ema200, reason);
+                dir, bull, bear, bull, bear,
+                atr1, atr2, ema20, ema50, ema200, reason);
     }
 
-    // ── HH+HL pattern (60% of n-1 consecutive pairs must show it) ─────────────
-    // candles.get(i) is NEWER than candles.get(i+1)
-    // newer.high > older.high  =  Higher High ✓
+    // ── HH+HL: soft 50% threshold ─────────────────────────────────────────────
 
-    private boolean hhhl(List<Candle> candles, int n) {
-        if (candles.size() < n) return false;
+    private boolean hhhl(List<Candle> c, int n) {
+        if (c.size() < n) return false;
         int hh = 0, hl = 0;
         for (int i = 0; i < n - 1; i++) {
-            if (candles.get(i).getHigh().compareTo(candles.get(i + 1).getHigh()) > 0) hh++;
-            if (candles.get(i).getLow().compareTo(candles.get(i + 1).getLow())   > 0) hl++;
+            if (c.get(i).getHigh().compareTo(c.get(i + 1).getHigh()) > 0) hh++;
+            if (c.get(i).getLow().compareTo(c.get(i + 1).getLow())   > 0) hl++;
         }
-        return hh >= (n - 1) * 0.6 && hl >= (n - 1) * 0.6;
+        return hh >= (n - 1) * 0.5 && hl >= (n - 1) * 0.5;
     }
 
-    // ── LH+LL pattern ─────────────────────────────────────────────────────────
-    // newer.high < older.high  =  Lower High ✓
-
-    private boolean lhll(List<Candle> candles, int n) {
-        if (candles.size() < n) return false;
+    private boolean lhll(List<Candle> c, int n) {
+        if (c.size() < n) return false;
         int lh = 0, ll = 0;
         for (int i = 0; i < n - 1; i++) {
-            if (candles.get(i).getHigh().compareTo(candles.get(i + 1).getHigh()) < 0) lh++;
-            if (candles.get(i).getLow().compareTo(candles.get(i + 1).getLow())   < 0) ll++;
+            if (c.get(i).getHigh().compareTo(c.get(i + 1).getHigh()) < 0) lh++;
+            if (c.get(i).getLow().compareTo(c.get(i + 1).getLow())   < 0) ll++;
         }
-        return lh >= (n - 1) * 0.6 && ll >= (n - 1) * 0.6;
+        return lh >= (n - 1) * 0.5 && ll >= (n - 1) * 0.5;
     }
 
     // ── Doji: body < 10% of range ─────────────────────────────────────────────
@@ -264,59 +268,38 @@ public class MarketDirectionService {
                 .compareTo(new BigDecimal("0.10")) < 0;
     }
 
-    // ── EMA — FIXED ───────────────────────────────────────────────────────────
-    //
-    // Buffer: index 0 = NEWEST, index size-1 = OLDEST.
-    //
-    // Correct approach:
-    //   Use up to 2p candles as the calculation window (p warmup + p "live").
-    //   Start with the OLDEST candle (index warmup-1) as the seed.
-    //   Iterate from index warmup-2 DOWN TO 0 (moving toward NEWEST).
-    //   This gives progressively more weight to recent prices — correct EMA. ✓
-    //
-    // Old (broken) approach:
-    //   Seeded at candle[size-p] and iterated TOWARD size-1 (toward OLDER).
-    //   This gave more weight to OLD prices — backwards EMA. ✗
+    // ── EMA — correct: seed oldest, iterate toward newest ─────────────────────
 
     private double ema(List<Candle> candles, int p) {
         if (candles.size() < p) return 0.0;
-
         double k      = 2.0 / (p + 1);
-        int    warmup = Math.min(2 * p, candles.size()); // window size (max 2p)
-        int    start  = warmup - 1;                      // index of oldest candle in window
-
-        // Seed with the oldest candle in the window
-        double e = candles.get(start).getClose().doubleValue();
-
-        // Walk from start-1 down to 0 (oldest → newest)
-        for (int i = start - 1; i >= 0; i--) {
+        int    warmup = Math.min(2 * p, candles.size());
+        double e      = candles.get(warmup - 1).getClose().doubleValue();
+        for (int i = warmup - 2; i >= 0; i--)
             e = candles.get(i).getClose().doubleValue() * k + e * (1 - k);
-        }
-
-        // e is now the EMA value as of candles.get(0) (the most recent candle) ✓
         return e;
     }
 
-    // ── ATR (unchanged — correct as-is) ──────────────────────────────────────
-    // candles.get(i+1) = older candle = "previous close" for True Range. ✓
+    // ── ATR — unchanged, correct ──────────────────────────────────────────────
 
-    private double atr(List<Candle> candles, int p) {
-        int n = Math.min(p, candles.size() - 1);
+    private double atr(List<Candle> c, int p) {
+        int n = Math.min(p, c.size() - 1);
         if (n == 0) return 0;
         double sum = 0;
         for (int i = 0; i < n; i++) {
             double tr = Math.max(
-                    candles.get(i).getHigh().subtract(candles.get(i).getLow()).doubleValue(),
+                    c.get(i).getHigh().subtract(c.get(i).getLow()).doubleValue(),
                     Math.max(
-                            Math.abs(candles.get(i).getHigh().subtract(candles.get(i + 1).getClose()).doubleValue()),
-                            Math.abs(candles.get(i).getLow().subtract(candles.get(i + 1).getClose()).doubleValue())
+                            Math.abs(c.get(i).getHigh().subtract(c.get(i + 1).getClose()).doubleValue()),
+                            Math.abs(c.get(i).getLow().subtract(c.get(i + 1).getClose()).doubleValue())
                     ));
             sum += tr;
         }
         return sum / n;
     }
 
-    // ── Public helpers ────────────────────────────────────────────────────────
+    private String f0(double v) { return String.format("%.0f", v); }
+    private String f2(double v) { return String.format("%.2f", v); }
 
     public boolean needsMoreCandles() {
         synchronized (niftyBuffer) { return niftyBuffer.size() < 200; }

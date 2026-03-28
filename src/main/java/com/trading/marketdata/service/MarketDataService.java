@@ -100,6 +100,7 @@ public class MarketDataService {
     }
 
     public boolean isConnected()  { return connected; }
+    public boolean isWebSocketConnected() { return connected; }
     public Instant getLastTickTime() { return lastTickTime; }
 
     public Map<String, Map<String, Object>> getLastPrices() {

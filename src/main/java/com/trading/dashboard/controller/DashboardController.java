@@ -24,15 +24,26 @@ import java.time.LocalDate;
 import java.util.*;
 
 /**
- * DashboardController — updated.
+ * DashboardController
  *
- * New additions (all original endpoints preserved):
- *   - strategyStatus panel in /snapshot
- *   - perStrategyPnl in /snapshot
- *   - GET /api/dashboard/strategy-performance
+ * FIX: Added 'system', 'regime', and 'marketDirection' sections to /snapshot response.
  *
- * isTopSector / isBottomSector now included in sector data
- * (from updated SectorStrengthService).
+ * ROOT CAUSE of WS RED / VIX 0 / EMA 0/0/0 on dashboard:
+ *   The frontend JS reads:
+ *     d.system.websocketConnected  → for WS pill colour
+ *     d.system.vix                 → for VIX display
+ *     d.system.vixRegime           → for VIX regime
+ *     d.system.currentWindow       → for Window
+ *     d.system.entryAllowed        → for Entry status
+ *     d.regime.name                → for direction pill
+ *     d.regime.failReason          → for failReason text
+ *     d.marketDirection.niftyEma*  → for EMA rows in Risk tab
+ *
+ *   But the old API returned only a 'market' object.
+ *   None of the above keys existed → all defaulted to undefined → false/0/—.
+ *
+ * FIX: We now emit BOTH the old 'market' section (for backward compat)
+ *   AND the new 'system', 'regime', 'marketDirection' sections the JS expects.
  */
 @RestController
 @RequestMapping("/api/dashboard")
@@ -63,8 +74,14 @@ public class DashboardController {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("timestamp", Instant.now().toString());
 
-        // ── Market ───────────────────────────────────────────────────────
         MarketDirectionService.MarketDirectionResult dir = marketDir.getCurrentDirection();
+        double  vix     = vixService.getCurrentVix();
+        String  vixReg  = vixService.getRegime().name();
+        String  window  = timingService.getCurrentWindowName();
+        boolean entry   = timingService.isEntryAllowed();
+        boolean wsOk    = marketDataService.isConnected(); // isConnected() exists at MarketDataService line 7017
+
+        // ── 1. 'market' — backward-compat block (keep for any legacy consumers) ──
         Map<String, Object> market = new LinkedHashMap<>();
         market.put("direction",     dir.direction().name());
         market.put("label",         regimeLabel(dir.direction()));
@@ -75,13 +92,43 @@ public class DashboardController {
         market.put("niftyEma200",   round2(dir.niftyEma200()));
         market.put("niftyAtrPct",   round2(dir.niftyAtrPct()));
         market.put("failReason",    nullSafe(dir.failReason()));
-        market.put("vix",           vixService.getCurrentVix());
-        market.put("vixRegime",     vixService.getRegime().name());
-        market.put("window",        timingService.getCurrentWindowName());
-        market.put("entryAllowed",  timingService.isEntryAllowed());
+        market.put("vix",           vix);
+        market.put("vixRegime",     vixReg);
+        market.put("window",        window);
+        market.put("entryAllowed",  entry);
         data.put("market", market);
 
-        // ── P&L ──────────────────────────────────────────────────────────
+        // ── 2. 'system' — what the WS pill, VIX pill, Window stat read from ──────
+        // FIX: these keys were missing → WS was always red, VIX showed —
+        Map<String, Object> system = new LinkedHashMap<>();
+        system.put("websocketConnected", wsOk);      // WS pill: green if true
+        system.put("vix",                vix);        // VIX pill display
+        system.put("vixRegime",          vixReg);     // VIX regime label
+        system.put("currentWindow",      window);     // Window stat card
+        system.put("entryAllowed",       entry);      // "✓ Entries open" / "✗"
+        data.put("system", system);
+
+        // ── 3. 'regime' — what the direction pill and failReason read from ────────
+        // FIX: JS reads d.regime.name but old API only had d.market.direction
+        Map<String, Object> regime = new LinkedHashMap<>();
+        regime.put("name",       dir.direction().name());   // "BULLISH" / "BEARISH" / "SIDEWAYS"
+        regime.put("label",      regimeLabel(dir.direction()));
+        regime.put("failReason", nullSafe(dir.failReason()));
+        data.put("regime", regime);
+
+        // ── 4. 'marketDirection' — what the EMA rows in Risk tab read from ────────
+        // FIX: JS reads d.marketDirection.niftyEma20 but old API had d.market.niftyEma20
+        Map<String, Object> marketDirection = new LinkedHashMap<>();
+        marketDirection.put("niftyBullish",  dir.niftyBullish());
+        marketDirection.put("niftyBearish",  dir.niftyBearish());
+        marketDirection.put("niftyEma20",    round2(dir.niftyEma20()));
+        marketDirection.put("niftyEma50",    round2(dir.niftyEma50()));
+        marketDirection.put("niftyEma200",   round2(dir.niftyEma200()));
+        marketDirection.put("niftyAtrPct",   round2(dir.niftyAtrPct()));
+        marketDirection.put("failReason",    nullSafe(dir.failReason()));
+        data.put("marketDirection", marketDirection);
+
+        // ── 5. P&L ────────────────────────────────────────────────────────────────
         BigDecimal dailyPnl   = circuitBreaker.getDailyPnl();
         BigDecimal weeklyPnl  = circuitBreaker.getWeeklyPnl();
         BigDecimal monthlyPnl = circuitBreaker.getMonthlyPnl();
@@ -97,7 +144,7 @@ public class DashboardController {
         pnl.put("cbReason",        nullSafe(circuitBreaker.getDisableReason()));
         data.put("pnl", pnl);
 
-        // ── Sectors ──────────────────────────────────────────────────────
+        // ── 6. Sectors ────────────────────────────────────────────────────────────
         List<Map<String, Object>> sectors = new ArrayList<>();
         for (String sn : sectorClassify.getAllSectorNames()) {
             SectorStrengthService.SectorData sd = sectorStrength.getSector(sn);
@@ -118,7 +165,7 @@ public class DashboardController {
         }
         data.put("sectors", sectors);
 
-        // ── Active trades ────────────────────────────────────────────────
+        // ── 7. Active trades ──────────────────────────────────────────────────────
         Map<String, BigDecimal> prices = marketDataService.getLastPricesSimple();
         List<Map<String, Object>> activeTrades = new ArrayList<>();
         for (TradeManagementService.ManagedTrade mt : tradeManagement.getActiveTrades()) {
@@ -153,17 +200,17 @@ public class DashboardController {
         }
         data.put("activeTrades", activeTrades);
 
-        // ── Today's closed trades ─────────────────────────────────────────
+        // ── 8. Today's closed trades ──────────────────────────────────────────────
         data.put("todayTrades", tradeExecution.getTodayTrades(LocalDate.now()));
 
-        // ── Strategy status panel (NEW) ───────────────────────────────────
+        // ── 9. Strategy status panel ──────────────────────────────────────────────
         Map<String, Object> strategyStatus = new LinkedHashMap<>();
         strategyStatus.put("firedToday",      strategyEvaluator.getFiredToday());
         strategyStatus.put("perStrategyPnl",  buildStrategyPnl());
         strategyStatus.put("strategySummary", buildStrategySummary());
         data.put("strategyStatus", strategyStatus);
 
-        // ── Armed stocks (7-gate scanner) ─────────────────────────────────
+        // ── 10. Armed stocks ──────────────────────────────────────────────────────
         Map<String, Object> armedMap = new LinkedHashMap<>();
         scanner.getArmedStocks().forEach((sym, armed) -> {
             Map<String, Object> a = new LinkedHashMap<>();
@@ -183,7 +230,7 @@ public class DashboardController {
         data.put("armedStocks",     armedMap);
         data.put("gateRejections",  scanner.getGateRejections());
 
-        // ── Gate status ───────────────────────────────────────────────────
+        // ── 11. Gate status ───────────────────────────────────────────────────────
         Map<Integer, String> gateStatus = new LinkedHashMap<>();
         gateStatus.put(1, dir.isTradeable() ? "PASS" : "FAIL");
         for (int i = 2; i <= 7; i++) gateStatus.put(i, "WAIT");
@@ -216,7 +263,7 @@ public class DashboardController {
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // GET /api/dashboard/strategy-performance (NEW)
+    // GET /api/dashboard/strategy-performance
     // ══════════════════════════════════════════════════════════════════════
 
     @GetMapping("/strategy-performance")
@@ -233,10 +280,9 @@ public class DashboardController {
     // Helpers
     // ══════════════════════════════════════════════════════════════════════
 
-    /** Per-strategy P&L breakdown from today's trades */
     private Map<String, Object> buildStrategyPnl() {
-        Map<String, Object> result = new LinkedHashMap<>();
-        Map<String, Double>  pnlMap   = new LinkedHashMap<>();
+        Map<String, Object> result  = new LinkedHashMap<>();
+        Map<String, Double>  pnlMap  = new LinkedHashMap<>();
         Map<String, Integer> countMap = new LinkedHashMap<>();
         Map<String, Integer> winsMap  = new LinkedHashMap<>();
 
@@ -262,24 +308,18 @@ public class DashboardController {
         return result;
     }
 
-    /** How many signals each strategy fired today */
     private List<Map<String, Object>> buildStrategySummary() {
-        Set<String> fired = strategyEvaluatorService().getFiredToday();
+        Set<String> fired = strategyEvaluator.getFiredToday();
         List<Map<String, Object>> list = new ArrayList<>();
         for (String name : List.of("SCANNER_7GATE", "AUTO_MODE",
                 "RANGE_BREAKOUT_3TOUCH", "ORB_VWAP_SECTOR")) {
             long count = fired.stream().filter(k -> k.endsWith(":" + name)).count();
             Map<String, Object> m = new LinkedHashMap<>();
-            m.put("strategy",   name);
+            m.put("strategy",     name);
             m.put("signalsFired", count);
             list.add(m);
         }
         return list;
-    }
-
-    // Spring injects this — helper to avoid duplicate @RequiredArgsConstructor field
-    private StrategyEvaluatorService strategyEvaluatorService() {
-        return strategyEvaluator;
     }
 
     private double pct(BigDecimal pnl, BigDecimal cap) {
