@@ -20,14 +20,14 @@ import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * Paper trading REST API — mirrors DashboardController structure.
+ * Paper trading REST API â€” mirrors DashboardController structure.
  *
- * GET  /api/paper/status          — current mode (LIVE or PAPER)
- * GET  /api/paper/snapshot        — full dashboard data (positions, account, trades)
- * GET  /api/paper/trades/today    — today's closed trades
- * GET  /api/paper/trades/all      — all paper trades
- * GET  /api/paper/account         — account summary
- * POST /api/paper/reset           — reset virtual account
+ * GET  /api/paper/status          â€” current mode (LIVE or PAPER)
+ * GET  /api/paper/snapshot        â€” full dashboard data (positions, account, trades)
+ * GET  /api/paper/trades/today    â€” today's closed trades
+ * GET  /api/paper/trades/all      â€” all paper trades
+ * GET  /api/paper/account         â€” account summary
+ * POST /api/paper/reset           â€” reset virtual account
  */
 @RestController
 @RequestMapping("/api/paper")
@@ -42,7 +42,7 @@ public class PaperTradingController {
     @Value("${trading.mode:LIVE}")
     private String tradingMode;
 
-    // ── Mode status ───────────────────────────────────────────────────
+    // â”€â”€ Mode status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @GetMapping("/status")
     public ResponseEntity<Map<String, Object>> status() {
@@ -54,7 +54,7 @@ public class PaperTradingController {
         return ResponseEntity.ok(r);
     }
 
-    // ── Snapshot — main dashboard polling endpoint ───────────────────
+    // â”€â”€ Snapshot â€” main dashboard polling endpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @GetMapping("/snapshot")
     public ResponseEntity<Map<String, Object>> snapshot() {
@@ -63,7 +63,7 @@ public class PaperTradingController {
         data.put("isPaper",   "PAPER".equalsIgnoreCase(tradingMode));
         data.put("timestamp", Instant.now().toString());
 
-        // ── Account summary ───────────────────────────────────────────
+        // â”€â”€ Account summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         Map<String, Object> acct = new LinkedHashMap<>();
         acct.put("initialCapital",    account.getInitialCapital());
         acct.put("currentCapital",    account.getCapital());
@@ -85,7 +85,7 @@ public class PaperTradingController {
         acct.put("maxDrawdownRs",     account.getMaxDrawdown());
         data.put("account", acct);
 
-        // ── Active positions — mirrors DashboardController activeTrades ─
+        // â”€â”€ Active positions â€” mirrors DashboardController activeTrades â”€
         Map<String, BigDecimal> prices = management.getLastPrices();
         List<Map<String, Object>> openList = new ArrayList<>();
 
@@ -131,17 +131,17 @@ public class PaperTradingController {
         }
         data.put("activeTrades", openList);
 
-        // ── Today's trades — same structure as DashboardController ────
+        // â”€â”€ Today's trades â€” same structure as DashboardController â”€â”€â”€â”€
         data.put("todayTrades", buildTradeRows(execution.getTodayTrades(LocalDate.now())));
 
-        // ── Strategy breakdown ────────────────────────────────────────
+        // â”€â”€ Strategy breakdown â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         data.put("strategyBreakdown",
                 buildStrategyBreakdown(execution.getTodayTrades(LocalDate.now())));
 
         return ResponseEntity.ok(data);
     }
 
-    // ── Trade history ─────────────────────────────────────────────────
+    // â”€â”€ Trade history â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @GetMapping("/trades/today")
     public ResponseEntity<List<Map<String, Object>>> todayTrades() {
@@ -166,7 +166,7 @@ public class PaperTradingController {
         return ResponseEntity.ok(r);
     }
 
-    // ── Account ───────────────────────────────────────────────────────
+    // â”€â”€ Account â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @GetMapping("/account")
     public ResponseEntity<Map<String, Object>> accountSummary() {
@@ -188,18 +188,18 @@ public class PaperTradingController {
         return ResponseEntity.ok(r);
     }
 
-    // ── Reset ─────────────────────────────────────────────────────────
+    // â”€â”€ Reset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @PostMapping("/reset")
     public ResponseEntity<String> resetAccount() {
         account.hardReset();
         log.warn("[PAPER] Account reset via API");
         return ResponseEntity.ok(
-                "Paper trading account reset. Capital restored to ₹"
+                "Paper trading account reset. Capital restored to â‚¹"
                         + account.getInitialCapital());
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────
+    // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private List<Map<String, Object>> buildTradeRows(List<Trade> trades) {
         return trades.stream().map(t -> {
@@ -251,3 +251,4 @@ public class PaperTradingController {
         return result;
     }
 }
+

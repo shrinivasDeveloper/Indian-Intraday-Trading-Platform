@@ -9,7 +9,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 
 /**
- * In-memory paper trade — mirrors Trade entity but without JPA.
+ * In-memory paper trade â€” mirrors Trade entity but without JPA.
  * No DB writes: fast, no transaction overhead.
  */
 @Data
@@ -43,7 +43,7 @@ public class PaperTrade {
     // P&L
     private BigDecimal grossPnl;
     private BigDecimal slippage;
-    private BigDecimal brokerage;         // simulated: ₹40 flat
+    private BigDecimal brokerage;         // simulated: â‚¹40 flat
     private BigDecimal netPnl;
 
     // Management state
@@ -58,8 +58,9 @@ public class PaperTrade {
 
     /** Returns net P&L for display */
     public String pnlDisplay() {
-        if (netPnl == null) return "₹0";
-        return (netPnl.doubleValue() >= 0 ? "+" : "") + "₹" +
+        if (netPnl == null) return "â‚¹0";
+        return (netPnl.doubleValue() >= 0 ? "+" : "") + "â‚¹" +
                 String.format("%.2f", netPnl.doubleValue());
     }
 }
+

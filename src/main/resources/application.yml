@@ -1,6 +1,7 @@
 spring:
   application:
     name: trading-platform
+
   datasource:
     url: ${DB_URL}
     username: ${DB_USERNAME}
@@ -10,23 +11,28 @@ spring:
       maximum-pool-size: 20
       minimum-idle: 5
       connection-timeout: 30000
+
   jpa:
     open-in-view: false
     hibernate:
       ddl-auto: none
     show-sql: false
+
   flyway:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
+
   data:
     redis:
-      host: ${REDIS_HOST}
-      port: ${REDIS_PORT}
-      password: ${REDIS_PASSWORD}
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
       timeout: 2000ms
+
   session:
     timeout: 28800
+
   task:
     execution:
       pool:
@@ -41,6 +47,9 @@ dashboard:
   password: ${DASHBOARD_PASSWORD:changeme}
   remember-me-key: ${REMEMBER_ME_KEY:trading-platform-secret-2024}
 
+# ================================
+# ZERODHA CONFIG
+# ================================
 zerodha:
   api-key: ${ZERODHA_API_KEY}
   api-secret: ${ZERODHA_API_SECRET}
@@ -50,13 +59,16 @@ zerodha:
   totp-secret: ${ZERODHA_TOTP_SECRET:}
   redirect-url: ${ZERODHA_REDIRECT_URL:http://localhost:8081/api/auth/callback}
   auto-login: true
+
   websocket:
     max-reconnects: 20
     reconnect-delay-ms: 5000
 
+# ================================
+# TRADING CORE (NO RISK LOGIC HERE NOW)
+# ================================
 trading:
-  mode: ${TRADING_MODE:PAPER}   # ✅ ADDED (PAPER or LIVE)
-
+  mode: ${TRADING_MODE:PAPER}
   capital: ${TRADING_CAPITAL:100000}
   risk-per-trade: 0.01
   max-position-pct: 0.20
@@ -65,25 +77,33 @@ trading:
   entry-mode: ${ENTRY_MODE:AGGRESSIVE}
   strong-trend-risk: 0.01
   moderate-trend-risk: 0.005
-
-  # Trailing SL
-  breakeven-r: 1.0
-  trail-start-r: 3.0
-  trail-atr-multiplier: 1.0
-  trail-tighten-r: 4.0
-  trail-tight-atr-multiplier: 0.5
-  partial-exit-lunch-r: 1.0
-  partial-exit-moderate-r: 1.5
   skip-trail-on-momentum: true
   exit-on-market-turn: true
   exit-on-sector-turn: true
 
+# ================================
+# PAPER TRADING
+# ================================
+paper-trading:
+  initial-capital: ${PAPER_CAPITAL:${TRADING_CAPITAL:100000}}
+  entry-slip-pct: 0.0005
+  sl-slip-pct: 0.001
+  target-slip-pct: 0.0005
+  eod-slip-pct: 0.0015
+  brokerage: 40.0
+
+# ================================
+# RISK CONTROL
+# ================================
 circuit-breaker:
   max-trades-per-day: 4
   daily-loss-cap-pct: -4.0
   weekly-drawdown-cap-pct: -8.0
   monthly-drawdown-cap-pct: -15.0
 
+# ================================
+# MARKET FILTERS
+# ================================
 scanner:
   min-volume: 300000
   min-price: 50
@@ -109,9 +129,46 @@ sector:
   min-aligned-pct: 55
   min-relative-strength: 0.8
 
+# ================================
+# STRATEGY (ALIGNED WITH JAVA)
+# ================================
 strategy:
   enabled: true
 
+  # GLOBAL (Mapped to StrategyConfig.Global)
+  global:
+    gravity-exhaustion-pct: 1.5
+    poc-proximity-pct: 1.0
+
+    rvol-time-slot-enabled: true
+    min-rvol-trend: 1.3
+
+    breakeven-r-trigger: 1.5
+    partial-exit-r: 3.0
+    trailing-mode: CANDLE_LOW
+
+    global-time-stop: 45m
+
+  # SPRING / UPTHRUST
+  spring:
+    enabled: true
+    max-depth-pct: 0.6
+    recovery-candles: 2
+    spring-signal-score: 95
+
+  # PULLBACK
+  pullback:
+    impulse-min-pct: 1.5
+    min-rvol-impulse: 1.5
+    min-rsi-impulse: 65.0
+    pullback-vol-ratio: 0.7
+    rr: 3.0
+    poc-sl-buffer: 0.0005
+    entry-start: "09:45"
+    entry-end: "14:00"
+    state-ttl-minutes: 45
+
+  # AUTO MODE
   auto-mode:
     sector-move-min-pct: 0.3
     reversal-gain-min-pct: 3.0
@@ -122,6 +179,7 @@ strategy:
     reversal-rr: 1.8
     range-rr: 1.5
 
+  # RANGE BREAKOUT
   range-breakout:
     min-touches: 2
     touch-tolerance-pct: 0.5
@@ -133,6 +191,7 @@ strategy:
     entry-start: "09:45"
     entry-end: "12:00"
 
+  # ORB
   orb:
     nifty-min-change-pct: 0.2
     sector-min-change-pct: 0.3
@@ -145,25 +204,38 @@ strategy:
     entry-end: "13:00"
     orb-candles: 3
 
+# ================================
+# NOTIFICATIONS
+# ================================
 notifications:
   telegram:
     enabled: false
     bot-token: ${TELEGRAM_BOT_TOKEN:}
     chat-id: ${TELEGRAM_CHAT_ID:}
 
+# ================================
+# SERVER
+# ================================
 server:
   port: 8081
 
+# ================================
+# ACTUATOR
+# ================================
 management:
   endpoints:
     web:
       exposure:
         include: health,info,metrics
       base-path: /internal/actuator
+
   endpoint:
     health:
       show-details: when-authorized
 
+# ================================
+# RESILIENCE
+# ================================
 resilience4j:
   retry:
     instances:
@@ -172,9 +244,15 @@ resilience4j:
         wait-duration: 500ms
         exponential-backoff-multiplier: 2.0
 
+# ================================
+# CORS
+# ================================
 app:
   allowed-origins: http://localhost:8081,http://127.0.0.1:8081
 
+# ================================
+# LOGGING
+# ================================
 logging:
   level:
     com.trading: INFO
@@ -182,10 +260,13 @@ logging:
     org.springframework: WARN
     org.hibernate: WARN
     com.zaxxer: WARN
+
   pattern:
     console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+
   file:
     name: logs/trading-platform.log
+
   logback:
     rollingpolicy:
       max-file-size: 50MB

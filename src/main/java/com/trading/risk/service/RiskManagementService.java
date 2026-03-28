@@ -18,30 +18,32 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * RiskManagementService — FIXED.
+ * RiskManagementService — gates every signal through 4 checks before approving.
  *
- * Fix 1: Sector exposure uses SectorClassificationService properly.
- *   Old: only 20 hardcoded symbols got real sectors → 490 stocks all
- *        went to "Other" → only 1 trade ever allowed (sector limit).
- *   New: all 500 Nifty500 stocks get their real sector → diversity works.
+ * PRESERVED FIXES:
+ *   Fix 1: Sector exposure uses SectorClassificationService (not hardcoded list)
+ *   Fix 2: circuitBreaker.recordTradeEntered() only called AFTER trade approved
+ *   Fix 3: Daily sector exposure reset at 8:45 IST
  *
- * Fix 2: circuitBreaker.recordTradeEntered() moved to AFTER trade approved.
- *   Old: CB count incremented even if order rejected → CB trips on failures.
- *   New: CB count only incremented when TradeApprovedEvent actually fires.
+ * NEW FIX — timeStopMinutes pipeline completion:
+ *   ProbabilityScoreEvent now carries timeStopMinutes (added by StrategyEvaluatorService).
+ *   This service reads it and passes it into TradeApprovedEvent using the new
+ *   12-param constructor. Without this step, the time stop value arrived here
+ *   and was discarded — it never reached PaperTradeExecutionService or
+ *   PaperTradeManagementService.
  *
- * Fix 3: Daily sector exposure reset at 8:45 IST.
- *   Old: sectorExposure never reset → after first trade, that sector
- *        blocked ALL day even after the trade closed.
+ *   VAP Pullback: timeStopMinutes=30 flows all the way to tick-level enforcement.
+ *   All other strategies: timeStopMinutes=0 (no time stop, only 15:00 IST close).
  */
 @Service
 @Slf4j
 @RequiredArgsConstructor
 public class RiskManagementService {
 
-    private final ApplicationEventPublisher  publisher;
-    private final CircuitBreakerService      circuitBreaker;
-    private final PositionSizerService       positionSizer;
-    private final SectorClassificationService sectorClassify; // FIX 1
+    private final ApplicationEventPublisher   publisher;
+    private final CircuitBreakerService       circuitBreaker;
+    private final PositionSizerService        positionSizer;
+    private final SectorClassificationService sectorClassify;
 
     @Value("${trading.capital:100000}")
     private String capitalStr;
@@ -50,6 +52,10 @@ public class RiskManagementService {
     private final Map<String, Integer> sectorExposure = new ConcurrentHashMap<>();
 
     private BigDecimal capital() { return new BigDecimal(capitalStr); }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Gate every signal through 4 checks
+    // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
     @Async("tradingExecutor")
@@ -66,8 +72,7 @@ public class RiskManagementService {
             return;
         }
 
-        // Gate 2 — One trade per sector (using real sector classification)
-        // FIX 1: use SectorClassificationService not hardcoded list
+        // Gate 2 — One trade per sector (Fix 1: real sector classification)
         String sector = sectorClassify.getSector(sym);
         if (sectorExposure.getOrDefault(sector, 0) >= 1) {
             log.warn("RISK REJECTED {}: sector '{}' already has open trade", sym, sector);
@@ -93,33 +98,40 @@ public class RiskManagementService {
             return;
         }
 
-        // FIX 2: update sector exposure + CB ONLY when actually approving
-        // (old code did this before order placement → CB tripped on failures)
+        // Fix 2: update CB and sector ONLY after all gates pass
         sectorExposure.merge(sector, 1, Integer::sum);
         circuitBreaker.recordTradeEntered();
 
+        // FIX: pass timeStopMinutes from the signal through to execution
+        // Uses the new 12-param TradeApprovedEvent constructor.
+        // timeStopMinutes=0 for strategies without a time stop — no behaviour change.
         publisher.publishEvent(new TradeApprovedEvent(this,
                 sym, event.getInstrumentToken(),
                 event.getDirection(), event.getEntryPrice(),
                 event.getStopLoss(), event.getTarget(),
                 size.quantity(), size.actualRisk(),
-                event.getTotalScore(), event.getStrategyName()));
+                event.getTotalScore(), event.getStrategyName(),
+                event.getTimeStopMinutes()));   // FIX: was missing
 
-        log.info("TRADE APPROVED: {} dir={} qty={} entry={} sl={} target={} sector={}",
+        log.info("TRADE APPROVED: {} dir={} qty={} entry={} sl={} target={} sector={} timeStop={}min",
                 sym, event.getDirection(), size.quantity(),
-                event.getEntryPrice(), event.getStopLoss(), event.getTarget(), sector);
+                event.getEntryPrice(), event.getStopLoss(), event.getTarget(), sector,
+                event.getTimeStopMinutes() > 0 ? event.getTimeStopMinutes() : "none");
     }
 
-    /** Called by TradeExecutionService when a trade closes */
+    // ══════════════════════════════════════════════════════════════════════════
+    // Called by TradeExecutionService / PaperTradeExecutionService on close
+    // ══════════════════════════════════════════════════════════════════════════
+
     public void onTradeClosed(String symbol, BigDecimal pnl) {
         circuitBreaker.recordPnl(pnl);
-        // FIX 3: release sector slot when trade closes
+        // Fix 3: release sector slot when trade closes
         String sector = sectorClassify.getSector(symbol);
         sectorExposure.merge(sector, -1, (a, b) -> Math.max(0, a + b));
         log.debug("Sector '{}' slot released for {}", sector, symbol);
     }
 
-    // FIX 3: reset sector exposure daily at 8:45 IST
+    // Fix 3: reset sector exposure daily at 8:45 IST
     @Scheduled(cron = "0 45 8 * * MON-FRI", zone = "Asia/Kolkata")
     public void resetDaily() {
         sectorExposure.clear();
