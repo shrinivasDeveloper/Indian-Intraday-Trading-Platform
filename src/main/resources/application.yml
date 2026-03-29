@@ -75,43 +75,78 @@ trading:
   exit-on-sector-turn: true
 
   # ── 10-2-3 Slot Manager ──────────────────────────────────────────────
-  # Max 2 trades per strategy name per day (strategy diversity gate)
   max-trades-per-strategy: 2
-  # Max 3 trades simultaneously in Phase-1 (full risk / no breakeven yet).
-  # A 4th trade is only unlocked once one existing trade reaches Phase-2+.
   max-phase1-concurrent: 3
-  # Max 2 active trades per Nifty sector simultaneously (raised from 1)
   max-sector-trades: 2
+
+  # ── FLAW 3 FIX: Stale Signal Guard ───────────────────────────────────
+  # Signals older than this many seconds are rejected at Gate-0.
+  # 30s = realistic queue delay budget for the @Async trading executor.
+  # Increase to 60s if signals are legitimately slower (e.g. heavy load days).
+  max-signal-age-seconds: 30
 
 # ================================
 # PAPER TRADING
 # ================================
 paper-trading:
   initial-capital: ${PAPER_CAPITAL:${TRADING_CAPITAL:100000}}
-  entry-slip-pct: 0.0005
+  entry-slip-pct: 0.0005        # Legacy flat slip — overridden by impact cost below
   sl-slip-pct: 0.001
   target-slip-pct: 0.0005
   eod-slip-pct: 0.0015
   brokerage: 40.0
 
+  # ── FLAW 2 FIX: Dynamic Impact Cost (replaces flat entry-slip-pct) ───
+  # Formula: slipPct = base + (atr-weight × atr%) + (vol-weight × (avgVol/curVol - 1))
+  # Clamped to [min-slip, max-slip]
+  #
+  # Calibration guide:
+  #   base:       3 bps  (minimum for any market order, even Nifty50 liquid stocks)
+  #   atr-weight: 0.15   (15% of ATR% = intraday range contribution to impact)
+  #   vol-weight: 0.001  (0.1% per unit of volume scarcity beyond normal)
+  #   min-slip:   0.0003 (3 bps  — Nifty50 + high ADV, normal session)
+  #   max-slip:   0.005  (50 bps — illiquid mid-cap, thin book, high-ATR session)
+  #
+  # Example results:
+  #   RELIANCE (ATR%=0.8%, vol=2×avg):   0.03% + 0.12% + 0    = 0.15%
+  #   Mid-cap  (ATR%=2.5%, vol=0.3×avg): 0.03% + 0.375%+ 0.07%= 0.475%
+  #   Illiquid (ATR%=4.0%, vol=0.1×avg): 0.03% + 0.6%  + 0.09%= 0.72% → capped 0.5%
+  impact-cost:
+    base: 0.0003
+    atr-weight: 0.15
+    vol-weight: 0.001
+    min-slip: 0.0003
+    max-slip: 0.005
+
 # ================================
 # RISK CONTROL
 # ================================
 circuit-breaker:
-  # 10-2-3: max 10 total trades per day across the entire account
+  # 10-2-3 Slot Manager: max 10 trades per day
   max-trades-per-day: 10
 
-  # REQ 2a: Hard-kill at -2.5% daily loss. Closes ALL open positions immediately.
+  # FLAW hard-kill at -2.5% (REQ 2a) — triggers immediate CLOSE_ALL
   daily-loss-cap-pct: -2.5
-
   weekly-drawdown-cap-pct: -8.0
   monthly-drawdown-cap-pct: -15.0
 
-  # REQ 2b: Profit Lock
-  # When daily P&L reaches +profit-lock-trigger-pct%, the profit floor activates.
-  # If P&L then retraces to +profit-floor-pct%, close all positions and lock the green day.
+  # ── FLAW 5 FIX: Dynamic Trailing Profit Floor ─────────────────────────
+  # Activates profit lock when daily P&L reaches +6%.
   profit-lock-trigger-pct: 6.0
+
+  # Static minimum floor — trailing floor never drops below this.
+  # Even on the most volatile day, +4% is the guaranteed minimum.
   profit-floor-pct: 4.0
+
+  # Give-back multiplier: dynamicGiveBack = dailyVol × giveback-multiplier
+  # dailyVol = VIX / sqrt(252) / 100 × 100  (VIX as %, converted to daily %)
+  # VIX=15 → dailyVol≈0.94% → giveBack=max(0.5, 0.94×2)=1.88%
+  # VIX=25 → dailyVol≈1.57% → giveBack=max(0.5, 1.57×2)=3.14%
+  giveback-multiplier: 2.0
+
+  # Minimum give-back regardless of VIX — prevents unrealistically tight floor
+  # on ultra-calm days (VIX < 8). 0.5% = 50 bps minimum trailing window.
+  min-giveback-pct: 0.5
 
 # ================================
 # MARKET FILTERS
@@ -266,4 +301,4 @@ logging:
     rollingpolicy:
       max-file-size: 50MB
       max-history: 7
-      file-name-pattern: logs/trading-platform.%d{yyyy-MM-dd}.%i.log
+      file-name-pattern: logs/trading-platform.%d{yyyy-MM-dd}.%i.log`Z

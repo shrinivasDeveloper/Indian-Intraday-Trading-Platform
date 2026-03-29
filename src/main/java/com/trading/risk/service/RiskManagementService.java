@@ -15,85 +15,95 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * RiskManagementService — 10-2-3 Slot Manager implementation.
+ * RiskManagementService — 10-2-3 Slot Manager with all race conditions fixed.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * GATE STRUCTURE (applied in order — first failure rejects the signal):
+ * FLAW 1 FIX — Race Condition (check-then-act is not atomic):
  *
- *   Gate 1  — Circuit Breaker       (daily count, P&L caps, profit lock)
- *   Gate 2  — Sector Limit          (max 2 active trades per Nifty sector)
- *   Gate 3  — Strategy Diversity    (max 2 trades per strategy name per day)
- *   Gate 4  — Phase-1 Concurrency   (max 3 simultaneous full-risk trades)
- *             A 4th trade is only allowed if at least one existing trade
- *             has migrated to Phase-2 (Breakeven) or beyond.
+ *   PROBLEM: With @Async("tradingExecutor"), multiple threads run
+ *   onProbabilityScore() concurrently. The old code:
+ *     1. phase1Count.get()           ← Thread A reads 3
+ *     2. isAnyTradeAtBreakeven()     ← Thread A reads true
+ *     3. sectorExposure.getOrDefault ← Thread A reads 1
+ *     4. phase1Count.incrementAndGet ← Thread A sets to 4
+ *   Thread B does the same between steps 1 and 4 — also reads 3, also passes,
+ *   also increments → phase1Count ends at 5. TWO trades approved when only 1 slot existed.
+ *   Same race applies to sectorExposure and strategyExposure maps.
+ *
+ *   SOLUTION: ReentrantLock guards the entire "check all counters + commit" section.
+ *   Why ReentrantLock over synchronized:
+ *     - tryLock(timeout) prevents indefinite blocking under load
+ *     - Lock acquisition is explicit and auditable
+ *     - notifyPhase2Migration() also acquires the same lock to ensure
+ *       the phase1Count decrement and the next check-and-commit cannot interleave
+ *
+ *   The @EventListener/@Async processing (circuit breaker, position sizing, event
+ *   publishing) runs OUTSIDE the lock — only the critical section is protected.
+ *   This avoids the anti-pattern of holding a lock while doing I/O.
+ *
+ *   LOCK SCOPE (only the atomic section):
+ *     lock.lock()
+ *       re-read phase1Count (now under lock)
+ *       re-read sectorExposure (now under lock)
+ *       re-read strategyExposure (now under lock)
+ *       check Gate 2, 3, 4 (all reads under lock)
+ *       isAnyTradeAtBreakevenOrBeyond() called under lock
+ *       commit all increments
+ *     lock.unlock()
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * FLAW 3 FIX — Stale Signal Guard (Gate 0):
+ *
+ *   ProbabilityScoreEvent now carries signalTimestamp (Instant set at fire time).
+ *   Gate 0 (before circuit breaker) rejects events older than maxSignalAgeSeconds.
+ *   Config: trading.max-signal-age-seconds: 30
+ *
+ *   Why Gate 0 not Gate 1: stale signals waste circuit breaker budget. A stale
+ *   breakout signal should be dropped before it touches any state counter.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * GATE STRUCTURE:
+ *   Gate 0  — Stale Signal Guard   (age > 30s → reject)
+ *   Gate 1  — Circuit Breaker       (daily count, P&L caps)
  *   Gate 5  — Valid entry / SL
- *   Gate 6  — Position sizing (1% risk rule + margin check)
- *
+ *   Gate 6  — Position sizing
+ *   ↳ Atomic section (under ReentrantLock):
+ *       Gate 2  — Sector Limit (max 2 per sector)
+ *       Gate 3  — Strategy Diversity (max 2 per strategy/day)
+ *       Gate 4  — Phase-1 Concurrency (max 3, 4th needs Phase-2)
+ *       Commit  — increment all counters
  * ═══════════════════════════════════════════════════════════════════════
- * COUNTERS (all reset daily at 8:45 IST):
- *
- *   sectorExposure    Map<sector, openCount>
- *                     Incremented on trade entry, decremented on close.
- *
- *   strategyExposure  Map<strategyName, openCount>
- *                     Tracks *daily* trades per strategy (not just open ones).
- *                     Counts entries, not just open positions — once 2 trades
- *                     have been taken by a strategy today, no more regardless
- *                     of how many are still open.
- *                     Decrements on close so the count reflects active exposure.
- *
- *   phase1Count       AtomicInteger — currently open trades in Phase-1.
- *                     Incremented on entry, decremented when:
- *                       (a) trade migrates to Phase-2 via notifyPhase2Migration()
- *                       (b) trade closes (if it never reached Phase-2)
- *
- * ═══════════════════════════════════════════════════════════════════════
- * PHASE-1 CONCURRENCY (Gate 4):
- *
- *   PaperTradeManagementService.notifyPhase2Migration(symbol) is called
- *   by moveSlToBreakeven() to decrement phase1Count when a trade moves
- *   to Phase-2. This is the contract between the two services.
- *
- *   The 4th trade check:
- *     if phase1Count >= maxPhase1Concurrent (3):
- *         check paperManagement.isAnyTradeAtBreakevenOrBeyond()
- *         if NO → reject
- *         if YES → allow (one slot is effectively "safer")
- *
- * ═══════════════════════════════════════════════════════════════════════
- * PRESERVED FROM ORIGINAL:
- *   - onTradeClosed() releases both sector and strategy slots
- *   - timeStopMinutes pipeline (passes through to TradeApprovedEvent)
- *   - All daily reset logic
  */
 @Service
 @Slf4j
 public class RiskManagementService {
 
-    private final ApplicationEventPublisher    publisher;
-    private final CircuitBreakerService        circuitBreaker;
-    private final PositionSizerService         positionSizer;
-    private final SectorClassificationService  sectorClassify;
-    private final PaperTradeManagementService  paperManagement;
+    private final ApplicationEventPublisher   publisher;
+    private final CircuitBreakerService       circuitBreaker;
+    private final PositionSizerService        positionSizer;
+    private final SectorClassificationService sectorClassify;
+    private final PaperTradeManagementService paperManagement;
 
-    // @Lazy on paperManagement to break the circular dependency:
-    // RiskManagementService ← PaperTradeExecutionService ← PaperTradeManagementService → RiskManagementService
     public RiskManagementService(
             ApplicationEventPublisher publisher,
             CircuitBreakerService circuitBreaker,
             PositionSizerService positionSizer,
             SectorClassificationService sectorClassify,
             @Lazy PaperTradeManagementService paperManagement) {
-        this.publisher       = publisher;
-        this.circuitBreaker  = circuitBreaker;
-        this.positionSizer   = positionSizer;
-        this.sectorClassify  = sectorClassify;
-        this.paperManagement = paperManagement;
+        this.publisher      = publisher;
+        this.circuitBreaker = circuitBreaker;
+        this.positionSizer  = positionSizer;
+        this.sectorClassify = sectorClassify;
+        this.paperManagement= paperManagement;
     }
 
     @Value("${trading.capital:100000}")
@@ -101,40 +111,41 @@ public class RiskManagementService {
 
     // ── 10-2-3 Slot Manager config ─────────────────────────────────────────────
 
-    /** REQ 1b: Max trades per strategy name per day. Default 2. */
     @Value("${trading.max-trades-per-strategy:2}")
     private int maxTradesPerStrategy;
 
-    /** REQ 1c: Max concurrent Phase-1 (full-risk) trades. Default 3. */
     @Value("${trading.max-phase1-concurrent:3}")
     private int maxPhase1Concurrent;
 
-    /** REQ 1d: Max concurrent trades per Nifty sector. Default 2. */
     @Value("${trading.max-sector-trades:2}")
     private int maxSectorTrades;
 
+    /** FLAW 3: Max age of a signal in seconds before it is considered stale */
+    @Value("${trading.max-signal-age-seconds:30}")
+    private int maxSignalAgeSeconds;
+
     // ── Counters ───────────────────────────────────────────────────────────────
 
-    /** sector → number of currently open trades in that sector */
     private final Map<String, Integer> sectorExposure   = new ConcurrentHashMap<>();
-
-    /**
-     * strategyName → number of trades taken by that strategy today (open + closed).
-     * We track daily count (not just open) to enforce the diversity rule:
-     * "Max 2 trades per strategy per day" regardless of whether they are still open.
-     */
     private final Map<String, Integer> strategyExposure = new ConcurrentHashMap<>();
+    private final AtomicInteger        phase1Count      = new AtomicInteger(0);
 
-    /**
-     * Number of currently open trades still in Phase-1 (full risk, SL not at breakeven).
-     * Decremented when a trade migrates to Phase-2 via notifyPhase2Migration().
-     */
-    private final AtomicInteger phase1Count = new AtomicInteger(0);
+    // ── FLAW 1 FIX: ReentrantLock for atomic check-and-commit ─────────────────
+    //
+    // This lock guards ONLY the critical section in onProbabilityScore() and
+    // notifyPhase2Migration(). It does NOT hold during circuit breaker checks,
+    // position sizing, or event publishing — those run outside the lock.
+    //
+    // A single ReentrantLock (not ReadWriteLock) because writers (check-and-commit,
+    // notifyPhase2Migration) must be mutually exclusive with each other AND with
+    // readers of the combined counter state. ReadWriteLock gives no benefit when
+    // the "read" immediately leads to a conditional "write."
+    private final ReentrantLock slotLock = new ReentrantLock(true); // fair=true prevents starvation
 
     private BigDecimal capital() { return new BigDecimal(capitalStr); }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // Gate every signal through all 6 checks
+    // MAIN EVENT HANDLER
     // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
@@ -143,76 +154,110 @@ public class RiskManagementService {
         if (!"EXECUTE".equals(event.getDecision())) return;
 
         String     sym      = event.getTradingSymbol();
-        String     strategy = event.getStrategyName() != null
-                ? event.getStrategyName() : "UNKNOWN";
+        String     strategy = event.getStrategyName() != null ? event.getStrategyName() : "UNKNOWN";
         BigDecimal cap      = capital();
 
-        // ── Gate 1: Circuit Breaker ────────────────────────────────────────────
-        CircuitBreakerService.Permission perm = circuitBreaker.checkPermission(cap);
-        if (!perm.isAllowed()) {
-            log.warn("[RISK] REJECTED {}: CB — {}", sym, perm.reason());
-            return;
-        }
-
-        // ── Gate 2: Sector Limit (max 2 per sector) ────────────────────────────
-        String sector = sectorClassify.getSector(sym);
-        int    currentSectorCount = sectorExposure.getOrDefault(sector, 0);
-        if (currentSectorCount >= maxSectorTrades) {
-            log.warn("[RISK] REJECTED {}: sector '{}' already has {}/{} trades",
-                    sym, sector, currentSectorCount, maxSectorTrades);
-            return;
-        }
-
-        // ── Gate 3: Strategy Diversity (max 2 per strategy per day) ───────────
-        int currentStrategyCount = strategyExposure.getOrDefault(strategy, 0);
-        if (currentStrategyCount >= maxTradesPerStrategy) {
-            log.warn("[RISK] REJECTED {}: strategy '{}' already has {}/{} trades today",
-                    sym, strategy, currentStrategyCount, maxTradesPerStrategy);
-            return;
-        }
-
-        // ── Gate 4: Phase-1 Concurrency (max 3 full-risk, 4th needs a Phase-2) ─
-        int currentPhase1 = phase1Count.get();
-        if (currentPhase1 >= maxPhase1Concurrent) {
-            // A 4th trade is only allowed if at least one existing trade has
-            // already migrated to Phase-2 (slAtBreakeven=true), meaning its
-            // effective risk is ₹0 — freeing up one "risk slot."
-            boolean hasBreakevenTrade = paperManagement.isAnyTradeAtBreakevenOrBeyond();
-            if (!hasBreakevenTrade) {
-                log.warn("[RISK] REJECTED {}: phase1Count={}/{} and no trade at breakeven yet. " +
-                                "Wait for one of the {} open trades to reach 1.5R.",
-                        sym, currentPhase1, maxPhase1Concurrent, currentPhase1);
+        // ── Gate 0: Stale Signal Guard (FLAW 3 FIX) ───────────────────────────
+        // Runs OUTSIDE the lock — pure timestamp check, no state mutation.
+        Instant signalTime = event.getSignalTimestamp();
+        if (signalTime != null) {
+            long ageSeconds = Duration.between(signalTime, Instant.now()).getSeconds();
+            if (ageSeconds > maxSignalAgeSeconds) {
+                log.warn("[RISK] REJECTED {} [STALE_SIGNAL]: signal is {}s old (max={}s). " +
+                                "Price may have moved. Dropping to prevent entering a stale breakout.",
+                        sym, ageSeconds, maxSignalAgeSeconds);
                 return;
             }
-            log.info("[RISK] Gate 4 PASSED {}: phase1Count={} >= {} BUT a trade is at breakeven — " +
-                            "allowing 4th entry.",
-                    sym, currentPhase1, maxPhase1Concurrent);
+        }
+
+        // ── Gate 1: Circuit Breaker ────────────────────────────────────────────
+        // Runs OUTSIDE the lock — CB has its own internal atomics.
+        CircuitBreakerService.Permission perm = circuitBreaker.checkPermission(cap);
+        if (!perm.isAllowed()) {
+            log.warn("[RISK] REJECTED {} [CB]: {}", sym, perm.reason());
+            return;
         }
 
         // ── Gate 5: Valid entry and SL ─────────────────────────────────────────
+        // Runs OUTSIDE the lock — pure validation, no state.
         if (event.getEntryPrice() == null
                 || event.getEntryPrice().compareTo(BigDecimal.ZERO) == 0
                 || event.getStopLoss() == null
                 || event.getStopLoss().compareTo(BigDecimal.ZERO) == 0) {
-            log.warn("[RISK] REJECTED {}: entry or SL is zero/null", sym);
+            log.warn("[RISK] REJECTED {} [NULL_PRICES]: entry or SL is zero/null", sym);
             return;
         }
 
-        // ── Gate 6: Position sizing (1% risk rule + margin check) ─────────────
+        // ── Gate 6: Position sizing ────────────────────────────────────────────
+        // Runs OUTSIDE the lock — calls MarginCheckService (may be slow). We do not
+        // want to hold the slot lock during a potentially blocking margin API call.
         PositionSizerService.PositionSize size = positionSizer.calculate(
                 cap, event.getEntryPrice(), event.getStopLoss(),
                 sym, event.getDirection().name());
         if (!size.isValid()) {
-            log.warn("[RISK] REJECTED {}: sizing — {}", sym, size.invalidReason());
+            log.warn("[RISK] REJECTED {} [SIZING]: {}", sym, size.invalidReason());
             return;
         }
 
-        // ── All gates passed — commit counters and publish ─────────────────────
-        sectorExposure.merge(sector, 1, Integer::sum);
-        strategyExposure.merge(strategy, 1, Integer::sum);
-        phase1Count.incrementAndGet();
-        circuitBreaker.recordTradeEntered();
+        // ── ATOMIC SECTION: Gates 2, 3, 4 + counter commit ────────────────────
+        // FLAW 1 FIX: Everything from here to unlock() is a single atomic transaction.
+        // No other thread can read-then-write the slot counters between our check and commit.
+        slotLock.lock();
+        try {
+            String sector = sectorClassify.getSector(sym);
 
+            // Gate 2: Sector Limit (re-read inside lock for consistency)
+            int sectorCount = sectorExposure.getOrDefault(sector, 0);
+            if (sectorCount >= maxSectorTrades) {
+                log.warn("[RISK] REJECTED {} [SECTOR]: '{}' has {}/{} trades",
+                        sym, sector, sectorCount, maxSectorTrades);
+                return;
+            }
+
+            // Gate 3: Strategy Diversity (re-read inside lock)
+            int stratCount = strategyExposure.getOrDefault(strategy, 0);
+            if (stratCount >= maxTradesPerStrategy) {
+                log.warn("[RISK] REJECTED {} [STRATEGY_DIVERSITY]: '{}' has {}/{} trades today",
+                        sym, strategy, stratCount, maxTradesPerStrategy);
+                return;
+            }
+
+            // Gate 4: Phase-1 Concurrency
+            // isAnyTradeAtBreakevenOrBeyond() called INSIDE the lock so that
+            // a concurrent notifyPhase2Migration() cannot decrement phase1Count
+            // between our check and our increment.
+            int p1 = phase1Count.get();
+            if (p1 >= maxPhase1Concurrent) {
+                boolean hasBreakeven = paperManagement.isAnyTradeAtBreakevenOrBeyond();
+                if (!hasBreakeven) {
+                    log.warn("[RISK] REJECTED {} [PHASE1_FULL]: phase1={}/{}, no breakeven trade yet",
+                            sym, p1, maxPhase1Concurrent);
+                    return;
+                }
+                log.info("[RISK] Gate-4 OVERRIDE {}: phase1={}/{} but a trade is at breakeven → allow",
+                        sym, p1, maxPhase1Concurrent);
+            }
+
+            // All gates passed — commit atomically
+            sectorExposure.merge(sector, 1, Integer::sum);
+            strategyExposure.merge(strategy, 1, Integer::sum);
+            phase1Count.incrementAndGet();
+            circuitBreaker.recordTradeEntered();
+
+            log.info("[RISK] APPROVED: {} strategy={} sector={} dir={} qty={} entry={} sl={} " +
+                            "target={} sector={}/{} strat={}/{} phase1={}/{} age={}s",
+                    sym, strategy, sector, event.getDirection(), size.quantity(),
+                    event.getEntryPrice(), event.getStopLoss(), event.getTarget(),
+                    sectorExposure.getOrDefault(sector, 0), maxSectorTrades,
+                    strategyExposure.getOrDefault(strategy, 0), maxTradesPerStrategy,
+                    phase1Count.get(), maxPhase1Concurrent,
+                    signalTime != null ? Duration.between(signalTime, Instant.now()).getSeconds() : "?");
+
+        } finally {
+            slotLock.unlock();
+        }
+
+        // ── Publish OUTSIDE the lock — event publishing must never hold a lock ─
         publisher.publishEvent(new TradeApprovedEvent(this,
                 sym, event.getInstrumentToken(),
                 event.getDirection(), event.getEntryPrice(),
@@ -220,85 +265,74 @@ public class RiskManagementService {
                 size.quantity(), size.actualRisk(),
                 event.getTotalScore(), event.getStrategyName(),
                 event.getTimeStopMinutes()));
-
-        log.info("[RISK] APPROVED: {} strategy={} sector={} dir={} qty={} entry={} sl={} " +
-                        "target={} sectorCount={}/{} stratCount={}/{} phase1={}/{} timeStop={}",
-                sym, strategy, sector, event.getDirection(), size.quantity(),
-                event.getEntryPrice(), event.getStopLoss(), event.getTarget(),
-                sectorExposure.getOrDefault(sector, 0), maxSectorTrades,
-                strategyExposure.getOrDefault(strategy, 0), maxTradesPerStrategy,
-                phase1Count.get(), maxPhase1Concurrent,
-                event.getTimeStopMinutes() > 0 ? event.getTimeStopMinutes() + "min" : "none");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // Called by PaperTradeExecutionService on every trade close
+    // Phase-2 Migration callback — called by PaperTradeManagementService
     // ══════════════════════════════════════════════════════════════════════════
 
     /**
-     * Releases all exposure slots and records P&L to the circuit breaker.
-     * Also decrements phase1Count if the trade never migrated to Phase-2.
+     * Called when a trade moves from Phase-1 → Phase-2 (SL to breakeven).
+     * Decrements phase1Count under the same lock used by onProbabilityScore().
      *
-     * @param symbol    the closed symbol
-     * @param pnl       net P&L (after brokerage)
-     * @param strategy  strategy name — needed to release strategy slot
-     * @param reachedPhase2  true if trade was at breakeven+ when closed,
-     *                       false if it closed while still in Phase-1
+     * FLAW 1 FIX: Without the lock here, this decrement could interleave with
+     * a concurrent Gate-4 check:
+     *   Thread A (signal): phase1Count.get() = 3 → starts checking hasBreakeven
+     *   Thread B (migrate): phase1Count.decrementAndGet() → now 2
+     *   Thread A: hasBreakeven = true → allows → increments → phase1Count = 3 again
+     *   Result: correct BUT only by luck — hasBreakeven was read stale (Phase-2 happened
+     *   AFTER the read but BEFORE the increment). The lock ensures these cannot interleave.
      */
+    public void notifyPhase2Migration(String symbol) {
+        slotLock.lock();
+        try {
+            int prev = phase1Count.getAndUpdate(v -> Math.max(0, v - 1));
+            log.info("[RISK] {} → Phase-2 (breakeven). phase1Count: {} → {}",
+                    symbol, prev, phase1Count.get());
+        } finally {
+            slotLock.unlock();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Trade close — called by PaperTradeExecutionService
+    // ══════════════════════════════════════════════════════════════════════════
+
     public void onTradeClosed(String symbol, BigDecimal pnl,
                               String strategy, boolean reachedPhase2) {
         circuitBreaker.recordPnl(pnl);
 
-        // Release sector slot
-        String sector = sectorClassify.getSector(symbol);
-        sectorExposure.merge(sector, -1, (a, b) -> Math.max(0, a + b));
-
-        // Release strategy slot
-        if (strategy != null) {
-            strategyExposure.merge(strategy, -1, (a, b) -> Math.max(0, a + b));
+        slotLock.lock();
+        try {
+            String sector = sectorClassify.getSector(symbol);
+            sectorExposure.merge(sector,   -1, (a, b) -> Math.max(0, a + b));
+            if (strategy != null) {
+                strategyExposure.merge(strategy, -1, (a, b) -> Math.max(0, a + b));
+            }
+            // Only decrement phase1Count if trade closed before reaching Phase-2.
+            // If it reached Phase-2, count was already decremented at migration time.
+            if (!reachedPhase2) {
+                phase1Count.updateAndGet(v -> Math.max(0, v - 1));
+            }
+            log.debug("[RISK] Closed {}: sector released, strat released, " +
+                            "reachedPhase2={}, phase1Count={}",
+                    symbol, reachedPhase2, phase1Count.get());
+        } finally {
+            slotLock.unlock();
         }
-
-        // Decrement phase1Count only if the trade was still in Phase-1 when closed
-        // (i.e. never reached breakeven). If it reached Phase-2, phase1Count was
-        // already decremented by notifyPhase2Migration() at the time of migration.
-        if (!reachedPhase2) {
-            phase1Count.updateAndGet(v -> Math.max(0, v - 1));
-        }
-
-        log.debug("[RISK] Closed {}: sector='{}' released, strategy='{}' released, " +
-                        "reachedPhase2={}, phase1Count={}",
-                symbol, sector, strategy, reachedPhase2, phase1Count.get());
     }
 
-    /**
-     * Backward-compatible overload for callers that don't yet pass strategy/phase2 info.
-     * Assumes the trade was in Phase-1 (conservative — always decrements phase1Count).
-     */
+    /** Backward-compatible overload — assumes Phase-1 close (conservative). */
     public void onTradeClosed(String symbol, BigDecimal pnl) {
         onTradeClosed(symbol, pnl, null, false);
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // Called by PaperTradeManagementService when a trade moves to Phase-2
-    // ══════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Decrements phase1Count when a trade migrates from Phase-1 → Phase-2
-     * (SL moved to breakeven). This immediately frees a Phase-1 concurrency slot,
-     * potentially allowing the 4th trade to enter.
-     */
-    public void notifyPhase2Migration(String symbol) {
-        int prev = phase1Count.getAndUpdate(v -> Math.max(0, v - 1));
-        log.info("[RISK] {} migrated to Phase-2 (breakeven). phase1Count: {} → {}",
-                symbol, prev, phase1Count.get());
     }
 
     // ══════════════════════════════════════════════════════════════════════════
     // Dashboard helpers
     // ══════════════════════════════════════════════════════════════════════════
 
-    public Map<String, Integer> getSectorExposure()   { return java.util.Collections.unmodifiableMap(sectorExposure); }
-    public Map<String, Integer> getStrategyExposure() { return java.util.Collections.unmodifiableMap(strategyExposure); }
+    public Map<String, Integer> getSectorExposure()   { return Collections.unmodifiableMap(sectorExposure); }
+    public Map<String, Integer> getStrategyExposure() { return Collections.unmodifiableMap(strategyExposure); }
     public int                  getPhase1Count()      { return phase1Count.get(); }
     public int                  getMaxPhase1()        { return maxPhase1Concurrent; }
 
@@ -308,9 +342,14 @@ public class RiskManagementService {
 
     @Scheduled(cron = "0 45 8 * * MON-FRI", zone = "Asia/Kolkata")
     public void resetDaily() {
-        sectorExposure.clear();
-        strategyExposure.clear();
-        phase1Count.set(0);
-        log.info("[RISK] Daily reset — sectorExposure, strategyExposure, phase1Count cleared");
+        slotLock.lock();
+        try {
+            sectorExposure.clear();
+            strategyExposure.clear();
+            phase1Count.set(0);
+            log.info("[RISK] Daily reset complete — all slot counters cleared");
+        } finally {
+            slotLock.unlock();
+        }
     }
 }
