@@ -8,14 +8,12 @@ import com.trading.marketdata.service.MarketTimingService;
 import com.trading.papertrading.model.PaperAccount;
 import com.trading.risk.service.RiskManagementService;
 import jakarta.annotation.PreDestroy;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -26,24 +24,33 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * Paper trading execution — exact mirror of TradeExecutionService.
+ * PaperTradeExecutionService — simulates Zerodha order execution for paper mode.
  *
- * Differences from live TradeExecutionService:
- *   1. Only fires when trading.mode=PAPER
- *   2. No ZerodhaOrderClient — fills simulated at LTP ± slippage
- *   3. Trade entity stored in-memory only (no JPA/DB save)
- *   4. Registers with PaperTradeManagementService instead of TradeManagementService
+ * ═══════════════════════════════════════════════════════════════════════
+ * CHANGES vs previous version:
  *
- * FIXES vs original:
+ * 1. closeTrade() now accepts a boolean reachedPhase2 parameter.
+ *    This is forwarded to riskService.onTradeClosed(symbol, pnl, strategy, reachedPhase2)
+ *    so RiskManagementService can correctly decrement phase1Count:
+ *      - reachedPhase2=true  → phase1Count was already decremented at migration time,
+ *                              do NOT decrement again.
+ *      - reachedPhase2=false → trade closed while still in Phase-1,
+ *                              decrement phase1Count now.
  *
- *   FIX 1 — timeStopMinutes passed to PaperTradeManagementService.register()
- *     TradeApprovedEvent carries timeStopMinutes from the strategy's TradeSignal
- *     (e.g. VAP Pullback = 30 min, 7-Gate = 0 = no time stop).
- *     The original register() call had no timeStopMinutes parameter — time stops
- *     were never enforced in paper mode. Now they are.
+ * 2. Backward-compatible 3-param closeTrade(trade, exitPrice, reason) preserved
+ *    for any callers that don't know about phase2 yet (defaults to false).
  *
- *     If TradeApprovedEvent doesn't have getTimeStopMinutes() (older event class),
- *     defaults safely to 0 (no time stop). No breaking change.
+ * 3. riskService.onTradeClosed() now called with all 4 params for accurate
+ *    10-2-3 slot manager counter management.
+ *
+ * PRESERVED UNCHANGED:
+ *   - Entry slippage simulation
+ *   - Trading window and duplicate trade guards
+ *   - ATR estimation, strongTrend logic
+ *   - timeStopMinutes pipeline (FIX 1)
+ *   - PaperAccount.applyPnl() call
+ *   - publishResult() event publishing
+ * ═══════════════════════════════════════════════════════════════════════
  */
 @Service
 @Slf4j
@@ -86,21 +93,18 @@ public class PaperTradeExecutionService {
     private final List<Trade>        todayTrades  = Collections.synchronizedList(new ArrayList<>());
 
     // ══════════════════════════════════════════════════════════════════════════
-    // ENTRY — fires on TradeApprovedEvent (same as live TradeExecutionService)
+    // ENTRY — fires on TradeApprovedEvent
     // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
     @Async("tradingExecutor")
     public void onTradeApproved(TradeApprovedEvent event) {
 
-        // Only run in PAPER mode
         if (!"PAPER".equalsIgnoreCase(tradingMode)) {
-            log.debug("[LIVE] Skipping TradeApprovedEvent — mode is {}. PaperTradeExecutionService handles this.",
-                    tradingMode);
+            log.debug("[LIVE] Skipping TradeApprovedEvent — mode is {}.", tradingMode);
             return;
         }
 
-        // Trading window check — same as live
         if (!isWithinWindow()) {
             log.warn("[PAPER] Outside trading window — rejected: {}", event.getTradingSymbol());
             return;
@@ -109,7 +113,6 @@ public class PaperTradeExecutionService {
         String sym = event.getTradingSymbol();
         int    qty = event.getQuantity();
 
-        // Guard: no duplicate active trade — same as live
         if (activeTrades.containsKey(sym)) {
             log.warn("[PAPER] Trade already active for {} — skipping", sym);
             return;
@@ -119,14 +122,12 @@ public class PaperTradeExecutionService {
                 sym, event.getDirection(), qty,
                 event.getEntryPrice(), event.getStopLoss(), event.getTarget());
 
-        // Simulate ENTRY fill — LTP ± slippage (no API call)
         BigDecimal rawEntry  = event.getEntryPrice();
         BigDecimal fillPrice = simulateEntryFill(rawEntry, event.getDirection());
 
         String entryOrderId = "PAPER-ENTRY-" + sym + "-" + System.currentTimeMillis();
         String slOrderId    = "PAPER-SL-"    + sym + "-" + System.currentTimeMillis();
 
-        // Build Trade entity — identical structure to live
         Trade trade = Trade.builder()
                 .tradeDate(LocalDate.now())
                 .tradingSymbol(sym)
@@ -134,7 +135,7 @@ public class PaperTradeExecutionService {
                 .direction(event.getDirection())
                 .status("OPEN")
                 .entryTime(Instant.now())
-                .entryPrice(fillPrice)      // paper: simulated fill price
+                .entryPrice(fillPrice)
                 .entryOrderId(entryOrderId)
                 .quantity(qty)
                 .stopLoss(event.getStopLoss())
@@ -149,7 +150,6 @@ public class PaperTradeExecutionService {
         activeTrades.put(sym, trade);
         todayTrades.add(trade);
 
-        // ATR estimate (2× SL distance)
         double estimatedAtr = event.getStopLoss() != null && event.getEntryPrice() != null
                 ? event.getEntryPrice().subtract(event.getStopLoss()).abs()
                 .multiply(BigDecimal.valueOf(2)).doubleValue()
@@ -157,52 +157,43 @@ public class PaperTradeExecutionService {
 
         boolean strongTrend = isStrongTrend();
 
-        // FIX 1: Read timeStopMinutes from event (defaults to 0 if not present)
         int timeStopMinutes = 0;
         try {
             timeStopMinutes = event.getTimeStopMinutes();
-        } catch (Exception ignored) {
-            // TradeApprovedEvent may not have this field in older versions
-            // 0 = no time stop — safe default
-        }
+        } catch (Exception ignored) { }
 
-        // Register with PaperTradeManagementService — now passes timeStopMinutes
         paperManagement.register(trade, estimatedAtr,
                 timingService.getCurrentWindow(), strongTrend, timeStopMinutes);
 
-        log.info("[PAPER] Trade registered: {} fill={} (raw={} slip={}%) atr={} " +
-                        "window={} strongTrend={} timeStop={}min",
-                sym, fillPrice, rawEntry,
-                String.format("%.3f", ENTRY_SLIP * 100),
-                String.format("%.2f", estimatedAtr),
+        log.info("[PAPER] Registered: {} fill={} (raw={} slip={:.3f}%) atr={:.2f} " +
+                        "window={} trend={} timeStop={}",
+                sym, fillPrice, rawEntry, ENTRY_SLIP * 100, estimatedAtr,
                 timingService.getCurrentWindow(), strongTrend,
-                timeStopMinutes > 0 ? timeStopMinutes : "none");
+                timeStopMinutes > 0 ? timeStopMinutes + "min" : "none");
 
         publishResult(sym, "ENTERED", entryOrderId, slOrderId,
                 fillPrice, null, BigDecimal.ZERO, null);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // SHUTDOWN — close all positions on app shutdown
-    // ══════════════════════════════════════════════════════════════════════════
-
-    @PreDestroy
-    public void onShutdown() {
-        if (!"PAPER".equalsIgnoreCase(tradingMode)) return;
-        if (activeTrades.isEmpty()) return;
-        log.warn("[PAPER] App shutdown — force closing {} positions", activeTrades.size());
-        new ArrayList<>(activeTrades.values())
-                .forEach(trade -> closeTrade(trade, trade.getEntryPrice(), "APP_SHUTDOWN"));
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
     // closeTrade — called by PaperTradeManagementService
-    // Mirrors TradeExecutionService.closeTrade() exactly
     // ══════════════════════════════════════════════════════════════════════════
 
-    public void closeTrade(Trade trade, BigDecimal exitPrice, String reason) {
+    /**
+     * Full close with phase-2 flag.
+     *
+     * @param trade          the trade entity to close
+     * @param exitPrice      tick-aligned exit fill price
+     * @param reason         exit reason string (SL, TARGET, TIME_STOP, etc.)
+     * @param reachedPhase2  true if trade had slAtBreakeven=true when closed.
+     *                       Forwarded to RiskManagementService to avoid double-decrementing
+     *                       phase1Count (it was already decremented at migration time).
+     */
+    public void closeTrade(Trade trade, BigDecimal exitPrice,
+                           String reason, boolean reachedPhase2) {
         if (!"OPEN".equals(trade.getStatus())) return;
-        String sym = trade.getTradingSymbol();
+        String sym      = trade.getTradingSymbol();
+        String strategy = trade.getStrategyName();
 
         // P&L — uses remainingQty from management service for partial-exit accuracy
         BigDecimal pnl = trade.getDirection() == TradeDirection.LONG
@@ -217,7 +208,7 @@ public class PaperTradeExecutionService {
                                 ? paperManagement.getRemainingQty(sym, trade.getQuantity())
                                 : trade.getQuantity()));
 
-        // Flat ₹40 brokerage per round trip
+        // Flat ₹40 brokerage per round trip (full close leg)
         BigDecimal brokerage = BigDecimal.valueOf(40.0);
         BigDecimal netPnl    = pnl.subtract(brokerage);
 
@@ -229,26 +220,45 @@ public class PaperTradeExecutionService {
         trade.setUpdatedAt(Instant.now());
 
         activeTrades.remove(sym);
-
-        // Update virtual account — full close
         account.applyPnl(netPnl);
 
-        // Notify risk service — releases sector slot, records P&L for CB
-        riskService.onTradeClosed(sym, netPnl);
+        // Notify risk service — releases sector slot, strategy slot, phase1Count, records P&L
+        riskService.onTradeClosed(sym, netPnl, strategy, reachedPhase2);
 
-        log.info("[PAPER] Trade CLOSED: {} reason={} gross=₹{} brok=₹{} NET=₹{}",
+        log.info("[PAPER] CLOSED: {} reason={} gross=₹{:.2f} brok=₹{:.2f} NET=₹{:.2f} phase2={}",
                 sym, reason,
-                String.format("%.2f", pnl.doubleValue()),
-                String.format("%.2f", brokerage.doubleValue()),
-                String.format("%.2f", netPnl.doubleValue()));
+                pnl.doubleValue(), brokerage.doubleValue(), netPnl.doubleValue(),
+                reachedPhase2);
 
         publishResult(sym, "CLOSED",
                 trade.getEntryOrderId(), trade.getSlOrderId(),
                 trade.getEntryPrice(), exitPrice, netPnl, reason);
     }
 
+    /**
+     * Backward-compatible 3-param overload.
+     * Assumes trade never reached Phase-2 (conservative — decrements phase1Count).
+     * Used by app shutdown handler and any legacy callers.
+     */
+    public void closeTrade(Trade trade, BigDecimal exitPrice, String reason) {
+        closeTrade(trade, exitPrice, reason, false);
+    }
+
     // ══════════════════════════════════════════════════════════════════════════
-    // Dashboard getters — same signatures as live TradeExecutionService
+    // Shutdown — close all on app stop
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @PreDestroy
+    public void onShutdown() {
+        if (!"PAPER".equalsIgnoreCase(tradingMode)) return;
+        if (activeTrades.isEmpty()) return;
+        log.warn("[PAPER] App shutdown — force closing {} positions", activeTrades.size());
+        new ArrayList<>(activeTrades.values())
+                .forEach(trade -> closeTrade(trade, trade.getEntryPrice(), "APP_SHUTDOWN", false));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Dashboard getters
     // ══════════════════════════════════════════════════════════════════════════
 
     public Collection<Trade> getActiveTrades() {

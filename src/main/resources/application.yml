@@ -1,7 +1,6 @@
 spring:
   application:
     name: trading-platform
-
   datasource:
     url: ${DB_URL}
     username: ${DB_USERNAME}
@@ -11,28 +10,23 @@ spring:
       maximum-pool-size: 20
       minimum-idle: 5
       connection-timeout: 30000
-
   jpa:
     open-in-view: false
     hibernate:
       ddl-auto: none
     show-sql: false
-
   flyway:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
-
   data:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD:}
       timeout: 2000ms
-
   session:
     timeout: 28800
-
   task:
     execution:
       pool:
@@ -59,13 +53,12 @@ zerodha:
   totp-secret: ${ZERODHA_TOTP_SECRET:}
   redirect-url: ${ZERODHA_REDIRECT_URL:http://localhost:8081/api/auth/callback}
   auto-login: true
-
   websocket:
     max-reconnects: 20
     reconnect-delay-ms: 5000
 
 # ================================
-# TRADING CORE (NO RISK LOGIC HERE NOW)
+# TRADING CORE
 # ================================
 trading:
   mode: ${TRADING_MODE:PAPER}
@@ -80,6 +73,15 @@ trading:
   skip-trail-on-momentum: true
   exit-on-market-turn: true
   exit-on-sector-turn: true
+
+  # ── 10-2-3 Slot Manager ──────────────────────────────────────────────
+  # Max 2 trades per strategy name per day (strategy diversity gate)
+  max-trades-per-strategy: 2
+  # Max 3 trades simultaneously in Phase-1 (full risk / no breakeven yet).
+  # A 4th trade is only unlocked once one existing trade reaches Phase-2+.
+  max-phase1-concurrent: 3
+  # Max 2 active trades per Nifty sector simultaneously (raised from 1)
+  max-sector-trades: 2
 
 # ================================
 # PAPER TRADING
@@ -96,10 +98,20 @@ paper-trading:
 # RISK CONTROL
 # ================================
 circuit-breaker:
-  max-trades-per-day: 4
-  daily-loss-cap-pct: -4.0
+  # 10-2-3: max 10 total trades per day across the entire account
+  max-trades-per-day: 10
+
+  # REQ 2a: Hard-kill at -2.5% daily loss. Closes ALL open positions immediately.
+  daily-loss-cap-pct: -2.5
+
   weekly-drawdown-cap-pct: -8.0
   monthly-drawdown-cap-pct: -15.0
+
+  # REQ 2b: Profit Lock
+  # When daily P&L reaches +profit-lock-trigger-pct%, the profit floor activates.
+  # If P&L then retraces to +profit-floor-pct%, close all positions and lock the green day.
+  profit-lock-trigger-pct: 6.0
+  profit-floor-pct: 4.0
 
 # ================================
 # MARKET FILTERS
@@ -130,59 +142,35 @@ sector:
   min-relative-strength: 0.8
 
 # ================================
-# STRATEGY (ALIGNED WITH JAVA)
+# STRATEGY
 # ================================
 strategy:
   enabled: true
-
-  # GLOBAL (Mapped to StrategyConfig.Global)
   global:
     gravity-exhaustion-pct: 1.5
     poc-proximity-pct: 1.0
-
     rvol-time-slot-enabled: true
     min-rvol-trend: 1.3
-
+    min-rvol-reversal: 1.2
+    min-rvol-impulse: 1.5
     breakeven-r-trigger: 1.5
     partial-exit-r: 3.0
     trailing-mode: CANDLE_LOW
-
-    global-time-stop: 45m
-
-  # SPRING / UPTHRUST
-  spring:
-    enabled: true
-    max-depth-pct: 0.6
-    recovery-candles: 2
-    spring-signal-score: 95
-
-  # PULLBACK
-  pullback:
-    impulse-min-pct: 1.5
-    min-rvol-impulse: 1.5
-    min-rsi-impulse: 65.0
-    pullback-vol-ratio: 0.7
-    rr: 3.0
-    poc-sl-buffer: 0.0005
-    entry-start: "09:45"
-    entry-end: "14:00"
-    state-ttl-minutes: 45
-
-  # AUTO MODE
+    global-time-stop: 30m
   auto-mode:
-    sector-move-min-pct: 0.3
-    reversal-gain-min-pct: 3.0
-    range-sector-max-pct: 0.5
-    wick-ratio-min: 0.5
-    range-breakout-volume: 1.5
-    trend-rr: 2.0
-    reversal-rr: 1.8
+    sector-move-min-pct: 0.5
+    reversal-gain-min-pct: 2.8
+    range-sector-max-pct: 0.3
+    wick-ratio-min: 0.6
+    range-breakout-volume: 2.0
+    trend-rr: 2.5
+    reversal-rr: 2.0
     range-rr: 1.5
-
-  # RANGE BREAKOUT
+    trend-trail-trigger-r: 2.0
+    reversal-time-stop: 45m
   range-breakout:
     min-touches: 2
-    touch-tolerance-pct: 0.5
+    touch-tolerance-pct: 0.2
     volume-breakout-multiplier: 1.5
     body-ratio-min: 0.5
     consolidation-candles: 16
@@ -190,8 +178,17 @@ strategy:
     rr: 2.0
     entry-start: "09:45"
     entry-end: "12:00"
-
-  # ORB
+    spring-enabled: true
+    spring-max-depth-pct: 0.6
+    spring-recovery-candles: 2
+    spring-score: 95.0
+    normal-breakout-score: 80.0
+    poc-sl-buffer: 0.0005
+    trail-trigger-r: 1.5
+    time-stop: 30m
+    min-rvol-breakout: 1.4
+    min-rvol-spring: 1.2
+    vah-proximity-pct: 0.5
   orb:
     nifty-min-change-pct: 0.2
     sector-min-change-pct: 0.3
@@ -203,6 +200,23 @@ strategy:
     entry-start: "09:30"
     entry-end: "13:00"
     orb-candles: 3
+  pullback:
+    impulse-min-pct: 1.5
+    min-rvol-impulse: 1.5
+    min-rsi-impulse: 65.0
+    pullback-vol-ratio: 0.7
+    rr: 3.0
+    poc-sl-buffer: 0.0005
+    entry-start: "09:45"
+    entry-end: "14:00"
+    state-ttl-minutes: 45
+    time-stop: 30m
+  rvol:
+    history-days: 5
+    slot-minutes: 5
+    min-rvol-for-impulse: 1.5
+    min-rvol-for-signal: 1.3
+    min-rvol-for-spring: 1.2
 
 # ================================
 # NOTIFICATIONS
@@ -213,29 +227,19 @@ notifications:
     bot-token: ${TELEGRAM_BOT_TOKEN:}
     chat-id: ${TELEGRAM_CHAT_ID:}
 
-# ================================
-# SERVER
-# ================================
 server:
   port: 8081
 
-# ================================
-# ACTUATOR
-# ================================
 management:
   endpoints:
     web:
       exposure:
         include: health,info,metrics
       base-path: /internal/actuator
-
   endpoint:
     health:
       show-details: when-authorized
 
-# ================================
-# RESILIENCE
-# ================================
 resilience4j:
   retry:
     instances:
@@ -244,15 +248,9 @@ resilience4j:
         wait-duration: 500ms
         exponential-backoff-multiplier: 2.0
 
-# ================================
-# CORS
-# ================================
 app:
   allowed-origins: http://localhost:8081,http://127.0.0.1:8081
 
-# ================================
-# LOGGING
-# ================================
 logging:
   level:
     com.trading: INFO
@@ -260,13 +258,10 @@ logging:
     org.springframework: WARN
     org.hibernate: WARN
     com.zaxxer: WARN
-
   pattern:
     console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
-
   file:
     name: logs/trading-platform.log
-
   logback:
     rollingpolicy:
       max-file-size: 50MB
