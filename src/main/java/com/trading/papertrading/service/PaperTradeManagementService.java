@@ -5,15 +5,18 @@ import com.trading.domain.Candle;
 import com.trading.domain.entity.Trade;
 import com.trading.domain.enums.TradeDirection;
 import com.trading.events.CandleCompleteEvent;
+import com.trading.events.CircuitBreakerEvent;
 import com.trading.events.TickReceivedEvent;
 import com.trading.marketdata.service.MarketTimingService;
 import com.trading.papertrading.model.PaperAccount;
 import com.trading.regime.service.MarketDirectionService;
+import com.trading.risk.service.RiskManagementService;
 import com.trading.scanner.service.SevenGateScannerService;
 import com.trading.sector.service.SectorClassificationService;
 import com.trading.sector.service.SectorStrengthService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -27,85 +30,55 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Paper trading management — exact mirror of TradeManagementService.
- *
- * ALL 9 scenarios handled identically to live TradeManagementService:
- *   1. SL hit          → closeTrade + cooldown
- *   2. Target hit      → closeTrade
- *   3. Breakeven at 1R → update Trade.stopLoss in memory (no API call)
- *   4. Trailing SL     → update Trade.stopLoss in memory (no API call)
- *   5. Partial exit    → calculate partial P&L, credit PaperAccount, update remainingQty
- *   6. Market turns    → exit at LTP
- *   7. Sector turns    → exit at LTP
- *   8. Momentum candle → skip trailing
- *   9. Force close     → 15:00 IST
+ * PaperTradeManagementService — manages live paper trade risk migration.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * FIX 1 — TIME STOP
- *   TradeSignal specifies timeStopMinutes. manageTrade() checks elapsed
- *   time on every tick and calls closeTrade("TIME_STOP") if the trade
- *   has not resolved within the configured window.
+ * 4-PHASE SL MIGRATION (REQ 3 — exact spec):
  *
- * FIX 2 — PARTIAL EXIT P&L CREDITED TO PaperAccount
- *   handlePartialExit() calls account.applyPartialPnl() immediately.
- *   Credits capital WITHOUT incrementing trade counters.
+ *   Phase 1 — Fixed SL
+ *     Set at signal-generation time (breakout candle low − 0.05% buffer).
+ *     Checked on every tick. Gap-aware fill via simulateSlFill(sl, ltp, dir).
  *
- * FIX 3 — PaperAccount injected (needed for FIX 2)
+ *   Phase 2 — Breakeven (triggers at 1.5R)
+ *     SL moves to entry price. Risk = ₹0. "Free trade."
+ *     Notifies RiskManagementService.notifyPhase2Migration() immediately
+ *     to free one Phase-1 concurrency slot.
  *
- * ═══════════════════════════════════════════════════════════════════════
- * NSE 5-PAISE TICK ALIGNMENT  (NEW)
+ *   Phase 3 — Trailing (triggers at 2.0R, every 5-min candle close)
+ *     Trail = 1.0 × ATR behind candle close.
+ *     Skip trailing if candle body ratio ≥ 80% (momentum candle rule).
+ *     Only activates after Phase-2 (slAtBreakeven = true).
  *
- *   The previous setScale(2, HALF_UP) left fill prices at arbitrary
- *   1-paise values (e.g. ₹100.03) that NSE order books never quote,
- *   introducing systematic P&L leakage in simulation.
- *
- *   alignToTick(price, RoundingMode) enforces the 0.05 grid:
- *     LONG  SL  fill → FLOOR   (conservative — captures more loss)
- *     SHORT SL  fill → CEILING (conservative — captures more loss)
- *     LONG  target / partial / EOD fill → FLOOR   (less profit)
- *     SHORT target / partial / EOD fill → CEILING (less profit)
- *
- *   Uses pure BigDecimal arithmetic: multiply by 20 (exact), apply
- *   floor/ceiling, divide by 20. No double intermediates.
- *
- * GAP-DOWN / CIRCUIT-LIMIT SL  (NEW)
- *
- *   Old simulateSlFill only applied ±0.1% slippage against slPrice.
- *   Problem: if LTP gaps 2%+ past SL (circuit limit, news, illiquidity)
- *   the old code still filled at slPrice − 0.1%, understating the loss
- *   by ~1.9%.
- *
- *   New simulateSlFill(slPrice, ltp, dir) takes the actual market price:
- *     LONG  fill = min(slPrice × (1 − SL_SLIP), ltp)
- *     SHORT fill = max(slPrice × (1 + SL_SLIP), ltp)
- *   The "worse of" logic means gap events fill at real market depth.
- *   alignToTick is applied to the result.
- *
- * REAL NSE BROKERAGE MODEL  (NEW)
- *
- *   Old: flat ₹20 per partial exit regardless of position size.
- *   Problem: understates costs for large lots, overstates for small ones.
- *
- *   New: NseBrokerageCalculator.exitLegCost(fill, qty, dir) computes the
- *   exact exit-leg charges for NSE Equity Intraday (Zerodha):
- *
- *     Component            Rate                     Side
- *     ─────────────────────────────────────────────────────────
- *     Brokerage            min(0.03% turnover, ₹20) exit leg
- *     STT                  0.025% turnover          sell side only
- *     NSE Exchange Txn     0.00335% turnover        exit leg
- *     SEBI Charges         ₹10 per crore            exit leg
- *     GST                  18% on (brok+exch+SEBI)  exit leg
- *     Stamp Duty           0% on sell exit          (buy-side only)
- *     ─────────────────────────────────────────────────────────
- *   Entry-leg costs already charged by PaperOrderService.logFill().
+ *   Phase 4 — Partial Exit + Tighten (triggers at 3.0R)
+ *     Sell 50% of remaining position at LTP (real NSE brokerage model).
+ *     Remaining 50%: trail tightens to 0.5 × ATR.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * REFACTOR — StrategyConfig as single source of truth (partial, safe):
- *   breakevenR           → cfg.getGlobal().getBreakevenRTrigger()   [1.5]
- *   trailStartR          → cfg.getAutoMode().getTrendTrailTriggerR() [2.0]
- *   partialExitModerateR → cfg.getGlobal().getPartialExitR()        [3.0]
- *   global time-stop fallback when timeStopMinutes == 0
+ * NEW IN THIS VERSION:
+ *
+ *   1. notifyPhase2Migration()
+ *      Called by moveSlToBreakeven() to notify RiskManagementService
+ *      that this trade has left Phase-1. This immediately decrements
+ *      the Phase-1 concurrency counter, potentially unlocking the 4th trade.
+ *
+ *   2. isAnyTradeAtBreakevenOrBeyond()
+ *      Public query method for RiskManagementService Gate-4 check.
+ *      Returns true if at least one managed trade has slAtBreakeven=true.
+ *
+ *   3. CircuitBreakerEvent listener
+ *      Listens for event types ending in "CLOSE_ALL":
+ *        - "DAILY_CAP_CLOSE_ALL"    → daily loss -2.5% hit
+ *        - "PROFIT_FLOOR_CLOSE_ALL" → profit floor retrace triggered
+ *      Immediately calls forceCloseAll() to liquidate every open position.
+ *
+ *   4. onTradeClosed() now passes strategy name and Phase-2 status
+ *      to riskService.onTradeClosed() for correct counter management.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * EXECUTION INTEGRITY (REQ 4 — all already in place):
+ *   Gap-aware fill:  simulateSlFill(slPrice, ltp, dir) — "worse of" rule
+ *   Tick alignment:  alignToTick(price, RoundingMode)  — NSE 5-paise grid
+ *   Hard cutoff:     forceCloseAll() at 15:00 IST with 0.15% EOD slippage
  */
 @Service
 @Slf4j
@@ -119,7 +92,10 @@ public class PaperTradeManagementService {
     private final MarketTimingService         timing;
     private final PaperAccount               account;
     private final StrategyConfig             cfg;
+    private final RiskManagementService      riskManagement;
 
+    // @Lazy on riskManagement to break the circular dependency chain:
+    // PaperTradeManagementService → RiskManagementService → PaperTradeManagementService
     public PaperTradeManagementService(
             PaperTradeExecutionService executor,
             MarketDirectionService marketDirection,
@@ -128,7 +104,8 @@ public class PaperTradeManagementService {
             SevenGateScannerService scanner,
             MarketTimingService timing,
             PaperAccount account,
-            StrategyConfig cfg) {
+            StrategyConfig cfg,
+            @Lazy RiskManagementService riskManagement) {
         this.executor        = executor;
         this.marketDirection = marketDirection;
         this.sectorStrength  = sectorStrength;
@@ -137,6 +114,7 @@ public class PaperTradeManagementService {
         this.timing          = timing;
         this.account         = account;
         this.cfg             = cfg;
+        this.riskManagement  = riskManagement;
     }
 
     // ── @Value fields: only those with NO StrategyConfig equivalent ────────────
@@ -158,8 +136,6 @@ public class PaperTradeManagementService {
     @Value("${trading.skip-trail-on-momentum:true}")
     private boolean skipTrailOnMomentum;
 
-    // exitOnMarketTurn / exitOnSectorTurn: NOT mapped to cfg.isEnabled().
-    // cfg.isEnabled() = strategy.enabled (signal kill-switch — unrelated concern).
     @Value("${trading.exit-on-market-turn:true}")
     private boolean exitOnMarketTurn;
 
@@ -167,16 +143,11 @@ public class PaperTradeManagementService {
     private boolean exitOnSectorTurn;
 
     // ── Slippage constants ─────────────────────────────────────────────────────
-    //   SL_SLIP:     0.10% base slippage on SL orders (normal conditions).
-    //                For gaps/circuits, actual LTP overrides — see simulateSlFill.
-    //   TARGET_SLIP: 0.05% adverse slippage on target/partial exits.
-    //   EOD_SLIP:    0.15% on EOD / market-turn / time-stop exits.
-    static final double SL_SLIP     = 0.001;
-    static final double TARGET_SLIP = 0.0005;
-    static final double EOD_SLIP    = 0.0015;
+    static final double SL_SLIP     = 0.001;    // 0.10% base SL slippage
+    static final double TARGET_SLIP = 0.0005;   // 0.05% target/partial slippage
+    static final double EOD_SLIP    = 0.0015;   // 0.15% EOD / circuit-break exit (REQ 4c)
 
-    // ── NSE 5-paise tick constant ──────────────────────────────────────────────
-    // Constructed from String, never from double 0.05 (IEEE 754 has no exact repr).
+    // ── NSE 5-paise tick ──────────────────────────────────────────────────────
     static final BigDecimal TICK = new BigDecimal("0.05");
 
     // ── State ──────────────────────────────────────────────────────────────────
@@ -192,9 +163,9 @@ public class PaperTradeManagementService {
             BigDecimal     originalSl,
             BigDecimal     rDistance,
             double         atr,
-            boolean        slAtBreakeven,
-            boolean        trailActive,
-            boolean        halfExited,
+            boolean        slAtBreakeven,       // Phase-2 flag
+            boolean        trailActive,          // Phase-3 flag
+            boolean        halfExited,           // Phase-4 flag
             int            qty,
             int            remainingQty,
             MarketTimingService.TimeWindow entryWindow,
@@ -204,30 +175,36 @@ public class PaperTradeManagementService {
     ) {}
 
     // ══════════════════════════════════════════════════════════════════════════
-    // NSE TICK ALIGNMENT HELPER
+    // PUBLIC QUERY — Gate-4 support for RiskManagementService
     // ══════════════════════════════════════════════════════════════════════════
 
     /**
-     * Aligns {@code price} to the nearest NSE 5-paise (₹0.05) tick boundary.
+     * Returns true if at least one currently managed trade has its SL at
+     * breakeven or beyond (Phase-2+).
      *
-     * <h3>Algorithm</h3>
-     * Multiplying by 20 (exact reciprocal of 0.05) converts the price to a
-     * "tick count" with no rounding error. Applying FLOOR or CEILING to that
-     * integer then dividing by 20 gives the aligned grid price.
-     * MathContext.DECIMAL64 prevents scale explosion on the intermediate.
+     * Used by RiskManagementService Gate-4: if phase1Count >= maxPhase1Concurrent (3),
+     * a 4th trade is only allowed when this returns true, because one existing trade's
+     * effective capital at risk is ₹0 — its worst case is now break-even.
+     */
+    public boolean isAnyTradeAtBreakevenOrBeyond() {
+        return activeTrades.values().stream()
+                .anyMatch(ManagedTrade::slAtBreakeven);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // NSE TICK ALIGNMENT
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Aligns price to the nearest NSE 5-paise grid.
+     * Multiplies by 20 (exact), applies FLOOR/CEILING, divides by 20.
+     * Uses BigDecimal throughout — no double intermediates.
      *
-     * <h3>Conservative rounding convention</h3>
-     * <ul>
-     *   <li><b>LONG SL fill → FLOOR</b>: we exit lower → more loss captured
-     *       in the simulation → conservative (never flatters paper P&L).</li>
-     *   <li><b>SHORT SL fill → CEILING</b>: we exit higher → more loss.</li>
-     *   <li><b>LONG target / partial / EOD → FLOOR</b>: less profit.</li>
-     *   <li><b>SHORT target / partial / EOD → CEILING</b>: less profit.</li>
-     * </ul>
-     *
-     * @param price raw computed fill price (may be off the 0.05 grid)
-     * @param mode  {@link RoundingMode#FLOOR} or {@link RoundingMode#CEILING}
-     * @return price snapped to the nearest valid NSE tick, scale=2
+     * Convention (conservative = never flatters paper P&L):
+     *   LONG  SL / exit fills → FLOOR  (exit lower = more loss captured)
+     *   SHORT SL / exit fills → CEILING (exit higher = more loss captured)
+     *   LONG  target / partial / EOD → FLOOR  (less profit)
+     *   SHORT target / partial / EOD → CEILING (less profit)
      */
     static BigDecimal alignToTick(BigDecimal price, RoundingMode mode) {
         BigDecimal ticks = price.multiply(BigDecimal.valueOf(20), MathContext.DECIMAL64)
@@ -236,7 +213,35 @@ public class PaperTradeManagementService {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // Register
+    // CIRCUIT BREAKER EVENT LISTENER — REQ 2a + REQ 2b
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Listens for hard-kill circuit breaker events that require immediate
+     * liquidation of all open positions.
+     *
+     * Two event types trigger this:
+     *   "DAILY_CAP_CLOSE_ALL"    — daily loss of -2.5% reached (REQ 2a)
+     *   "PROFIT_FLOOR_CLOSE_ALL" — profit floor retrace triggered (REQ 2b)
+     *
+     * Action: close every open position at LTP + EOD_SLIP (0.15% slippage),
+     * tick-aligned. Same execution path as the 15:00 IST force close.
+     */
+    @EventListener
+    @Async("tradingExecutor")
+    public void onCircuitBreakerEvent(CircuitBreakerEvent event) {
+        if (!"PAPER".equalsIgnoreCase(tradingMode)) return;
+        String type = event.getEventType();
+        if (type == null || !type.endsWith("CLOSE_ALL")) return;
+        if (activeTrades.isEmpty()) return;
+
+        log.warn("[PAPER] CIRCUIT BREAKER CLOSE ALL triggered by [{}]: {} — liquidating {} position(s)",
+                type, event.getReason(), activeTrades.size());
+        emergencyCloseAll("CB_" + type);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Register — called by PaperTradeExecutionService after entry
     // ══════════════════════════════════════════════════════════════════════════
 
     public void register(Trade trade, double atr,
@@ -256,8 +261,8 @@ public class PaperTradeManagementService {
                 Instant.now()
         ));
 
-        log.info("[PAPER] Trade registered: {} dir={} entry={} sl={} 1R={} " +
-                        "beAt={}R trailAt={}R atr={} window={} strongTrend={} timeStop={}",
+        log.info("[PAPER] Registered: {} dir={} entry={} sl={} 1R={} " +
+                        "phase=1 beAt={}R trailAt={}R atr={} window={} trend={} timeStop={}",
                 trade.getTradingSymbol(), trade.getDirection(),
                 entry, sl, rDist,
                 cfg.getGlobal().getBreakevenRTrigger(),
@@ -269,7 +274,7 @@ public class PaperTradeManagementService {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // SCENARIO 1, 2, 3, 5 + TIME STOP: Tick-level monitoring
+    // TICK-LEVEL MONITORING — Phase 1, 2, 4 + Time Stop (on every tick)
     // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
@@ -280,7 +285,6 @@ public class PaperTradeManagementService {
         String     sym = tick.getTradingSymbol();
         BigDecimal ltp = tick.getLastTradedPrice();
         lastPrices.put(sym, ltp);
-
         manageTrade(sym, ltp);
     }
 
@@ -291,66 +295,65 @@ public class PaperTradeManagementService {
         Trade   t     = mt.trade();
         boolean long_ = t.getDirection() == TradeDirection.LONG;
 
-        // ── SCENARIO 1: SL hit ─────────────────────────────────────────────
-        // ltp is passed to model gap-down / circuit fills correctly.
+        // ── Phase 1: SL hit (gap-aware, tick-aligned) ─────────────────────────
         if (long_ ? ltp.compareTo(t.getStopLoss()) <= 0
                 : ltp.compareTo(t.getStopLoss()) >= 0) {
             BigDecimal slFill = simulateSlFill(t.getStopLoss(), ltp, t.getDirection());
-            log.info("[PAPER] SL HIT: {} sl={} ltp={} fill={}",
-                    sym, t.getStopLoss(), ltp, slFill);
-            closeTrade(sym, slFill, "STOPLOSS_HIT");
+            log.info("[PAPER] SL HIT: {} sl={} ltp={} fill={} ({})",
+                    sym, t.getStopLoss(), ltp, slFill,
+                    ltp.compareTo(t.getStopLoss().multiply(
+                            BigDecimal.valueOf(t.getDirection() == TradeDirection.LONG ? 0.999 : 1.001))) < 0
+                            ? "GAP-DOWN" : "NORMAL");
+            closeTrade(sym, slFill, "STOPLOSS_HIT", mt.slAtBreakeven());
             scanner.startCooldown(sym);
             return;
         }
 
-        // ── SCENARIO 2: Target hit ─────────────────────────────────────────
+        // ── Target hit ────────────────────────────────────────────────────────
         if (long_ ? ltp.compareTo(t.getTarget()) >= 0
                 : ltp.compareTo(t.getTarget()) <= 0) {
             BigDecimal targetFill = simulateTargetFill(t.getTarget(), t.getDirection());
-            closeTrade(sym, targetFill, "TARGET_HIT");
+            closeTrade(sym, targetFill, "TARGET_HIT", mt.slAtBreakeven());
             return;
         }
 
-        // ── TIME STOP ─────────────────────────────────────────────────────
+        // ── Time Stop ─────────────────────────────────────────────────────────
         {
-            long effectiveStopMinutes = mt.timeStopMinutes() > 0
+            long effectiveStop = mt.timeStopMinutes() > 0
                     ? mt.timeStopMinutes()
                     : cfg.getGlobal().getGlobalTimeStop().toMinutes();
-
-            long elapsedMinutes = (Instant.now().getEpochSecond()
+            long elapsed = (Instant.now().getEpochSecond()
                     - mt.entryInstant().getEpochSecond()) / 60;
-
-            if (elapsedMinutes >= effectiveStopMinutes) {
+            if (elapsed >= effectiveStop) {
                 BigDecimal eodFill = simulateEodFill(ltp, t.getDirection());
                 String label = mt.timeStopMinutes() > 0 ? "STRATEGY" : "GLOBAL";
-                log.warn("[PAPER] TIME STOP ({}): {} — {}min elapsed (limit={}min) fill={}",
-                        label, sym, elapsedMinutes, effectiveStopMinutes, eodFill);
-                closeTrade(sym, eodFill, "TIME_STOP_" + effectiveStopMinutes + "MIN");
+                log.warn("[PAPER] TIME STOP ({}): {} {}min elapsed (limit={}min) fill={}",
+                        label, sym, elapsed, effectiveStop, eodFill);
+                closeTrade(sym, eodFill, "TIME_STOP_" + effectiveStop + "MIN", mt.slAtBreakeven());
                 return;
             }
         }
 
-        // ── R-multiple ─────────────────────────────────────────────────────
+        // ── R-multiple ────────────────────────────────────────────────────────
         BigDecimal rDist = mt.rDistance();
         if (rDist.compareTo(BigDecimal.ZERO) == 0) return;
-
         double profit = long_
                 ? ltp.subtract(t.getEntryPrice()).doubleValue()
                 : t.getEntryPrice().subtract(ltp).doubleValue();
         double rMultiple = profit / rDist.doubleValue();
 
-        // ── SCENARIO 3: Breakeven ──────────────────────────────────────────
+        // ── Phase 2: Breakeven at 1.5R ────────────────────────────────────────
         if (!mt.slAtBreakeven() && rMultiple >= cfg.getGlobal().getBreakevenRTrigger()) {
             moveSlToBreakeven(sym, mt);
             mt = activeTrades.get(sym);
         }
 
-        // ── SCENARIO 5: Partial exit ───────────────────────────────────────
+        // ── Phase 4: Partial exit at 3.0R ────────────────────────────────────
         handlePartialExit(sym, mt, ltp, rMultiple);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // SCENARIO 4: Trailing SL on 5-minute candle close
+    // PHASE 3: Trailing SL — every 5-min candle close
     // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
@@ -363,8 +366,9 @@ public class PaperTradeManagementService {
         ManagedTrade mt  = activeTrades.get(sym);
         if (mt == null) return;
 
+        // REQ 3 Phase 3: skip trailing on momentum candle (body ≥ 80%)
         if (skipTrailOnMomentum && isMomentumCandle(event.getCandle())) {
-            log.debug("[PAPER] Momentum candle on {} — skip trailing", sym);
+            log.debug("[PAPER] Momentum candle {} — skip trailing", sym);
             return;
         }
 
@@ -372,6 +376,7 @@ public class PaperTradeManagementService {
     }
 
     private void updateTrailingSl(String sym, ManagedTrade mt, BigDecimal price) {
+        // Phase 3 only active after Phase-2 (slAtBreakeven = true)
         if (!mt.slAtBreakeven()) return;
 
         Trade   t     = mt.trade();
@@ -383,17 +388,16 @@ public class PaperTradeManagementService {
         double rMultiple = mt.rDistance().doubleValue() > 0
                 ? profit / mt.rDistance().doubleValue() : 0;
 
+        // Phase 3 activates at 2.0R (cfg.getAutoMode().getTrendTrailTriggerR())
         double trailStartR = cfg.getAutoMode().getTrendTrailTriggerR();
         if (rMultiple < trailStartR) {
-            log.debug("[PAPER] Trail not active for {}: {}R < {}R",
-                    sym, String.format("%.2f", rMultiple), trailStartR);
+            log.debug("[PAPER] Trail inactive {}: {:.2f}R < {:.2f}R",
+                    sym, rMultiple, trailStartR);
             return;
         }
 
         if (!mt.trailActive()) {
-            log.info("[PAPER] Trailing SL ACTIVATED: {} at {}R atr={} multiplier={}",
-                    sym, String.format("%.2f", rMultiple),
-                    String.format("%.2f", mt.atr()), trailAtrMultiplier);
+            log.info("[PAPER] Phase-3 TRAIL ACTIVATED: {} at {:.2f}R", sym, rMultiple);
             ManagedTrade updated = new ManagedTrade(
                     mt.trade(), mt.originalSl(), mt.rDistance(), mt.atr(),
                     mt.slAtBreakeven(), true, mt.halfExited(),
@@ -404,17 +408,16 @@ public class PaperTradeManagementService {
             mt = updated;
         }
 
-        double atrMultiplier = rMultiple >= trailTightenR
-                ? trailTightAtrMultiplier
-                : trailAtrMultiplier;
+        // Phase 4 ATR tighten: once halfExited (50% booked), trail at 0.5×ATR
+        // Below Phase-4 trigger: use 1.0×ATR (standard trail per spec)
+        double atrMultiplier = mt.halfExited() ? trailTightAtrMultiplier : trailAtrMultiplier;
 
         double     trailDist = mt.atr() * atrMultiplier;
         BigDecimal rawSl     = long_
                 ? price.subtract(BigDecimal.valueOf(trailDist))
                 : price.add(BigDecimal.valueOf(trailDist));
 
-        // Trailing SL is a placement price — align to tick grid.
-        // LONG: FLOOR (lower SL = conservative). SHORT: CEILING (higher SL = conservative).
+        // Align trailing SL to 5-paise grid (conservative direction)
         BigDecimal newSl = alignToTick(rawSl,
                 long_ ? RoundingMode.FLOOR : RoundingMode.CEILING);
 
@@ -425,13 +428,13 @@ public class PaperTradeManagementService {
         if (improve) {
             t.setStopLoss(newSl);
             t.setUpdatedAt(Instant.now());
-            log.info("[PAPER] Trail SL updated: {} newSl={} rMultiple={} atrMult={}",
-                    sym, newSl, String.format("%.2f", rMultiple), atrMultiplier);
+            log.info("[PAPER] Trail SL updated: {} newSl={} {:.2f}R atrMult={}",
+                    sym, newSl, rMultiple, atrMultiplier);
         }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // SCENARIO 5: Partial exit — real NSE brokerage model
+    // PHASE 4: Partial exit at 3.0R + NSE brokerage model
     // ══════════════════════════════════════════════════════════════════════════
 
     private void handlePartialExit(String sym, ManagedTrade mt,
@@ -443,6 +446,7 @@ public class PaperTradeManagementService {
         if (mt.entryWindow() == MarketTimingService.TimeWindow.LUNCH) {
             halfExitAt = partialExitLunchR;
         } else if (!mt.strongTrend()) {
+            // REQ 3 Phase 4: 3.0R trigger
             halfExitAt = cfg.getGlobal().getPartialExitR();
         }
 
@@ -450,36 +454,34 @@ public class PaperTradeManagementService {
             int     halfQty = mt.remainingQty() / 2;
             boolean long_   = mt.trade().getDirection() == TradeDirection.LONG;
 
-            // Fill: apply TARGET_SLIP then align to tick.
-            // Conservative: LONG exit → FLOOR (less profit). SHORT exit → CEILING.
             BigDecimal rawFill = long_
                     ? ltp.multiply(BigDecimal.valueOf(1.0 - TARGET_SLIP), MathContext.DECIMAL64)
                     : ltp.multiply(BigDecimal.valueOf(1.0 + TARGET_SLIP), MathContext.DECIMAL64);
             BigDecimal partialFill = alignToTick(rawFill,
                     long_ ? RoundingMode.FLOOR : RoundingMode.CEILING);
 
-            // Gross P&L for the exited lot
             BigDecimal entryPrice = mt.trade().getEntryPrice();
             BigDecimal grossPnl   = long_
                     ? partialFill.subtract(entryPrice).multiply(BigDecimal.valueOf(halfQty))
                     : entryPrice.subtract(partialFill).multiply(BigDecimal.valueOf(halfQty));
 
-            // Real NSE exit-leg cost (replaces flat ₹20)
+            // Real NSE exit-leg brokerage
             BigDecimal exitCost = NseBrokerageCalculator.exitLegCost(
                     partialFill, halfQty, mt.trade().getDirection());
             BigDecimal netPnl   = grossPnl.subtract(exitCost);
 
             account.applyPartialPnl(netPnl);
 
-            log.info("[PAPER] Partial exit: {} qty={} fill={} ({}R) " +
-                            "grossPnl={} exitCost={} netPnl={} window={} trend={}",
-                    sym, halfQty, partialFill,
-                    String.format("%.2f", halfExitAt),
+            log.info("[PAPER] Phase-4 PARTIAL EXIT: {} qty={} fill={} ({:.2f}R) " +
+                            "gross={} cost={} net={} window={} trend={}",
+                    sym, halfQty, partialFill, halfExitAt,
                     String.format("%.2f", grossPnl.doubleValue()),
                     String.format("%.2f", exitCost.doubleValue()),
                     String.format("%.2f", netPnl.doubleValue()),
                     mt.entryWindow(), mt.strongTrend());
 
+            // After Phase-4: trail tightens to 0.5×ATR (handled in updateTrailingSl
+            // via mt.halfExited() check on next candle close)
             ManagedTrade updated = new ManagedTrade(
                     mt.trade(), mt.originalSl(), mt.rDistance(), mt.atr(),
                     mt.slAtBreakeven(), mt.trailActive(), true,
@@ -491,7 +493,7 @@ public class PaperTradeManagementService {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // Move SL to breakeven
+    // PHASE 2: Move SL to breakeven
     // ══════════════════════════════════════════════════════════════════════════
 
     private void moveSlToBreakeven(String sym, ManagedTrade mt) {
@@ -507,12 +509,16 @@ public class PaperTradeManagementService {
                 mt.timeStopMinutes(), mt.entryInstant());
         activeTrades.put(sym, updated);
 
-        log.info("[PAPER] SL → BREAKEVEN: {} entry={} at {}R",
+        log.info("[PAPER] Phase-2 BREAKEVEN: {} entry={} triggered at {}R",
                 sym, t.getEntryPrice(), cfg.getGlobal().getBreakevenRTrigger());
+
+        // Notify RiskManagementService to decrement phase1Count — freeing the slot
+        // for a potential 4th trade (10-2-3 Gate 4)
+        riskManagement.notifyPhase2Migration(sym);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // SCENARIO 6 + 7: Market / sector alignment on 15-min candle
+    // SCENARIOS 6 + 7: Market / sector alignment on 15-min candle
     // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
@@ -543,7 +549,7 @@ public class PaperTradeManagementService {
                     BigDecimal ltp     = lastPrices.getOrDefault(sym, t.getEntryPrice());
                     BigDecimal eodFill = simulateEodFill(ltp, t.getDirection());
                     log.warn("[PAPER] Market turned against {} — exiting at {}", sym, eodFill);
-                    closeTrade(sym, eodFill, "MARKET_TURNED");
+                    closeTrade(sym, eodFill, "MARKET_TURNED", mt.slAtBreakeven());
                     continue;
                 }
             }
@@ -553,38 +559,49 @@ public class PaperTradeManagementService {
                     BigDecimal ltp     = lastPrices.getOrDefault(sym, t.getEntryPrice());
                     BigDecimal eodFill = simulateEodFill(ltp, t.getDirection());
                     log.warn("[PAPER] Sector turned against {} — exiting at {}", sym, eodFill);
-                    closeTrade(sym, eodFill, "SECTOR_TURNED");
+                    closeTrade(sym, eodFill, "SECTOR_TURNED", mt.slAtBreakeven());
                 }
             }
         }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // SCENARIO 9: Force close at 15:00 IST
+    // SCENARIO 9: Force close at 15:00 IST (REQ 4c — hard cutoff)
     // ══════════════════════════════════════════════════════════════════════════
 
     @Scheduled(cron = "0 0 15 * * MON-FRI", zone = "Asia/Kolkata")
     public void forceCloseAll() {
         if (!"PAPER".equalsIgnoreCase(tradingMode)) return;
         if (activeTrades.isEmpty()) return;
-        log.warn("[PAPER] FORCE CLOSE — {} positions at 15:00", activeTrades.size());
+        log.warn("[PAPER] FORCE CLOSE 15:00 — {} positions", activeTrades.size());
+        emergencyCloseAll("TIME_EXIT_15:00");
+    }
+
+    /**
+     * Closes all open positions with EOD slippage.
+     * Used by both the 15:00 scheduled close and the circuit breaker listener.
+     */
+    private void emergencyCloseAll(String reason) {
         new ArrayList<>(activeTrades.keySet()).forEach(sym -> {
-            BigDecimal ltp = lastPrices.getOrDefault(sym,
-                    activeTrades.get(sym).trade().getEntryPrice());
-            BigDecimal eodFill = simulateEodFill(ltp,
-                    activeTrades.get(sym).trade().getDirection());
-            closeTrade(sym, eodFill, "TIME_EXIT_15:00");
+            ManagedTrade mt = activeTrades.get(sym);
+            if (mt == null) return;
+            BigDecimal ltp = lastPrices.getOrDefault(sym, mt.trade().getEntryPrice());
+            BigDecimal eodFill = simulateEodFill(ltp, mt.trade().getDirection());
+            closeTrade(sym, eodFill, reason, mt.slAtBreakeven());
         });
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // closeTrade
+    // closeTrade — delegates to PaperTradeExecutionService
     // ══════════════════════════════════════════════════════════════════════════
 
-    private void closeTrade(String sym, BigDecimal exitPrice, String reason) {
+    private void closeTrade(String sym, BigDecimal exitPrice,
+                            String reason, boolean reachedPhase2) {
         ManagedTrade mt = activeTrades.remove(sym);
         if (mt == null) return;
-        executor.closeTrade(mt.trade(), exitPrice, reason);
+        // Pass phase2 status so PaperTradeExecutionService can forward it
+        // to RiskManagementService.onTradeClosed() correctly
+        executor.closeTrade(mt.trade(), exitPrice, reason, reachedPhase2);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -605,70 +622,45 @@ public class PaperTradeManagementService {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // FILL SIMULATION HELPERS
+    // FILL SIMULATION HELPERS (REQ 4)
     // ══════════════════════════════════════════════════════════════════════════
 
     /**
-     * Simulates an SL fill with gap-down / circuit-limit awareness.
-     *
-     * <p>Normal case: fill = slPrice ± SL_SLIP → alignToTick.
-     * <p>Gap case: if LTP has already moved further past SL than SL_SLIP would,
-     * the fill is at LTP. Real NSE SL-M orders fill at prevailing best price,
-     * not at trigger price, when the book has gapped through the level.
-     *
-     * <pre>
-     * LONG:  rawFill = slPrice × (1 − 0.001)
-     *        gapFill = min(rawFill, ltp)   ← ltp below rawFill = gap down
-     *        result  = alignToTick(gapFill, FLOOR)
-     *
-     * SHORT: rawFill = slPrice × (1 + 0.001)
-     *        gapFill = max(rawFill, ltp)   ← ltp above rawFill = gap up
-     *        result  = alignToTick(gapFill, CEILING)
-     * </pre>
+     * REQ 4a — Gap-aware SL fill ("worse of" rule):
+     *   LONG:  fill = min(slPrice × 0.999, ltp) → if market gapped past SL, LTP wins
+     *   SHORT: fill = max(slPrice × 1.001, ltp) → same logic
+     * REQ 4b — result aligned to NSE 5-paise grid.
      */
     static BigDecimal simulateSlFill(BigDecimal slPrice, BigDecimal ltp, TradeDirection dir) {
         if (dir == TradeDirection.LONG) {
-            BigDecimal rawFill = slPrice.multiply(
-                    BigDecimal.valueOf(1.0 - SL_SLIP), MathContext.DECIMAL64);
-            BigDecimal gapFill = rawFill.min(ltp);
+            BigDecimal raw     = slPrice.multiply(BigDecimal.valueOf(1.0 - SL_SLIP), MathContext.DECIMAL64);
+            BigDecimal gapFill = raw.min(ltp);
             return alignToTick(gapFill, RoundingMode.FLOOR);
         } else {
-            BigDecimal rawFill = slPrice.multiply(
-                    BigDecimal.valueOf(1.0 + SL_SLIP), MathContext.DECIMAL64);
-            BigDecimal gapFill = rawFill.max(ltp);
+            BigDecimal raw     = slPrice.multiply(BigDecimal.valueOf(1.0 + SL_SLIP), MathContext.DECIMAL64);
+            BigDecimal gapFill = raw.max(ltp);
             return alignToTick(gapFill, RoundingMode.CEILING);
         }
     }
 
-    /**
-     * Simulates a target fill with conservative tick alignment.
-     * TARGET_SLIP is adverse (reduces profit).
-     * LONG target → FLOOR. SHORT target → CEILING.
-     */
+    /** Target fill — conservative tick alignment. */
     static BigDecimal simulateTargetFill(BigDecimal targetPrice, TradeDirection dir) {
         if (dir == TradeDirection.LONG) {
-            BigDecimal raw = targetPrice.multiply(
-                    BigDecimal.valueOf(1.0 - TARGET_SLIP), MathContext.DECIMAL64);
+            BigDecimal raw = targetPrice.multiply(BigDecimal.valueOf(1.0 - TARGET_SLIP), MathContext.DECIMAL64);
             return alignToTick(raw, RoundingMode.FLOOR);
         } else {
-            BigDecimal raw = targetPrice.multiply(
-                    BigDecimal.valueOf(1.0 + TARGET_SLIP), MathContext.DECIMAL64);
+            BigDecimal raw = targetPrice.multiply(BigDecimal.valueOf(1.0 + TARGET_SLIP), MathContext.DECIMAL64);
             return alignToTick(raw, RoundingMode.CEILING);
         }
     }
 
-    /**
-     * Simulates an EOD / market-turn / time-stop fill.
-     * EOD_SLIP is adverse. Same conservative tick alignment as target.
-     */
+    /** REQ 4c — EOD / circuit-break fill with 0.15% slippage, tick-aligned. */
     static BigDecimal simulateEodFill(BigDecimal ltp, TradeDirection dir) {
         if (dir == TradeDirection.LONG) {
-            BigDecimal raw = ltp.multiply(
-                    BigDecimal.valueOf(1.0 - EOD_SLIP), MathContext.DECIMAL64);
+            BigDecimal raw = ltp.multiply(BigDecimal.valueOf(1.0 - EOD_SLIP), MathContext.DECIMAL64);
             return alignToTick(raw, RoundingMode.FLOOR);
         } else {
-            BigDecimal raw = ltp.multiply(
-                    BigDecimal.valueOf(1.0 + EOD_SLIP), MathContext.DECIMAL64);
+            BigDecimal raw = ltp.multiply(BigDecimal.valueOf(1.0 + EOD_SLIP), MathContext.DECIMAL64);
             return alignToTick(raw, RoundingMode.CEILING);
         }
     }
@@ -678,97 +670,35 @@ public class PaperTradeManagementService {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // NSE BROKERAGE CALCULATOR  —  EXIT LEG ONLY
+    // NSE BROKERAGE CALCULATOR — EXIT LEG ONLY
     // ══════════════════════════════════════════════════════════════════════════
 
     /**
-     * Computes NSE Equity Intraday exit-leg transaction costs, replacing the
-     * former flat ₹20 fee.
-     *
-     * <h3>Charge schedule (NSE Equity Intraday, Zerodha, FY2024-25)</h3>
-     * <pre>
-     *  Component           Rate                       Side
-     *  ──────────────────────────────────────────────────────────────────
-     *  Brokerage           min(0.03% × turnover, ₹20) exit leg
-     *  STT                 0.025% × turnover          SELL side only
-     *  NSE Exchange Txn    0.00335% × turnover        exit leg
-     *  SEBI Charges        ₹10 per crore              exit leg
-     *  GST                 18% × (brok+exch+SEBI)     exit leg
-     *  Stamp Duty          0%  on SELL exit            (buy-side only)
-     *  ──────────────────────────────────────────────────────────────────
-     * </pre>
-     *
-     * <p>Entry-leg costs (brokerage + STT + stamp on buy) are already charged
-     * by {@code PaperOrderService.logFill()}. This class only charges the exit leg
-     * to avoid double-counting.
-     *
-     * <p>STT on SHORT trades: STT applies on the sell leg. For a SHORT intraday
-     * trade the sell is the entry (charged at entry), the exit is a buy-back
-     * (no STT). Therefore STT here applies only when {@code direction == LONG}.
+     * Real NSE Equity Intraday exit-leg charges (Zerodha, FY2024-25).
+     * Replaces the former flat ₹20 fee.
+     * Entry-leg costs are charged in PaperOrderService.logFill().
      */
     static final class NseBrokerageCalculator {
 
-        /** Zerodha flat-rate: 0.03% of turnover, capped at ₹20 per order */
         private static final BigDecimal BROKERAGE_RATE    = new BigDecimal("0.0003");
         private static final BigDecimal BROKERAGE_CAP     = new BigDecimal("20.00");
-
-        /** STT: 0.025% of sell-side turnover (NSE Equity Intraday) */
         private static final BigDecimal STT_RATE          = new BigDecimal("0.00025");
-
-        /** NSE Exchange Transaction Charge: 0.00335% */
         private static final BigDecimal EXCHANGE_TXN_RATE = new BigDecimal("0.0000335");
-
-        /** SEBI Charges: ₹10 per crore = 0.0001% = 0.000001 of turnover */
         private static final BigDecimal SEBI_RATE         = new BigDecimal("0.000001");
-
-        /** GST on taxable services: 18% */
         private static final BigDecimal GST_RATE          = new BigDecimal("0.18");
 
         private NseBrokerageCalculator() {}
 
-        /**
-         * Returns total exit-leg transaction cost in ₹, rounded up (CEILING)
-         * to 2 decimal places. CEILING ensures we never understate costs.
-         *
-         * @param fillPrice  tick-aligned actual fill price
-         * @param qty        number of shares being exited
-         * @param direction  trade direction (LONG or SHORT)
-         * @return total deductible cost for this exit leg
-         */
-        static BigDecimal exitLegCost(BigDecimal fillPrice,
-                                      int qty,
-                                      TradeDirection direction) {
-            BigDecimal turnover = fillPrice.multiply(BigDecimal.valueOf(qty));
-
-            // Brokerage: min(0.03% × turnover, ₹20)
-            BigDecimal brokerage = turnover.multiply(BROKERAGE_RATE).min(BROKERAGE_CAP);
-
-            // STT: 0.025% on SELL turnover only.
-            // LONG exit = sell shares → STT applies.
-            // SHORT exit = buy-back → STT does NOT apply (was charged at short-entry).
-            BigDecimal stt = direction == TradeDirection.LONG
-                    ? turnover.multiply(STT_RATE)
-                    : BigDecimal.ZERO;
-
-            // NSE Exchange Transaction Charge: 0.00335%
+        static BigDecimal exitLegCost(BigDecimal fillPrice, int qty, TradeDirection direction) {
+            BigDecimal turnover    = fillPrice.multiply(BigDecimal.valueOf(qty));
+            BigDecimal brokerage   = turnover.multiply(BROKERAGE_RATE).min(BROKERAGE_CAP);
+            BigDecimal stt         = direction == TradeDirection.LONG
+                    ? turnover.multiply(STT_RATE) : BigDecimal.ZERO;
             BigDecimal exchangeTxn = turnover.multiply(EXCHANGE_TXN_RATE);
-
-            // SEBI charges: ₹10 per crore
-            BigDecimal sebi = turnover.multiply(SEBI_RATE);
-
-            // GST: 18% on (brokerage + exchange + SEBI)
-            BigDecimal gst = brokerage.add(exchangeTxn).add(sebi)
-                    .multiply(GST_RATE);
-
-            // Stamp duty: 0% on sell exit (buy-side only)
-            // For SHORT exit (a buy-back), stamp is negligible (~0.003%) and
-            // is already accounted for at entry in PaperOrderService.
-            BigDecimal total = brokerage.add(stt)
-                    .add(exchangeTxn)
-                    .add(sebi)
-                    .add(gst);
-
-            return total.setScale(2, RoundingMode.CEILING);
+            BigDecimal sebi        = turnover.multiply(SEBI_RATE);
+            BigDecimal gst         = brokerage.add(exchangeTxn).add(sebi).multiply(GST_RATE);
+            return brokerage.add(stt).add(exchangeTxn).add(sebi).add(gst)
+                    .setScale(2, RoundingMode.CEILING);
         }
     }
 }
