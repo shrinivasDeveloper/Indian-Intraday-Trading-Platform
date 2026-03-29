@@ -3,28 +3,29 @@ package com.trading.events;
 import com.trading.domain.enums.TradeDirection;
 import lombok.Getter;
 import org.springframework.context.ApplicationEvent;
+
 import java.math.BigDecimal;
+import java.time.Instant;
 
 /**
  * ProbabilityScoreEvent — fired by StrategyEvaluatorService when a signal passes
  * validation. Consumed by RiskManagementService.
  *
- * FIX: Added timeStopMinutes field so the strategy's time-stop instruction
- * survives the full event pipeline:
+ * ═══════════════════════════════════════════════════════════════════════
+ * FLAW 3 FIX — Stale Signal Guard:
+ *   Added signalTimestamp (Instant) field set at the moment the signal fires.
+ *   RiskManagementService Gate-0 rejects the event if
+ *   (now - signalTimestamp) > max-signal-age-seconds (default 30s).
  *
- *   TradeSignal.timeStopMinutes
- *     → StrategyEvaluatorService.fireProbabilityEvent(... timeStopMinutes)
- *     → ProbabilityScoreEvent.timeStopMinutes          ← this class
- *     → RiskManagementService reads it
- *     → TradeApprovedEvent.timeStopMinutes
- *     → PaperTradeExecutionService reads it
- *     → PaperTradeManagementService.register(... timeStopMinutes)
- *     → enforced on every tick
+ *   Why: With @Async("tradingExecutor"), the event queue can back up during
+ *   a market spike. A signal that was valid at 09:45:00 may be executed at
+ *   09:45:35 when the price has already moved 0.8% — entering a stale breakout.
  *
- * Backward compatibility:
- *   - Old 18-param constructor kept, defaults timeStopMinutes to 0.
- *   - New 19-param constructor adds timeStopMinutes as the last param.
- *   - All existing callers continue to compile with no changes.
+ * BACKWARD COMPATIBILITY:
+ *   Original 18-param constructor preserved — defaults timeStopMinutes=0
+ *   and signalTimestamp=Instant.now() (safe default, gate will not reject
+ *   events constructed without explicit timestamp).
+ * ═══════════════════════════════════════════════════════════════════════
  */
 @Getter
 public class ProbabilityScoreEvent extends ApplicationEvent {
@@ -47,10 +48,23 @@ public class ProbabilityScoreEvent extends ApplicationEvent {
     private final BigDecimal     volatilityScore;
     private final BigDecimal     liquidityScore;
 
-    /** FIX: strategy time stop in minutes (0 = no time stop) */
+    /** Strategy time stop in minutes (0 = no time stop) */
     private final int timeStopMinutes;
 
-    // ── Original 18-param constructor — backward compatible ──────────────────
+    /**
+     * FLAW 3 FIX: Timestamp set at signal-fire time.
+     * RiskManagementService uses this to reject signals older than 30s.
+     */
+    private final Instant signalTimestamp;
+
+    /**
+     * Dynamic entry slippage % computed by ImpactCostCalculator at signal time.
+     * Replaces the flat ENTRY_SLIP=0.0005 constant in PaperTradeExecutionService.
+     * 0.0 means "not computed" — PaperTradeExecutionService falls back to formula.
+     */
+    private final double impactSlipPct;
+
+    // ── Original 18-param constructor — backward compatible ───────────────────
     public ProbabilityScoreEvent(Object src, String sym, long token,
                                  BigDecimal score, String decision,
                                  TradeDirection dir, BigDecimal entry,
@@ -59,10 +73,10 @@ public class ProbabilityScoreEvent extends ApplicationEvent {
                                  BigDecimal p, BigDecimal v, BigDecimal vw,
                                  BigDecimal vo, BigDecimal l) {
         this(src, sym, token, score, decision, dir, entry, sl, tgt, strategy,
-                r, s, st, p, v, vw, vo, l, 0);
+                r, s, st, p, v, vw, vo, l, 0, Instant.now(), 0.0);
     }
 
-    // ── New 19-param constructor — carries timeStopMinutes ────────────────────
+    // ── 19-param constructor — carries timeStopMinutes ────────────────────────
     public ProbabilityScoreEvent(Object src, String sym, long token,
                                  BigDecimal score, String decision,
                                  TradeDirection dir, BigDecimal entry,
@@ -71,16 +85,41 @@ public class ProbabilityScoreEvent extends ApplicationEvent {
                                  BigDecimal p, BigDecimal v, BigDecimal vw,
                                  BigDecimal vo, BigDecimal l,
                                  int timeStopMinutes) {
+        this(src, sym, token, score, decision, dir, entry, sl, tgt, strategy,
+                r, s, st, p, v, vw, vo, l, timeStopMinutes, Instant.now(), 0.0);
+    }
+
+    // ── Full constructor — carries all fields including timestamp + impactSlip ─
+    public ProbabilityScoreEvent(Object src, String sym, long token,
+                                 BigDecimal score, String decision,
+                                 TradeDirection dir, BigDecimal entry,
+                                 BigDecimal sl, BigDecimal tgt, String strategy,
+                                 BigDecimal r, BigDecimal s, BigDecimal st,
+                                 BigDecimal p, BigDecimal v, BigDecimal vw,
+                                 BigDecimal vo, BigDecimal l,
+                                 int timeStopMinutes,
+                                 Instant signalTimestamp,
+                                 double impactSlipPct) {
         super(src);
-        tradingSymbol    = sym;      instrumentToken = token;
-        totalScore       = score;    this.decision   = decision;
-        direction        = dir;      entryPrice      = entry;
-        stopLoss         = sl;       this.target     = tgt;
-        strategyName     = strategy; regimeScore     = r;
-        sectorScore      = s;        structureScore  = st;
-        patternScore     = p;        volumeScore     = v;
-        vwapScore        = vw;       volatilityScore = vo;
+        tradingSymbol    = sym;
+        instrumentToken  = token;
+        totalScore       = score;
+        this.decision    = decision;
+        direction        = dir;
+        entryPrice       = entry;
+        stopLoss         = sl;
+        this.target      = tgt;
+        strategyName     = strategy;
+        regimeScore      = r;
+        sectorScore      = s;
+        structureScore   = st;
+        patternScore     = p;
+        volumeScore      = v;
+        vwapScore        = vw;
+        volatilityScore  = vo;
         liquidityScore   = l;
-        this.timeStopMinutes = timeStopMinutes;
+        this.timeStopMinutes  = timeStopMinutes;
+        this.signalTimestamp  = signalTimestamp != null ? signalTimestamp : Instant.now();
+        this.impactSlipPct    = impactSlipPct;
     }
 }

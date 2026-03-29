@@ -1,11 +1,12 @@
 package com.trading.risk.service;
 
 import com.trading.events.CircuitBreakerEvent;
+import com.trading.marketdata.service.VixService;
 import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -15,53 +16,82 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * CircuitBreakerService — account-level protection with 10-2-3 Slot Manager limits.
+ * CircuitBreakerService — account-level protection with dynamic profit floor.
  *
  * ═══════════════════════════════════════════════════════════════════════
- * CHANGES vs original:
+ * FLAW 5 FIX — Dynamic Trailing Profit Floor:
  *
- * 1. MAX TRADES PER DAY → 10 (was 4/2)
- *    application.yml: circuit-breaker.max-trades-per-day: 10
+ *   PROBLEM: Fixed floor at +4% is static. If P&L reaches +10%, the floor
+ *   stays at +4% — you could give back 6% before the trigger fires. On a
+ *   strong trending day this is unacceptable risk management.
  *
- * 2. DAILY LOSS CAP → -2.5% (was -4.0%)
- *    application.yml: circuit-breaker.daily-loss-cap-pct: -2.5
- *    On trip: publishes CircuitBreakerEvent("DAILY_CAP_CLOSE_ALL", ...)
- *    PaperTradeManagementService listens to this event and force-closes
- *    all open positions immediately at LTP + EOD slippage.
+ *   SOLUTION: The floor trails the P&L dynamically using VIX to compute
+ *   the "give-back" width (how much retrace to tolerate before locking).
  *
- * 3. PROFIT LOCK (NEW)
- *    Two new @Value fields:
- *      profit-lock-trigger-pct: 6.0  → activate lock when daily P&L >= +6%
- *      profit-floor-pct:        4.0  → if P&L retraces to +4%, close all and lock day
- *    Logic in recordPnl():
- *      - When dailyPnlPct crosses +6% → set profitLockActivated = true, store floorPct
- *      - Every subsequent recordPnl call → if profitLockActivated and pct <= floorPct
- *        → publish CircuitBreakerEvent("PROFIT_FLOOR_CLOSE_ALL", ...)
- *        → stop all new trading for the day
- *    This guarantees the day ends green at +4% minimum once +6% is reached.
+ *   Dynamic Give-Back Formula:
+ *     dailyVol      = vixValue / sqrt(252) / 100    (annualised VIX → 1-day sigma)
+ *     giveBack      = max(minGivebackPct, dailyVol × givebackMultiplier)
+ *     dynamicFloor  = currentDailyPnlPct − giveBack
+ *     trailingFloor = max(trailingFloor, dynamicFloor)
+ *     trailingFloor = max(trailingFloor, profitFloorPct)  ← never below static floor
  *
- * 4. ALL EXISTING LOGIC PRESERVED UNCHANGED:
- *    - Weekly cap, monthly cap
- *    - manualReset() dashboard button
- *    - recordTradeEntered(), checkPermission()
- *    - Daily/weekly/monthly scheduled resets
+ *   On every recordPnl() call after lock activation:
+ *     if dailyPnlPct <= trailingFloor → CLOSE_ALL and lock the day
+ *
+ *   Numerical examples (VIX=15, givebackMultiplier=2.0, minGiveback=0.5%):
+ *     P&L=+6%:  dailyVol=0.944% → giveback=max(0.5,1.888)=1.888% → floor=4.11% → trailing=max(4.0,4.11)=4.11%
+ *     P&L=+8%:  giveback=1.888% → dynamic=6.11% → trailing=max(4.11,6.11)=6.11%
+ *     P&L=+10%: giveback=1.888% → dynamic=8.11% → trailing=max(6.11,8.11)=8.11%
+ *     P&L retraces to 8.00% → 8.00 <= 8.11 → CLOSE_ALL → day locked at ~8%
+ *
+ *   VIX=25 example (volatile day):
+ *     dailyVol=1.573% → giveback=max(0.5,3.147)=3.147%
+ *     P&L=+6%: dynamic=2.853% → trailing=max(4.0,2.853)=4.0% (static floor dominates)
+ *     P&L=+8%: dynamic=4.853% → trailing=max(4.0,4.853)=4.853%
+ *     High VIX = wider give-back = floor rises more slowly. Appropriate: volatile days
+ *     have larger natural swings, tighter floor would close prematurely.
+ *
+ *   Config (all in application.yml):
+ *     circuit-breaker.profit-lock-trigger-pct:  6.0
+ *     circuit-breaker.profit-floor-pct:         4.0   (static minimum floor)
+ *     circuit-breaker.giveback-multiplier:      2.0
+ *     circuit-breaker.min-giveback-pct:         0.5
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * THREAD SAFETY:
+ *   profitLockActivated and profitFloorTripped are volatile booleans.
+ *   trailingFloor is a volatile double — reads/writes are atomic on 64-bit JVMs.
+ *   recordPnl() is synchronized to prevent concurrent floor updates from
+ *   multiple closing trades racing to update trailingFloor.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ * PRESERVED FROM ORIGINAL:
+ *   - Daily/weekly/monthly P&L caps
+ *   - maxPerDay trade count
+ *   - manualReset() dashboard button
+ *   - All @Scheduled resets
  * ═══════════════════════════════════════════════════════════════════════
  */
 @Service
 @Slf4j
-@RequiredArgsConstructor
 public class CircuitBreakerService {
 
     private final ApplicationEventPublisher publisher;
+    private final VixService               vixService;
+
+    // @Lazy on VixService to avoid potential startup ordering issues
+    public CircuitBreakerService(ApplicationEventPublisher publisher,
+                                 @Lazy VixService vixService) {
+        this.publisher  = publisher;
+        this.vixService = vixService;
+    }
 
     // ── Config ─────────────────────────────────────────────────────────────────
 
-    /** REQ 1a: Max 10 total trades per day across the account */
     @Getter
     @Value("${circuit-breaker.max-trades-per-day:10}")
     private int maxPerDay;
 
-    /** REQ 2a: Hard-kill all trading at this daily loss %. Close all immediately. */
     @Value("${circuit-breaker.daily-loss-cap-pct:-2.5}")
     private double dailyCap;
 
@@ -71,63 +101,69 @@ public class CircuitBreakerService {
     @Value("${circuit-breaker.monthly-drawdown-cap-pct:-15.0}")
     private double monthlyCap;
 
-    /**
-     * REQ 2b: Profit Lock trigger.
-     * When daily P&L reaches this % of capital (e.g. +6.0%),
-     * the profit floor activates. Set to 0 to disable.
-     */
+    /** Profit lock activates when daily P&L crosses this % (e.g. +6.0%). */
     @Value("${circuit-breaker.profit-lock-trigger-pct:6.0}")
     private double profitLockTriggerPct;
 
-    /**
-     * REQ 2b: Profit floor.
-     * Once the profit lock is active, if daily P&L retraces to this %
-     * of capital (e.g. +4.0%), all open positions are closed and no new
-     * trading is allowed. This guarantees a green day at +4% minimum.
-     */
+    /** Static minimum floor — trailing floor never goes below this. */
     @Value("${circuit-breaker.profit-floor-pct:4.0}")
     private double profitFloorPct;
 
+    /**
+     * FLAW 5 FIX: Give-back multiplier.
+     * dynamicGiveBack = dailyVol × givebackMultiplier.
+     * Higher = wider tolerated retrace on normal-volatility days.
+     */
+    @Value("${circuit-breaker.giveback-multiplier:2.0}")
+    private double givebackMultiplier;
+
+    /**
+     * FLAW 5 FIX: Minimum give-back regardless of VIX.
+     * Even on ultra-low-VIX days, allow at least 0.5% retrace before locking.
+     */
+    @Value("${circuit-breaker.min-giveback-pct:0.5}")
+    private double minGivebackPct;
+
     // ── State ──────────────────────────────────────────────────────────────────
 
-    @Getter
-    private volatile boolean active        = true;
+    @Getter private volatile boolean active             = true;
+    @Getter private volatile String  disableReason      = null;
+    @Getter private volatile boolean profitLockActivated = false;
 
-    @Getter
-    private volatile String  disableReason = null;
+    /**
+     * FLAW 5 FIX: Trailing floor — starts at profitFloorPct and only moves up.
+     * Updated on every recordPnl() call while lock is active.
+     */
+    private volatile double trailingFloor = 0.0;
 
-    /** True once daily P&L has reached +profitLockTriggerPct%. */
-    @Getter
-    private volatile boolean profitLockActivated = false;
-
-    /** Tracks whether CLOSE_ALL has already been published for profit-floor breach. */
+    /** Guards against firing CLOSE_ALL more than once per day. */
     private volatile boolean profitFloorTripped = false;
 
-    private final AtomicInteger               tradesToday = new AtomicInteger(0);
-    private final AtomicReference<BigDecimal> dailyPnl    = new AtomicReference<>(BigDecimal.ZERO);
-    private final AtomicReference<BigDecimal> weeklyPnl   = new AtomicReference<>(BigDecimal.ZERO);
-    private final AtomicReference<BigDecimal> monthlyPnl  = new AtomicReference<>(BigDecimal.ZERO);
-
-    // Snapshot of capital used for P&L% calculations — set once per day at first check
-    private final AtomicReference<BigDecimal> capitalSnapshot = new AtomicReference<>(BigDecimal.ZERO);
+    private final AtomicInteger               tradesToday     = new AtomicInteger(0);
+    private final AtomicReference<BigDecimal> dailyPnl        = new AtomicReference<>(BigDecimal.ZERO);
+    private final AtomicReference<BigDecimal> weeklyPnl       = new AtomicReference<>(BigDecimal.ZERO);
+    private final AtomicReference<BigDecimal> monthlyPnl      = new AtomicReference<>(BigDecimal.ZERO);
+    private final AtomicReference<BigDecimal> capitalSnapshot  = new AtomicReference<>(BigDecimal.ZERO);
 
     // ── Dashboard getters ──────────────────────────────────────────────────────
 
-    public int        getTradesToday()         { return tradesToday.get(); }
-    public BigDecimal getDailyPnl()            { return dailyPnl.get(); }
-    public BigDecimal getWeeklyPnl()           { return weeklyPnl.get(); }
-    public BigDecimal getMonthlyPnl()          { return monthlyPnl.get(); }
+    public int        getTradesToday()        { return tradesToday.get(); }
+    public BigDecimal getDailyPnl()           { return dailyPnl.get(); }
+    public BigDecimal getWeeklyPnl()          { return weeklyPnl.get(); }
+    public BigDecimal getMonthlyPnl()         { return monthlyPnl.get(); }
+    public double     getTrailingFloor()      { return trailingFloor; }
 
-    // ── Manual reset (dashboard emergency button) ──────────────────────────────
+    // ── Manual reset ───────────────────────────────────────────────────────────
 
     public void manualReset() {
         tradesToday.set(0);
         dailyPnl.set(BigDecimal.ZERO);
         profitLockActivated = false;
         profitFloorTripped  = false;
+        trailingFloor       = 0.0;
         active              = true;
         disableReason       = null;
-        log.warn("[CB] Circuit breaker MANUALLY RESET via dashboard");
+        log.warn("[CB] MANUALLY RESET via dashboard");
         publisher.publishEvent(new CircuitBreakerEvent(this, "MANUAL_RESET", "Reset by user"));
     }
 
@@ -139,79 +175,49 @@ public class CircuitBreakerService {
         public boolean isAllowed() { return ok; }
     }
 
-    // ── checkPermission — called before every new trade entry ─────────────────
+    // ── checkPermission ────────────────────────────────────────────────────────
 
-    /**
-     * Gates every new trade signal through all daily limits.
-     *
-     * Order of checks (fast-fail, cheapest first):
-     *   1. CB active flag (already tripped or profit floor locked)
-     *   2. Daily trade count cap (10 per day)
-     *   3. Daily P&L loss cap (-2.5%)
-     *   4. Weekly drawdown cap
-     *   5. Monthly drawdown cap
-     */
     public Permission checkPermission(BigDecimal capital) {
-        // Snapshot capital for % calculations (first call each day sets it)
-        if (capital.compareTo(BigDecimal.ZERO) > 0) {
+        if (capital.compareTo(BigDecimal.ZERO) > 0)
             capitalSnapshot.compareAndSet(BigDecimal.ZERO, capital);
-        }
 
         if (!active) return Permission.block(disableReason);
 
         if (tradesToday.get() >= maxPerDay)
-            return Permission.block(
-                    "Daily trade limit reached: " + tradesToday.get() + "/" + maxPerDay);
+            return Permission.block("Daily trade limit: " + tradesToday.get() + "/" + maxPerDay);
 
         BigDecimal cap = capitalSnapshot.get();
         if (cap.compareTo(BigDecimal.ZERO) > 0) {
             double d = pct(dailyPnl.get(), cap);
-
-            // REQ 2a: hard kill at -2.5% — also triggers close-all
             if (d <= dailyCap) {
                 tripWithCloseAll("DAILY_CAP_CLOSE_ALL",
-                        String.format("Daily loss %.2f%% hit hard cap %.1f%%", d, dailyCap));
+                        String.format("Daily loss %.2f%% >= cap %.1f%%", d, dailyCap));
                 return Permission.block(disableReason);
             }
-
             double w = pct(weeklyPnl.get(), cap);
             if (w <= weeklyCap) {
                 trip("WEEKLY_CAP", String.format("Weekly loss %.2f%%", w));
                 return Permission.block(disableReason);
             }
-
             double m = pct(monthlyPnl.get(), cap);
             if (m <= monthlyCap) {
                 trip("MONTHLY_CAP", String.format("Monthly loss %.2f%%", m));
                 return Permission.block(disableReason);
             }
         }
-
         return Permission.allow();
     }
 
-    // ── recordTradeEntered — called after every approved entry ─────────────────
+    public void recordTradeEntered() { tradesToday.incrementAndGet(); }
 
-    public void recordTradeEntered() {
-        tradesToday.incrementAndGet();
-    }
-
-    // ── recordPnl — called on every trade close ────────────────────────────────
+    // ── recordPnl — dynamic profit floor logic ────────────────────────────────
 
     /**
-     * Records realised P&L and evaluates account protection rules.
+     * Records realised P&L and evaluates all account protection rules.
      *
-     * REQ 2a (Daily Loss Cap):
-     *   Checked here in addition to checkPermission(), so that a loss
-     *   on a closing trade immediately locks the account even if no new
-     *   signal is pending.
-     *
-     * REQ 2b (Profit Lock):
-     *   Step 1 — activation: if daily P&L crosses +profitLockTriggerPct%,
-     *            set profitLockActivated = true and log the floor level.
-     *   Step 2 — floor enforcement: if already activated and P&L retraces
-     *            below +profitFloorPct%, publish CLOSE_ALL event and stop trading.
-     *            Only fires once per day (profitFloorTripped guard).
+     * synchronized: multiple trades can close at the same millisecond during a
+     * market spike. Without synchronisation, two threads could both update
+     * trailingFloor concurrently, with one overwriting the other's higher value.
      */
     public synchronized void recordPnl(BigDecimal pnl) {
         dailyPnl.updateAndGet(v -> v.add(pnl));
@@ -219,67 +225,110 @@ public class CircuitBreakerService {
         monthlyPnl.updateAndGet(v -> v.add(pnl));
 
         BigDecimal cap = capitalSnapshot.get();
-        if (cap.compareTo(BigDecimal.ZERO) == 0) return; // capital not yet set
+        if (cap.compareTo(BigDecimal.ZERO) == 0) return;
 
         double dailyPct = pct(dailyPnl.get(), cap);
 
-        // REQ 2a: re-check daily loss cap on close (handles gap-down scenarios)
+        // Daily loss cap — hard kill
         if (active && dailyPct <= dailyCap) {
             tripWithCloseAll("DAILY_CAP_CLOSE_ALL",
-                    String.format("Daily loss %.2f%% hit hard cap %.1f%% on close", dailyPct, dailyCap));
+                    String.format("Daily loss %.2f%% hit cap %.1f%% on close", dailyPct, dailyCap));
             return;
         }
 
-        // REQ 2b Step 1: activate profit lock once we cross +trigger%
+        // Profit lock — activation
         if (!profitLockActivated
                 && profitLockTriggerPct > 0
                 && dailyPct >= profitLockTriggerPct) {
             profitLockActivated = true;
-            log.info("[CB] PROFIT LOCK ACTIVATED — daily P&L {:.2f}% >= trigger {:.1f}%. " +
-                            "Floor set at +{:.1f}%",
-                    dailyPct, profitLockTriggerPct, profitFloorPct);
-            publisher.publishEvent(new CircuitBreakerEvent(this,
-                    "PROFIT_LOCK_ACTIVATED",
-                    String.format("P&L %.2f%% hit lock trigger %.1f%%. Floor=+%.1f%%",
-                            dailyPct, profitLockTriggerPct, profitFloorPct)));
+            // Initialise trailing floor at static minimum
+            trailingFloor = profitFloorPct;
+            log.info("[CB] PROFIT LOCK ACTIVATED: P&L={:.2f}% >= trigger={:.1f}%. " +
+                            "Initial floor={:.2f}% (static). VIX={:.1f}",
+                    dailyPct, profitLockTriggerPct, trailingFloor, getCurrentVix());
+            publisher.publishEvent(new CircuitBreakerEvent(this, "PROFIT_LOCK_ACTIVATED",
+                    String.format("P&L=%.2f%% hit trigger=%.1f%%. Floor initialised at %.2f%%",
+                            dailyPct, profitLockTriggerPct, trailingFloor)));
         }
 
-        // REQ 2b Step 2: enforce floor — retrace below +floor% → close all and lock
-        if (profitLockActivated
-                && !profitFloorTripped
-                && dailyPct <= profitFloorPct) {
-            profitFloorTripped = true;
-            tripWithCloseAll("PROFIT_FLOOR_CLOSE_ALL",
-                    String.format("P&L retraced to %.2f%% — floor %.1f%% triggered. Locking green day.",
-                            dailyPct, profitFloorPct));
+        // FLAW 5 FIX: Dynamic trailing floor — update on every P&L record
+        if (profitLockActivated && !profitFloorTripped) {
+            updateDynamicTrailingFloor(dailyPct);
+
+            // Check if current P&L has retreated to or below the trailing floor
+            if (dailyPct <= trailingFloor) {
+                profitFloorTripped = true;
+                tripWithCloseAll("PROFIT_FLOOR_CLOSE_ALL",
+                        String.format("P&L=%.2f%% retraced to floor=%.2f%% (VIX=%.1f). Locking green day.",
+                                dailyPct, trailingFloor, getCurrentVix()));
+            }
         }
     }
 
-    // ── Internal helpers ───────────────────────────────────────────────────────
+    // ── Dynamic floor calculation (FLAW 5 FIX) ────────────────────────────────
 
     /**
-     * Standard trip: stops new trading but does NOT close existing positions.
-     * Used for weekly/monthly caps where we let existing trades run to natural exit.
+     * Computes and updates the trailing profit floor using current VIX.
+     *
+     * The floor moves up as P&L rises (trailing behaviour).
+     * It never moves down — max() ensures monotonic increase.
+     * It never goes below profitFloorPct (static safety net).
+     *
+     * dailyVol = VIX / sqrt(252) / 100
+     *   Converts annualised implied volatility (VIX as %) to a 1-trading-day sigma.
+     *   sqrt(252) ≈ 15.87 — standard trading days per year.
+     *
+     * giveBack = max(minGivebackPct, dailyVol × givebackMultiplier)
+     *   How much daily move to tolerate before locking profits.
+     *   minGivebackPct prevents the floor from becoming unrealistically tight on
+     *   ultra-low-VIX days (VIX < 10 → dailyVol < 0.63% → giveBack < 1.26%).
+     *
+     * dynamicFloor = currentPnlPct − giveBack
+     *   The floor sits exactly one giveBack below the current P&L high-water mark.
      */
-    private void trip(String type, String reason) {
-        active        = false;
-        disableReason = reason;
-        log.warn("[CB] TRIPPED [{}]: {}", type, reason);
-        publisher.publishEvent(new CircuitBreakerEvent(this, type, reason));
+    private void updateDynamicTrailingFloor(double currentPnlPct) {
+        double vix      = getCurrentVix();
+        double dailyVol = vix / Math.sqrt(252.0) / 100.0 * 100.0; // result in %
+        double giveBack = Math.max(minGivebackPct, dailyVol * givebackMultiplier);
+
+        double dynamicFloor  = currentPnlPct - giveBack;
+        double newFloor      = Math.max(trailingFloor, Math.max(profitFloorPct, dynamicFloor));
+
+        if (newFloor > trailingFloor) {
+            log.info("[CB] Trailing floor raised: {:.2f}% → {:.2f}% " +
+                            "(P&L={:.2f}% giveBack={:.2f}% VIX={:.1f} dailyVol={:.3f}%)",
+                    trailingFloor, newFloor, currentPnlPct, giveBack, vix, dailyVol);
+            trailingFloor = newFloor;
+        }
     }
 
+    private double getCurrentVix() {
+        try {
+            return vixService.getCurrentVix();
+        } catch (Exception e) {
+            log.debug("[CB] VIX unavailable, using default 15.0: {}", e.getMessage());
+            return 15.0; // safe default — moderate volatility assumption
+        }
+    }
+
+    // ── Internal trip helpers ──────────────────────────────────────────────────
+
     /**
-     * Hard trip: stops new trading AND publishes a CLOSE_ALL event.
-     * Used for daily loss cap (-2.5%) and profit floor (both require immediate exit).
-     * PaperTradeManagementService listens for the event suffix "CLOSE_ALL"
-     * and calls its internal forceCloseAll() immediately.
+     * Hard trip: stops new entries AND publishes CLOSE_ALL event.
+     * PaperTradeManagementService listens for event types ending in "CLOSE_ALL".
      */
     private void tripWithCloseAll(String type, String reason) {
         active        = false;
         disableReason = reason;
         log.warn("[CB] HARD TRIP + CLOSE ALL [{}]: {}", type, reason);
-        // The event type ending in "CLOSE_ALL" is the contract with
-        // PaperTradeManagementService to trigger immediate position liquidation.
+        publisher.publishEvent(new CircuitBreakerEvent(this, type, reason));
+    }
+
+    /** Soft trip: stops new entries but does NOT close existing trades. */
+    private void trip(String type, String reason) {
+        active        = false;
+        disableReason = reason;
+        log.warn("[CB] TRIPPED [{}]: {}", type, reason);
         publisher.publishEvent(new CircuitBreakerEvent(this, type, reason));
     }
 
@@ -290,14 +339,14 @@ public class CircuitBreakerService {
 
     // ── Scheduled resets ───────────────────────────────────────────────────────
 
-    // 08:45 IST = 03:15 UTC
-    @Scheduled(cron = "0 15 3 * * MON-FRI", zone = "UTC")
+    @Scheduled(cron = "0 15 3 * * MON-FRI", zone = "UTC") // 08:45 IST
     public void resetDaily() {
         tradesToday.set(0);
         dailyPnl.set(BigDecimal.ZERO);
         capitalSnapshot.set(BigDecimal.ZERO);
         profitLockActivated = false;
         profitFloorTripped  = false;
+        trailingFloor       = 0.0;
         active              = true;
         disableReason       = null;
         log.info("[CB] Daily reset complete");
