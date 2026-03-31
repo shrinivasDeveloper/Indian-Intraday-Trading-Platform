@@ -136,66 +136,54 @@
           .bt-sum{grid-template-columns:repeat(2,1fr)}
         }
 
-        /* ══════════ VALIDATION DEBUG STYLES ══════════ */
-        .vd-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px}
-        .vd-title{font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:800;color:#fff}
-        .vd-sub{font-size:9px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;margin-top:3px}
-        .vd-summary{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
-        .vd-sum-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:11px 14px}
-        .vd-sum-label{font-size:8px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dim);margin-bottom:5px}
-        .vd-sum-val{font-family:'Space Grotesk',sans-serif;font-size:20px;font-weight:800;color:#fff}
+        /* ══ VALIDATION DEBUG ══ */
+        .vd-pg-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px}
+        .vd-pg-title{font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:800;color:#fff;letter-spacing:-.3px}
+        .vd-pg-sub{font-size:9px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;margin-top:4px}
+        .vd-sum-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+        .vd-sum-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px}
+        .vd-sum-lbl{font-size:8px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dim);margin-bottom:5px}
+        .vd-sum-val{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:800;color:#fff}
         .vd-sum-val.g{color:var(--green)}.vd-sum-val.r{color:var(--red)}.vd-sum-val.w{color:var(--warn)}
-        .vd-heatmap{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;margin-bottom:4px}
+        /* strategy selector tabs */
+        .vd-stabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px;overflow-x:auto;scrollbar-width:none}
+        .vd-stabs::-webkit-scrollbar{display:none}
+        .vd-stab{padding:9px 16px;cursor:pointer;font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.4px;border-bottom:2px solid transparent;transition:all .15s;white-space:nowrap;text-transform:uppercase;display:flex;align-items:center;gap:6px}
+        .vd-stab:hover{color:var(--text)}
+        .vd-stab.active{color:var(--green);border-bottom-color:var(--green)}
+        .vd-stab-cnt{font-size:8px;padding:1px 5px;border-radius:2px;background:var(--bg);color:var(--dim);font-weight:700}
+        .vd-stab.active .vd-stab-cnt{background:rgba(0,229,160,.15);color:var(--green)}
+        /* table */
+        .vd-tbl-wrap{overflow:auto;border-radius:var(--r);border:1px solid var(--border);max-height:520px}
+        .vd-tbl-wrap::-webkit-scrollbar{width:4px;height:4px}
+        .vd-tbl-wrap::-webkit-scrollbar-track{background:var(--bg)}
+        .vd-tbl-wrap::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
+        .vd-tbl{width:100%;border-collapse:collapse}
+        .vd-tbl thead th{font-size:8px;letter-spacing:.7px;text-transform:uppercase;color:var(--dim);padding:8px 10px;border-bottom:2px solid var(--border);background:var(--bg2);text-align:center;white-space:nowrap;position:sticky;top:0;z-index:2}
+        .vd-tbl thead th:first-child{text-align:left;position:sticky;left:0;z-index:3;background:var(--bg2);min-width:110px;border-right:1px solid var(--border)}
+        .vd-tbl thead th.vd-result-col{background:var(--bg2);border-left:1px solid var(--border)}
+        .vd-tbl tbody td{padding:7px 10px;border-bottom:1px solid rgba(22,32,48,.6);text-align:center;font-size:13px;line-height:1;transition:background .1s}
+        .vd-tbl tbody td:first-child{text-align:left;position:sticky;left:0;background:var(--bg3);font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:11px;color:#fff;z-index:1;border-right:1px solid var(--border)}
+        .vd-tbl tbody tr.vd-pass td:first-child{border-left:3px solid var(--green)}
+        .vd-tbl tbody tr.vd-fail td:first-child{border-left:3px solid var(--red)}
+        .vd-tbl tbody tr.vd-close td:first-child{border-left:3px solid var(--warn)}
+        .vd-tbl tbody tr:hover td{background:rgba(17,29,43,.9)}
+        .vd-tbl tbody tr:hover td:first-child{background:rgba(17,29,43,.98)}
+        .vd-tbl tbody tr:last-child td{border-bottom:none}
+        .vd-result-pass{font-size:9px;font-weight:700;color:var(--green);white-space:nowrap}
+        .vd-result-fail{font-size:9px;font-weight:700;color:var(--warn);white-space:nowrap}
+        .vd-result-col{border-left:1px solid var(--border)}
+        .vd-dir-tag{font-size:8px;padding:1px 5px;border-radius:2px;font-weight:700;margin-left:4px}
+        .vd-dir-long{background:var(--green-bg);color:var(--green)}
+        .vd-dir-sell{background:var(--red-bg);color:var(--red)}
+        /* heatmap */
+        .vd-heatmap{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}
         .vd-heat-cell{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px}
-        .vd-heat-label{font-size:9px;color:var(--muted);letter-spacing:.3px;margin-bottom:4px;line-height:1.4}
+        .vd-heat-lbl{font-size:9px;color:var(--muted);margin-bottom:4px;line-height:1.5}
         .vd-heat-val{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:800;color:var(--red)}
         .vd-heat-bar{height:3px;border-radius:2px;background:var(--red);margin-top:5px;transition:width .4s}
-        .vd-strat-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
-        .vd-strat-tab{padding:5px 13px;border-radius:var(--r);font-size:10px;font-weight:600;letter-spacing:.4px;cursor:pointer;border:1px solid var(--border);background:var(--bg3);color:var(--muted);transition:all .15s}
-        .vd-strat-tab:hover{color:var(--text);border-color:var(--border2)}
-        .vd-strat-tab.active{background:var(--green-bg);color:var(--green);border-color:var(--green-border)}
-        .vd-badge-count{display:inline-block;margin-left:5px;font-size:8px;padding:1px 5px;border-radius:2px;background:rgba(255,255,255,.07);color:var(--dim)}
-        .vd-strat-tab.active .vd-badge-count{background:rgba(0,229,160,.15);color:var(--green)}
-        .vd-filter-row{display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap}
-        .vd-search{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:6px 10px;outline:none;transition:border-color .2s;min-width:140px}
-        .vd-search:focus{border-color:var(--green)}
-        .vd-filter-btn{padding:5px 12px;border-radius:var(--r);font-size:10px;font-weight:600;cursor:pointer;border:1px solid var(--border);background:var(--bg3);color:var(--muted);transition:all .15s;letter-spacing:.3px}
-        .vd-filter-btn.fw{background:var(--warn-bg);color:var(--warn);border-color:var(--warn-border)}
-        .vd-filter-btn.fr{background:var(--red-bg);color:var(--red);border-color:var(--red-border)}
-        .vd-filter-btn.fg{background:var(--green-bg);color:var(--green);border-color:var(--green-border)}
-        .vd-filter-btn:hover{color:var(--text)}
-        .vd-stock-row{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);margin-bottom:6px;overflow:hidden;cursor:pointer;transition:border-color .15s}
-        .vd-stock-row:hover{border-color:var(--border2)}
-        .vd-stock-row.all-pass{border-left:3px solid var(--green)}
-        .vd-stock-row.failing{border-left:3px solid var(--red)}
-        .vd-stock-row.close{border-left:3px solid var(--warn)}
-        .vd-stock-head{display:flex;align-items:center;gap:10px;padding:9px 12px;flex-wrap:wrap}
-        .vd-sym{font-family:'Space Grotesk',sans-serif;font-weight:700;color:#fff;width:96px;flex-shrink:0;font-size:12px}
-        .vd-dir-badge{font-size:9px;padding:2px 7px;border-radius:3px;font-weight:700;flex-shrink:0}
-        .vd-dir-badge.buy{background:var(--green-bg);color:var(--green);border:1px solid var(--green-border)}
-        .vd-dir-badge.sell{background:var(--red-bg);color:var(--red);border:1px solid var(--red-border)}
-        .vd-strat-label{font-size:8px;color:var(--dim);letter-spacing:.3px;flex-shrink:0}
-        .vd-steps-inline{display:flex;gap:3px;flex-wrap:wrap;flex:1;min-width:0}
-        .vd-sp{font-size:8px;padding:3px 7px;border-radius:3px;font-weight:700;letter-spacing:.3px;white-space:nowrap;border:1px solid}
-        .vd-sp.pass{background:var(--green-bg);color:var(--green);border-color:var(--green-border)}
-        .vd-sp.fail{background:var(--red-bg);color:var(--red);border-color:var(--red-border)}
-        .vd-sp.skip{background:transparent;color:var(--dim);border-color:var(--border)}
-        .vd-fail-tag{font-size:9px;font-weight:700;color:var(--warn);padding:2px 8px;border-radius:3px;border:1px solid var(--warn-border);background:var(--warn-bg);white-space:nowrap;flex-shrink:0;margin-left:auto}
-        .vd-pass-tag{font-size:9px;font-weight:700;color:var(--green);padding:2px 8px;border-radius:3px;border:1px solid var(--green-border);background:var(--green-bg);white-space:nowrap;flex-shrink:0;margin-left:auto}
-        .vd-meta-txt{font-size:8px;color:var(--dim);flex-shrink:0}
-        .vd-stock-detail{display:none;border-top:1px solid var(--border);padding:0 12px 12px}
-        .vd-stock-row.expanded .vd-stock-detail{display:block}
-        .vd-detail-title{font-size:8px;color:var(--dim);letter-spacing:1px;text-transform:uppercase;padding:10px 0 6px}
-        .vd-step-row{display:flex;align-items:flex-start;gap:10px;padding:7px 0;border-bottom:1px solid rgba(22,32,48,.5)}
-        .vd-step-row:last-child{border-bottom:none}
-        .vd-step-circle{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;flex-shrink:0;margin-top:1px}
-        .vd-step-circle.pass{background:var(--green-bg);color:var(--green);border:1px solid var(--green-border)}
-        .vd-step-circle.fail{background:var(--red-bg);color:var(--red);border:1px solid var(--red-border)}
-        .vd-step-icon{font-size:13px;flex-shrink:0;width:18px;text-align:center;margin-top:3px}
-        .vd-step-body{flex:1;min-width:0}
-        .vd-step-name{font-weight:600;color:var(--text);font-size:11px;margin-bottom:3px}
-        .vd-step-detail{color:var(--muted);font-size:9px;letter-spacing:.2px;line-height:1.5;word-break:break-word}
-        .vd-no-data{text-align:center;padding:50px 20px;color:var(--dim);font-size:11px;line-height:2.2}
+        .vd-nodata{text-align:center;padding:44px 20px;color:var(--dim);font-size:11px;line-height:2.4}
+        @media(max-width:768px){.vd-sum-row{grid-template-columns:1fr 1fr}}
     </style>
 </head>
 <body>
@@ -332,38 +320,46 @@
 
 <!-- ═══════ STRATEGY ═══════ -->
 <div id="page-strategy" class="page">
-    <div class="strat-grid">
+    <div class="strat-grid" style="grid-template-columns:repeat(5,1fr)">
+        <div class="strat-card" id="sc-AUTO_MODE">
+            <div class="strat-name">AutoMode</div>
+            <div class="strat-type">Trend &middot; Reversal &middot; Range</div>
+            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-AUTO_MODE">0</span></div>
+            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-AUTO_MODE">&#8377;0</span></div>
+            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-AUTO_MODE">0</span></div>
+            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-AUTO_MODE">&#8212;</span></div>
+        </div>
+        <div class="strat-card" id="sc-ORB_VWAP_SECTOR">
+            <div class="strat-name">ORB Strategy</div>
+            <div class="strat-type">ORB + VWAP + Sector (9:30&#8211;12:30)</div>
+            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-ORB_VWAP_SECTOR">0</span></div>
+            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-ORB_VWAP_SECTOR">&#8377;0</span></div>
+            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-ORB_VWAP_SECTOR">0</span></div>
+            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-ORB_VWAP_SECTOR">&#8212;</span></div>
+        </div>
+        <div class="strat-card" id="sc-VAP_PULLBACK">
+            <div class="strat-name">Pullback Detection</div>
+            <div class="strat-type">POC / VWAP pullback setup</div>
+            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-VAP_PULLBACK">0</span></div>
+            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-VAP_PULLBACK">&#8377;0</span></div>
+            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-VAP_PULLBACK">0</span></div>
+            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-VAP_PULLBACK">&#8212;</span></div>
+        </div>
+        <div class="strat-card" id="sc-RANGE_BREAKOUT_3TOUCH">
+            <div class="strat-name">Range Breakout</div>
+            <div class="strat-type">3-touch support / resistance</div>
+            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-RANGE_BREAKOUT_3TOUCH">0</span></div>
+            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-RANGE_BREAKOUT_3TOUCH">&#8377;0</span></div>
+            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-RANGE_BREAKOUT_3TOUCH">0</span></div>
+            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-RANGE_BREAKOUT_3TOUCH">&#8212;</span></div>
+        </div>
         <div class="strat-card" id="sc-SCANNER_7GATE">
             <div class="strat-name">7-Gate Scanner</div>
-            <div class="strat-type">Compression · Breakout</div>
+            <div class="strat-type">BB Compression + 7-Gate breakout</div>
             <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-SCANNER_7GATE">0</span></div>
-            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-SCANNER_7GATE">₹0</span></div>
+            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-SCANNER_7GATE">&#8377;0</span></div>
             <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-SCANNER_7GATE">0</span></div>
-            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-SCANNER_7GATE">—</span></div>
-        </div>
-        <div class="strat-card" id="sc-SIMPLE_ORB">
-            <div class="strat-name">Simple ORB</div>
-            <div class="strat-type">Break first 30min high/low</div>
-            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-SIMPLE_ORB">0</span></div>
-            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-SIMPLE_ORB">₹0</span></div>
-            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-SIMPLE_ORB">0</span></div>
-            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-SIMPLE_ORB">—</span></div>
-        </div>
-        <div class="strat-card" id="sc-VWAP_MOMENTUM">
-            <div class="strat-name">VWAP Momentum</div>
-            <div class="strat-type">5-candle high above VWAP</div>
-            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-VWAP_MOMENTUM">0</span></div>
-            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-VWAP_MOMENTUM">₹0</span></div>
-            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-VWAP_MOMENTUM">0</span></div>
-            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-VWAP_MOMENTUM">—</span></div>
-        </div>
-        <div class="strat-card" id="sc-VWAP_PULLBACK">
-            <div class="strat-name">VWAP Pullback</div>
-            <div class="strat-type">Strong stock bounces off VWAP</div>
-            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-VWAP_PULLBACK">0</span></div>
-            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-VWAP_PULLBACK">₹0</span></div>
-            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-VWAP_PULLBACK">0</span></div>
-            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-VWAP_PULLBACK">—</span></div>
+            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-SCANNER_7GATE">&#8212;</span></div>
         </div>
     </div>
     <div class="card">
@@ -612,49 +608,69 @@
 
 <!-- ═══════ VALIDATION DEBUG ═══════ -->
 <div id="page-validation" class="page">
-    <div class="vd-header">
+
+    <!-- Header -->
+    <div class="vd-pg-header">
         <div>
-            <div class="vd-title">🔍 Strategy Validation Debug</div>
-            <div class="vd-sub">Per-stock &middot; Per-strategy &middot; Per-step &middot; Real-time &middot; Auto-refresh 5s</div>
+            <div class="vd-pg-title">&#128269; Strategy Validation Debug</div>
+            <div class="vd-pg-sub">Real-time per-stock &middot; per-strategy &middot; per-step pass/fail &middot; auto-refresh 5s</div>
         </div>
-        <button class="reset-btn" onclick="loadValidationSteps(true)" style="border-color:var(--green-border);color:var(--green)">&#8634; Refresh Now</button>
+        <div style="display:flex;gap:8px;align-items:center">
+            <span id="vd-updated" style="font-size:9px;color:var(--dim)">Not loaded</span>
+            <button class="reset-btn" onclick="loadVd(true)" style="border-color:var(--green-border);color:var(--green)">&#8634; Refresh</button>
+        </div>
     </div>
-    <div class="vd-summary">
-        <div class="vd-sum-card"><div class="vd-sum-label">Stocks Tracked</div><div class="vd-sum-val w" id="vd-total">0</div></div>
-        <div class="vd-sum-card"><div class="vd-sum-label">All Steps Pass</div><div class="vd-sum-val g" id="vd-all-pass">0</div></div>
-        <div class="vd-sum-card"><div class="vd-sum-label">1 Step Away</div><div class="vd-sum-val w" id="vd-close">0</div></div>
-        <div class="vd-sum-card"><div class="vd-sum-label">Fail Step 1-2</div><div class="vd-sum-val r" id="vd-early-fail">0</div></div>
-        <div class="vd-sum-card"><div class="vd-sum-label">Last Refresh</div><div class="vd-sum-val" id="vd-refresh-time" style="font-size:13px;padding-top:4px">&#8212;</div></div>
+
+    <!-- Summary cards -->
+    <div class="vd-sum-row">
+        <div class="vd-sum-card"><div class="vd-sum-lbl">Stocks Tracked</div><div class="vd-sum-val w" id="vd-tracked">0</div></div>
+        <div class="vd-sum-card"><div class="vd-sum-lbl">All Steps Pass &#9989;</div><div class="vd-sum-val g" id="vd-passing">0</div></div>
+        <div class="vd-sum-card"><div class="vd-sum-lbl">1 Step Away &#9889;</div><div class="vd-sum-val w" id="vd-close">0</div></div>
+        <div class="vd-sum-card"><div class="vd-sum-lbl">Stuck Early &#10060;</div><div class="vd-sum-val r" id="vd-early">0</div></div>
     </div>
+
+    <!-- Failure Heatmap -->
+    <div class="card" style="margin-bottom:12px">
+        <div class="card-title">Most Frequent Failure (Today)
+            <span style="font-size:9px;font-weight:400;text-transform:none;color:var(--dim)">Which validation step is blocking the most signals</span>
+        </div>
+        <div class="vd-heatmap" id="vd-heatmap">
+            <div class="empty" style="grid-column:1/-1">Waiting for data&hellip;</div>
+        </div>
+    </div>
+
+    <!-- Per-strategy validation table -->
     <div class="card">
-        <div class="card-title">Most Common Failure Step Today
-            <span style="font-size:9px;color:var(--dim);font-weight:400;text-transform:none">Which condition is blocking stocks from signalling</span>
+        <div class="card-title" style="margin-bottom:0">
+            Per-Stock Validation
+            <span style="font-size:9px;font-weight:400;text-transform:none;color:var(--dim)">&#9989; = step passed &nbsp;&nbsp; &#10060; = step failed &nbsp;&nbsp; &#8212; = not reached</span>
         </div>
-        <div class="vd-heatmap" id="vd-heatmap"><div class="empty" style="grid-column:1/-1">Loading&#8230;</div></div>
-    </div>
-    <div class="card">
-        <div class="card-title">Per-Stock Validation Steps
-            <span style="font-size:9px;color:var(--dim);font-weight:400;text-transform:none">Click any row to expand step-by-step detail with exact values</span>
+
+        <!-- Strategy selector tabs -->
+        <div class="vd-stabs" id="vd-stabs" style="margin-top:12px">
+            <div class="vd-stab active" onclick="selectVdStrat('AUTO_MODE',this)">
+                AutoMode <span class="vd-stab-cnt" id="vdn-AUTO_MODE">0</span>
+            </div>
+            <div class="vd-stab" onclick="selectVdStrat('ORB_VWAP_SECTOR',this)">
+                ORB Strategy <span class="vd-stab-cnt" id="vdn-ORB_VWAP_SECTOR">0</span>
+            </div>
+            <div class="vd-stab" onclick="selectVdStrat('VAP_PULLBACK',this)">
+                Pullback Detection <span class="vd-stab-cnt" id="vdn-VAP_PULLBACK">0</span>
+            </div>
+            <div class="vd-stab" onclick="selectVdStrat('RANGE_BREAKOUT_3TOUCH',this)">
+                Range Breakout <span class="vd-stab-cnt" id="vdn-RANGE_BREAKOUT_3TOUCH">0</span>
+            </div>
+            <div class="vd-stab" onclick="selectVdStrat('SCANNER_7GATE',this)">
+                7-Gate Scanner <span class="vd-stab-cnt" id="vdn-SCANNER_7GATE">0</span>
+            </div>
         </div>
-        <div class="vd-strat-tabs">
-            <div class="vd-strat-tab active" onclick="selectVdStrat('ALL',this)">All Strategies <span class="vd-badge-count" id="vdb-ALL">0</span></div>
-            <div class="vd-strat-tab" onclick="selectVdStrat('SCANNER_7GATE',this)">7-Gate Scanner <span class="vd-badge-count" id="vdb-SCANNER_7GATE">0</span></div>
-            <div class="vd-strat-tab" onclick="selectVdStrat('ORB_VWAP_SECTOR',this)">ORB+VWAP <span class="vd-badge-count" id="vdb-ORB_VWAP_SECTOR">0</span></div>
-            <div class="vd-strat-tab" onclick="selectVdStrat('SIMPLE_ORB',this)">Simple ORB <span class="vd-badge-count" id="vdb-SIMPLE_ORB">0</span></div>
-            <div class="vd-strat-tab" onclick="selectVdStrat('VWAP_MOMENTUM',this)">VWAP Momentum <span class="vd-badge-count" id="vdb-VWAP_MOMENTUM">0</span></div>
-            <div class="vd-strat-tab" onclick="selectVdStrat('VWAP_PULLBACK',this)">VWAP Pullback <span class="vd-badge-count" id="vdb-VWAP_PULLBACK">0</span></div>
-        </div>
-        <div class="vd-filter-row">
-            <input type="text" class="vd-search" id="vd-search" placeholder="Search symbol e.g. RELIANCE&#8230;" oninput="renderVdStocks()"/>
-            <button class="vd-filter-btn" id="vd-fbtn-close" onclick="toggleVdFilter('close',this,'fw')">&#9889; Almost There</button>
-            <button class="vd-filter-btn" id="vd-fbtn-early" onclick="toggleVdFilter('early',this,'fr')">&#128308; Stuck Early</button>
-            <button class="vd-filter-btn" id="vd-fbtn-pass"  onclick="toggleVdFilter('pass', this,'fg')">&#9989; All Pass</button>
-        </div>
-        <div id="vd-stocks">
-            <div class="vd-no-data">
-                Waiting for market data&#8230;<br>
-                <span style="font-size:9px">Data populates after the first 5-min candle after 9:15 IST</span><br>
-                <span style="font-size:9px;color:var(--green)">API: GET /api/validation/steps</span>
+
+        <!-- Table rendered here -->
+        <div id="vd-table-area">
+            <div class="vd-nodata">
+                Waiting for market data&hellip;<br>
+                <span style="font-size:9px">Validation data appears after first 5-min candle closes at 9:15 IST</span><br>
+                <span style="font-size:9px;color:var(--green)">Endpoint: GET /api/validation/steps</span>
             </div>
         </div>
     </div>
@@ -676,10 +692,19 @@
     }, 1000);
 
     // ── Tabs ───────────────────────────────────────────────────────────────
-    let vdRefreshTimer = null;
-    let vdAllLogs       = {};
-    let vdSelectedStrat = 'ALL';
-    let vdActiveFilters = new Set();
+    // ── Validation state ──────────────────────────────────────────────────
+    let vdTimer      = null;
+    let vdData       = {};          // raw { strategy: [logs] } from /api/validation/steps
+    let vdActiveSt   = 'AUTO_MODE'; // currently-selected strategy tab
+
+    const VD_STRATS = ['AUTO_MODE','ORB_VWAP_SECTOR','VAP_PULLBACK','RANGE_BREAKOUT_3TOUCH','SCANNER_7GATE'];
+    const VD_NAMES  = {
+      'AUTO_MODE':             'AutoMode',
+      'ORB_VWAP_SECTOR':       'ORB Strategy',
+      'VAP_PULLBACK':          'Pullback Detection',
+      'RANGE_BREAKOUT_3TOUCH': 'Range Breakout',
+      'SCANNER_7GATE':         '7-Gate Scanner'
+    };
 
     function showTab(name, el) {
       document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
@@ -689,10 +714,10 @@
       if (name==='strategy')   loadStratPerf();
       if (name==='paper')      loadPaperSnapshot();
       if (name==='validation') {
-        loadValidationSteps(true);
-        if (!vdRefreshTimer) vdRefreshTimer = setInterval(()=>loadValidationSteps(false),5000);
+        loadVd(true);
+        if (!vdTimer) vdTimer = setInterval(()=>loadVd(false), 5000);
       } else {
-        if (vdRefreshTimer) { clearInterval(vdRefreshTimer); vdRefreshTimer=null; }
+        if (vdTimer) { clearInterval(vdTimer); vdTimer=null; }
       }
     }
 
@@ -961,13 +986,14 @@
     // STRATEGY PANEL
     // ══════════════════════════════════════════════════════════════════════
     function renderStratStatus(ss) {
-      const strats = ['SCANNER_7GATE','SIMPLE_ORB','VWAP_MOMENTUM','VWAP_PULLBACK'];
+      const strats = ['AUTO_MODE','ORB_VWAP_SECTOR','VAP_PULLBACK','RANGE_BREAKOUT_3TOUCH','SCANNER_7GATE'];
       const pd = ss.perStrategyPnl || {};
       const fired = Array.isArray(ss.firedToday) ? ss.firedToday : Object.keys(ss.firedToday||{});
 
       strats.forEach(s => {
         const sd  = pd[s]||{};
-        const sig = fired.filter(k=>k.endsWith(':'+s)).length;
+        const aliases = s==='VAP_PULLBACK'?[s,'VWAP_PULLBACK']:[s];
+        const sig = fired.filter(k=>aliases.some(a=>k.endsWith(':'+a))).length;
         const card = document.getElementById('sc-'+s);
         if (card) card.className = 'strat-card'+(sig>0?' fired':'');
         set('sc-sig-'+s, sig);
@@ -1318,154 +1344,220 @@
       }
     }, 5000);
 
-    // ══════════════════════════════════════════════════════════════════════
-    // VALIDATION DEBUG
-    // ══════════════════════════════════════════════════════════════════════
-    async function loadValidationSteps(force) {
+    // ════════════════════════════════════════════════════════════════════════
+    // VALIDATION DEBUG — Professional Table Implementation
+    // Strategy tabs → click tab → shows table: rows=stocks, cols=actual step names
+    // ════════════════════════════════════════════════════════════════════════
+
+    // ── Fetch from /api/validation/steps ─────────────────────────────────
+    async function loadVd(force) {
       const activeTab = document.querySelector('.tab.active');
-      const onDbg = activeTab && activeTab.textContent.includes('Debug');
+      const onDbg     = activeTab && activeTab.textContent.includes('Debug');
       if (!force && !onDbg) return;
+
       const r = await safeFetch('/api/validation/steps');
       if (!r) return;
       try {
-        vdAllLogs = await r.json();
-        renderVdSummary(); renderVdHeatmap(); renderVdBadges(); renderVdStocks();
-        set('vd-refresh-time', new Date().toLocaleTimeString('en-IN',{hour12:false}));
-      } catch(e) { console.warn('validation parse',e); }
+        vdData = await r.json();
+        renderVdSummary();
+        renderVdHeatmap();
+        renderVdTabCounts();
+        renderVdTable(vdActiveSt);
+        set('vd-updated', 'Updated ' + new Date().toLocaleTimeString('en-IN',{hour12:false}));
+      } catch(e) { console.warn('[VD] parse error', e); }
     }
 
+    // ── Summary cards ──────────────────────────────────────────────────────
     function renderVdSummary() {
-      let total=0,allPass=0,close=0,earlyFail=0;
-      Object.values(vdAllLogs).forEach(logs=>{
-        logs.forEach(log=>{
-          total++;
-          const n=(log.steps||[]).length;
-          if(log.failedAtStep===0) allPass++;
-          else if(n>0&&log.failedAtStep>=n-1) close++;
-          else if(log.failedAtStep>0&&log.failedAtStep<=2) earlyFail++;
+      let tracked=0, passing=0, close=0, early=0;
+      Object.values(vdData).forEach(logs => {
+        logs.forEach(log => {
+          tracked++;
+          const n = (log.steps||[]).length;
+          if (log.failedAtStep===0)                             passing++;
+          else if (n>0 && log.failedAtStep >= n-1)             close++;
+          else if (log.failedAtStep>0 && log.failedAtStep<=2)  early++;
         });
       });
-      set('vd-total',total||'0'); set('vd-all-pass',allPass||'0');
-      set('vd-close',close||'0'); set('vd-early-fail',earlyFail||'0');
+      set('vd-tracked', tracked||'0');
+      set('vd-passing', passing||'0');
+      set('vd-close',   close||'0');
+      set('vd-early',   early||'0');
     }
 
+    // ── Update count badges on strategy tabs ──────────────────────────────
+    function renderVdTabCounts() {
+      VD_STRATS.forEach(strat => {
+        const logs = vdData[strat]||[];
+        const el   = document.getElementById('vdn-'+strat);
+        if (el) el.textContent = logs.length;
+      });
+    }
+
+    // ── Failure heatmap (top 12 most-failed steps) ────────────────────────
     function renderVdHeatmap() {
-      const freq={};
-      Object.entries(vdAllLogs).forEach(([strat,logs])=>{
-        logs.forEach(log=>{
-          if(!log.steps) return;
-          const ff=log.steps.find(s=>!s.passed);
-          if(ff){
-            const k=strat.replace('SCANNER_','').replace('_VWAP_SECTOR','').replace(/_/g,' ')
-                   +' > '+(ff.stepId||'?').replace(/_/g,' ');
-            freq[k]=(freq[k]||0)+1;
+      const freq = {};
+      Object.entries(vdData).forEach(([strat,logs]) => {
+        const dname = VD_NAMES[strat]||strat;
+        logs.forEach(log => {
+          const ff = (log.steps||[]).find(s => !s.passed);
+          if (ff) {
+            const lbl = ff.label || ff.stepId.replace(/_/g,' ');
+            const k   = dname + ' › ' + lbl.substring(0,28);
+            freq[k]   = (freq[k]||0) + 1;
           }
         });
       });
-      const hm=document.getElementById('vd-heatmap');
-      const entries=Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,12);
-      if(!entries.length){hm.innerHTML='<div class="empty" style="grid-column:1/-1">No failure data yet</div>';return;}
-      const mx=entries[0][1]||1;
-      hm.innerHTML=entries.map(([key,count])=>{
-        const pct=Math.round(count/mx*100);
-        return `<div class="vd-heat-cell"><div class="vd-heat-label">${key}</div><div class="vd-heat-val">${count}<span style="font-size:12px;color:var(--dim)">&times;</span></div><div class="vd-heat-bar" style="width:${pct}%"></div></div>`;
-      }).join('');
-    }
-
-    function renderVdBadges() {
-      let total=0;
-      Object.entries(vdAllLogs).forEach(([strat,logs])=>{
-        const el=document.getElementById('vdb-'+strat); if(el) el.textContent=logs.length;
-        total+=logs.length;
-      });
-      const all=document.getElementById('vdb-ALL'); if(all) all.textContent=total;
-    }
-
-    function selectVdStrat(strat,el) {
-      vdSelectedStrat=strat;
-      document.querySelectorAll('.vd-strat-tab').forEach(t=>t.classList.remove('active'));
-      el.classList.add('active');
-      renderVdStocks();
-    }
-
-    function toggleVdFilter(key,btn,cls) {
-      if(vdActiveFilters.has(key)){
-        vdActiveFilters.delete(key); btn.className='vd-filter-btn';
-      } else {
-        vdActiveFilters.clear();
-        document.querySelectorAll('.vd-filter-btn').forEach(b=>b.className='vd-filter-btn');
-        vdActiveFilters.add(key); btn.className='vd-filter-btn '+cls;
-      }
-      renderVdStocks();
-    }
-
-    function renderVdStocks() {
-      const container=document.getElementById('vd-stocks');
-      const search=(document.getElementById('vd-search').value||'').toUpperCase().trim();
-      let logs=[];
-      if(vdSelectedStrat==='ALL') Object.values(vdAllLogs).forEach(a=>logs.push(...a));
-      else logs=vdAllLogs[vdSelectedStrat]||[];
-      if(search) logs=logs.filter(l=>(l.symbol||'').includes(search));
-      if(vdActiveFilters.has('close'))  logs=logs.filter(l=>{const n=(l.steps||[]).length;return l.failedAtStep>0&&n>0&&l.failedAtStep>=n-1;});
-      if(vdActiveFilters.has('early'))  logs=logs.filter(l=>l.failedAtStep>0&&l.failedAtStep<=2);
-      if(vdActiveFilters.has('pass'))   logs=logs.filter(l=>l.failedAtStep===0);
-      if(!logs.length){
-        container.innerHTML=search?`<div class="vd-no-data">No stocks matching "<b>${search}</b>"</div>`:'<div class="vd-no-data">No validation data for this filter yet</div>';
+      const hm      = document.getElementById('vd-heatmap');
+      const entries = Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,12);
+      if (!entries.length) {
+        hm.innerHTML = '<div class="empty" style="grid-column:1/-1">No failure data yet — strategies are evaluating stocks</div>';
         return;
       }
-      logs.sort((a,b)=>{
-        if(a.failedAtStep===0&&b.failedAtStep!==0) return -1;
-        if(b.failedAtStep===0&&a.failedAtStep!==0) return 1;
-        return (b.failedAtStep||0)-(a.failedAtStep||0);
-      });
-      container.innerHTML=logs.map(log=>buildVdStockRow(log)).join('');
-    }
-
-    function buildVdStockRow(log) {
-      const steps=log.steps||[], failedAt=log.failedAtStep||0, allOk=failedAt===0;
-      const n=steps.length, isClose=!allOk&&n>0&&failedAt>=n-1;
-      const rowCls=allOk?'all-pass':isClose?'close':'failing';
-      const pillsHtml=steps.map(s=>{
-        const cls=s.passed?'pass':'fail', icon=s.passed?'&#10003;':'&#10007;';
-        const tip=((s.label||s.stepId||'')+': '+(s.detail||'')).replace(/"/g,'&quot;').substring(0,120);
-        return `<span class="vd-sp ${cls}" title="${tip}">${icon} S${s.stepNum}</span>`;
-      }).join('');
-      const dirStr=log.direction||'BUY', dirCls=(dirStr.includes('BUY')||dirStr.includes('LONG'))?'buy':'sell';
-      const statusTag=allOk
-        ?`<span class="vd-pass-tag">&#9989; All Pass</span>`
-        :`<span class="vd-fail-tag">&#10007; Step ${failedAt}${log.firstFailedLabel?': '+log.firstFailedLabel.substring(0,30):''}</span>`;
-      const stratShort=(log.strategy||'').replace('SCANNER_','').replace('_VWAP_SECTOR','').replace(/_/g,' ');
-      const evalStr=log.totalChecksToday?`${log.totalChecksToday} evals${log.passesAllSteps?' &middot; '+log.passesAllSteps+' pass':''}`:'';
-      const checkedStr=log.lastChecked?log.lastChecked.substring(0,8):'';
-      const detailRows=steps.map(s=>{
-        const cls=s.passed?'pass':'fail', icon=s.passed?'&#9989;':'&#10060;';
-        return `<div class="vd-step-row">
-          <div class="vd-step-circle ${cls}">${s.stepNum}</div>
-          <div class="vd-step-icon">${icon}</div>
-          <div class="vd-step-body">
-            <div class="vd-step-name">${s.label||s.stepId||'Step '+s.stepNum}</div>
-            <div class="vd-step-detail">${s.detail||'&mdash;'}</div>
-          </div>
+      const mx = entries[0][1]||1;
+      hm.innerHTML = entries.map(([key,count]) => {
+        const pct = Math.round(count/mx*100);
+        return `<div class="vd-heat-cell">
+          <div class="vd-heat-lbl">${key}</div>
+          <div class="vd-heat-val">${count}<span style="font-size:11px;color:var(--dim)">×</span></div>
+          <div class="vd-heat-bar" style="width:${pct}%"></div>
         </div>`;
       }).join('');
-      return `<div class="vd-stock-row ${rowCls}" onclick="this.classList.toggle('expanded')">
-        <div class="vd-stock-head">
-          <div class="vd-sym">${log.symbol}</div>
-          <span class="vd-dir-badge ${dirCls}">${dirStr}</span>
-          <span class="vd-strat-label">${stratShort}</span>
-          <div class="vd-steps-inline">${pillsHtml||'<span class="vd-sp skip">no steps</span>'}</div>
-          ${statusTag}
-          <span class="vd-meta-txt">${checkedStr} ${evalStr}</span>
-        </div>
-        <div class="vd-stock-detail">
-          <div class="vd-detail-title">Step-by-step &middot; ${log.symbol} &middot; ${log.strategy||''}</div>
-          ${detailRows||'<div class="empty">No step data</div>'}
-        </div>
+    }
+
+    // ── Click strategy tab ────────────────────────────────────────────────
+    function selectVdStrat(strat, el) {
+      vdActiveSt = strat;
+      document.querySelectorAll('.vd-stab').forEach(t => t.classList.remove('active'));
+      el.classList.add('active');
+      renderVdTable(strat);
+    }
+
+    // ── Build the main table: rows=stocks, cols=actual validation step names ──
+    function renderVdTable(strat) {
+      const area = document.getElementById('vd-table-area');
+      const logs  = (vdData[strat]||[]);
+
+      if (!logs.length) {
+        area.innerHTML = `<div class="vd-nodata">
+          No data for <b>${VD_NAMES[strat]||strat}</b> yet<br>
+          <span style="font-size:9px">Waiting for first evaluation cycle&hellip;</span>
+        </div>`;
+        return;
+      }
+
+      // ── Collect all step IDs in order from first complete log ─────────
+      const stepIds    = [];
+      const stepLabels = {};  // stepId → short display label
+
+      for (const log of logs) {
+        if ((log.steps||[]).length > 0) {
+          log.steps.forEach(s => {
+            if (!stepLabels[s.stepId]) {
+              // Use actual label from backend — this is the real validation name
+              // e.g. "Nifty Bullish + HH/HL", "Price > VWAP", "Gate 3 — Compression"
+              stepLabels[s.stepId] = s.label || s.stepId.replace(/_/g,' ');
+              stepIds.push(s.stepId);
+            }
+          });
+          break;
+        }
+      }
+
+      if (!stepIds.length) {
+        area.innerHTML = '<div class="vd-nodata">No step data available yet</div>';
+        return;
+      }
+
+      // ── Sort: all-pass first, then by failedAtStep DESC (most steps passed first) ──
+      const sorted = [...logs].sort((a,b) => {
+        if (a.failedAtStep===0 && b.failedAtStep!==0) return -1;
+        if (b.failedAtStep===0 && a.failedAtStep!==0) return 1;
+        return (b.failedAtStep||0) - (a.failedAtStep||0);
+      });
+
+      const passCount  = sorted.filter(l=>l.failedAtStep===0).length;
+      const totalShown = sorted.length>250 ? 250 : sorted.length;
+
+      // ── Build table header: Symbol | [validation step names] | Result ──
+      const thCells = stepIds.map((sid,i) => {
+        const fullLbl = stepLabels[sid];
+        // Short label for narrow column header — keep key words
+        const short = fullLbl.length>16 ? fullLbl.substring(0,15)+'…' : fullLbl;
+        return `<th title="${fullLbl.replace(/"/g,'&quot;')}" style="min-width:52px">
+          <div style="font-size:8px;white-space:normal;max-width:60px;margin:0 auto;line-height:1.3">${short}</div>
+        </th>`;
+      }).join('');
+
+      // ── Build table rows ───────────────────────────────────────────────
+      const tbRows = sorted.slice(0,250).map(log => {
+        // Build lookup map: stepId → step result
+        const byId = {};
+        (log.steps||[]).forEach(s => { byId[s.stepId] = s; });
+
+        const cells = stepIds.map(sid => {
+          const s = byId[sid];
+          if (!s) return `<td title="Not evaluated" style="font-size:12px;color:var(--dim)">&#8212;</td>`;
+          if (s.passed) {
+            return `<td class="vd-cell" title="${(s.detail||'').replace(/"/g,'&quot;').substring(0,110)}" style="font-size:15px">&#9989;</td>`;
+          } else {
+            return `<td class="vd-cell" title="${(s.detail||'').replace(/"/g,'&quot;').substring(0,110)}" style="font-size:15px">&#10060;</td>`;
+          }
+        }).join('');
+
+        const allOk    = log.failedAtStep===0;
+        const numSteps = (log.steps||[]).length;
+        const isClose  = !allOk && numSteps>0 && log.failedAtStep >= numSteps-1;
+        const rowCls   = allOk ? 'vd-pass' : isClose ? 'vd-close' : 'vd-fail';
+
+        const dirStr = (log.direction||'BUY');
+        const dirCls = (dirStr.includes('SELL')||dirStr.includes('SHORT')) ? 'vd-dir-sell' : 'vd-dir-long';
+
+        const resultTd = allOk
+          ? `<td class="vd-result-col"><span class="vd-result-pass">&#9989; PASS</span></td>`
+          : `<td class="vd-result-col"><span class="vd-result-fail">&#10060; FAIL @ step ${log.failedAtStep}</span></td>`;
+
+        // Show failed step label on hover of result
+        const failLabel = !allOk && log.firstFailedLabel
+          ? ` title="Failed: ${log.firstFailedLabel.replace(/"/g,'&quot;')}"` : '';
+
+        return `<tr class="${rowCls}">
+          <td${failLabel}>
+            ${log.symbol}
+            <span class="vd-dir-tag ${dirCls}">${dirStr.substring(0,4)}</span>
+          </td>
+          ${cells}
+          ${resultTd}
+        </tr>`;
+      }).join('');
+
+      // ── Stat bar above table ───────────────────────────────────────────
+      const statsBar = `<div style="display:flex;align-items:center;gap:12px;padding:8px 0 10px;font-size:10px;color:var(--muted)">
+        <span><b style="color:#fff">${sorted.length}</b> stocks evaluated</span>
+        ${passCount>0?`<span><b style="color:var(--green)">${passCount}</b> all-pass &#9989;</span>`:''}
+        <span><b style="color:var(--warn)">${sorted.filter(l=>!allPassing(l,logs)).filter(l=>{const n=(l.steps||[]).length;return n>0&&l.failedAtStep>=n-1;}).length}</b> almost there &#9889;</span>
+        ${sorted.length>250?`<span style="color:var(--dim)">Showing first 250 of ${sorted.length}</span>`:''}
+      </div>`;
+
+      area.innerHTML = statsBar + `<div class="vd-tbl-wrap">
+        <table class="vd-tbl">
+          <thead>
+            <tr>
+              <th style="text-align:left">Symbol</th>
+              ${thCells}
+              <th class="vd-result-col">Result</th>
+            </tr>
+          </thead>
+          <tbody>${tbRows}</tbody>
+        </table>
       </div>`;
     }
 
-    // Background validation refresh every 30s
-    setInterval(()=>loadValidationSteps(false), 30000);
+    function allPassing(log) { return log.failedAtStep===0; }
+
+    // Background refresh every 30s
+    setInterval(()=>loadVd(false), 30000);
+
 </script>
 </body>
 </html>
