@@ -65,7 +65,7 @@ trading:
   capital: ${TRADING_CAPITAL:100000}
   risk-per-trade: 0.01
   max-position-pct: 0.20
-  trade-window-start: "09:40"
+  trade-window-start: "09:30"
   trade-window-end: "14:40"
   entry-mode: ${ENTRY_MODE:AGGRESSIVE}
   strong-trend-risk: 0.01
