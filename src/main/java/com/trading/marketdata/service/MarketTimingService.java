@@ -43,7 +43,7 @@ public class MarketTimingService {
             return TimeWindow.MARKET_CLOSED;
 
         if (now.isBefore(LocalTime.of(9, 15)))   return TimeWindow.PRE_OPEN;
-        if (now.isBefore(LocalTime.of(9, 40)))   return TimeWindow.OBSERVATION;
+        if (now.isBefore(LocalTime.of(9, 30)))   return TimeWindow.OBSERVATION;
         if (now.isBefore(LocalTime.of(11, 0)))   return TimeWindow.PRIME_MORNING;
         if (now.isBefore(LocalTime.of(12, 30)))  return TimeWindow.LUNCH;
         if (now.isBefore(LocalTime.of(14, 0)))   return TimeWindow.AFTERNOON;
@@ -105,7 +105,7 @@ public class MarketTimingService {
 
     public String getCurrentWindowName() {
         return switch (getCurrentWindow()) {
-            case OBSERVATION   -> "Observation (9:15-9:40)";
+            case OBSERVATION   -> "Observation (9:15-9:30)";
             case PRIME_MORNING -> "Prime Morning (9:40-11:00)";
             case LUNCH         -> "Lunch (11:00-12:30)";
             case AFTERNOON     -> "Afternoon (12:30-14:00)";

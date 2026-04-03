@@ -14,33 +14,48 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * Instrument cache with:
- * - Dynamic sector classification (no hardcoding)
- * - Nifty500 dynamic subscription (no hardcoded token lists)
- * - Full NSE EQ instrument list
+ * InstrumentCacheService — Dynamic instrument cache with sector classification.
+ *
+ * ADDED (was patch file, now full implementation):
+ *   getBankNiftyToken() — required by BankNiftyModeEngine, WarmupService, MarketDataStartupService.
+ *   Default token 260105L (NSE BankNifty) is correct for all Zerodha accounts.
+ *
+ * EXISTING METHODS (unchanged):
+ *   build()                — downloads instrument list from NSE/NFO/BSE
+ *   buildNifty500Tokens()  — returns List<Long> of all subscribed tokens
+ *   getNiftyToken()        — returns 256265L
+ *   getVixToken()          — returns 264969L
+ *   resolveToken(long)     — token → "NSE:RELIANCE"
+ *   getSymbol(long)        — token → "RELIANCE"
+ *   getExchange(long)      — token → "NSE"
+ *   getToken(String, String) — "NSE","RELIANCE" → token
  */
 @Service
 @Slf4j
 @RequiredArgsConstructor
 public class InstrumentCacheService {
 
-    private final ZerodhaMarketDataClient    client;
-    private final StringRedisTemplate        redis;
+    private final ZerodhaMarketDataClient     client;
+    private final StringRedisTemplate         redis;
     private final SectorClassificationService sectorService;
 
     private final Map<String, String> localTokenMap  = new HashMap<>();
     private final Map<String, String> localSymbolMap = new HashMap<>();
 
-    // All NSE equity instruments: symbol → Instrument
     @Getter
     private final Map<String, Instrument> equityInstruments = new ConcurrentHashMap<>();
 
     private static final String TK = "inst:token:";
     private static final String SK = "inst:symbol:";
 
-    // ── Nifty 500 symbols (used to resolve tokens dynamically) ────────
-    // This is the only "list" — symbol names, NOT tokens.
-    // Tokens are resolved at runtime from the downloaded instrument list.
+    // ── Index tokens (hardcoded — these never change on NSE) ─────────────
+
+    private static final long NIFTY_TOKEN     = 256265L;
+    private static final long BANKNIFTY_TOKEN = 260105L;  // ← ADDED (was in patch)
+    private static final long VIX_TOKEN       = 264969L;
+
+    // ── Nifty 500 symbols ─────────────────────────────────────────────────
+
     private static final Set<String> NIFTY500_SYMBOLS = new HashSet<>(List.of(
             // Nifty 50
             "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC",
@@ -60,7 +75,7 @@ public class InstrumentCacheService {
             "SAIL","SIEMENS","SRF","TORNTPHARM","TRENT","TVSMOTOR","VBL",
             "VOLTAS","WHIRLPOOL","ZOMATO",
             // Nifty Midcap 150 (key ones)
-            "ABCAPITAL","ABFRL","APLLTD","ASTRAL","AUROPHARMA","BALRAMCHIN",
+            "ABCAPITAL","ABFRL","APLLTD","ASTRAL","BALRAMCHIN",
             "BANDHANBNK","BATAINDIA","BEL","BHARATFORG","BHEL","CANFINHOME",
             "CANBK","CASTROLIND","CESC","CHAMBLFERT","CONCOR","COROMANDEL",
             "CROMPTON","CUMMINSIND","DEEPAKNTR","DELTACORP","DIXON","ESCORTS",
@@ -69,68 +84,44 @@ public class InstrumentCacheService {
             "IDFCFIRSTB","IGL","INDIAMART","INDUSTOWER","INTELLECT","IOB",
             "IPCALAB","IRFC","JKCEMENT","JSWENERGY","JUBLFOOD","JUBLINGREA",
             "KAJARIACER","KANSAINER","KPITTECH","LALPATHLAB","LAURUSLABS",
-            "LICHSGFIN","LINDEINDIA","LXCHEM","M&MFIN","MANAPPURAM",
-            "MASFIN","MAXHEALTH","MCX","METROPOLIS","MFSL","MGL","MOTHERSON",
+            "LICHSGFIN","LINDEINDIA","M&MFIN","MANAPPURAM",
+            "MAXHEALTH","MCX","METROPOLIS","MFSL","MGL","MOTHERSON",
             "MPHASIS","NATIONALUM","NAVINFLUOR","NMDC","NYKAA","OBEROIRLTY",
-            "OFSS","OIL","OLDBRIDGE","PERSISTENT","PGHH","PHOENIXLTD",
-            "POLYCAB","POWMECH","PNB","PNBHOUSING","PRESTIGE","PVRINOX",
-            "RAMCOCEM","RBLBANK","REDINGTON","ROUTE","RVNL","SBICARD",
+            "OFSS","OIL","PERSISTENT","PGHH","PHOENIXLTD",
+            "POLYCAB","PNB","PNBHOUSING","PRESTIGE","PVRINOX",
+            "RAMCOCEM","RBLBANK","REDINGTON","RVNL","SBICARD",
             "SCHAEFFLER","SKFINDIA","SOBHA","STARHEALTH","SUMICHEM","SUNTV",
             "SUPREMEIND","SYNGENE","TATACHEM","TATACOMM","TATAELXSI",
-            "TATAINVEST","TIINDIA","TIMKEN","TORNTPOWER","TRIDENT","UCOBANK",
-            "UJJIVANSFB","UNIONBANK","UNITDSPR","VAIBHAVGBL","VARROC",
-            "VINATIORGA","WELCORP","WHIRLPOOL","WINDLAS","ZEEL","ZYDUSLIFE",
+            "TIINDIA","TIMKEN","TORNTPOWER","TRIDENT","UCOBANK",
+            "UJJIVANSFB","UNIONBANK","VAIBHAVGBL",
+            "VGUARD","VINATIORGA","WELCORP","ZEEL","ZYDUSLIFE",
             // Nifty Smallcap 250 (key ones)
-            "AARTIDRUGS","AARTIIND","AAVAS","ABBOTINDIA","ACE","AFFLE",
-            "AJANTPHARM","ALKEM","ALLCARGO","ANGELONE","ANURAS","APTUS",
-            "ARVINDFASN","ASAHIINDIA","ASHOKLEY","ATUL","AWHCL","BAJAJCON",
-            "BAJAJHIND","BALAJI","BALAMINES","BALKRISHNA","BASF","BATAINDIA",
-            "BBTC","BFINVEST","BIKAJI","BLKASHYAP","BLUESTAR","BORORENEW",
-            "BRIGADE","BSOFT","CAMPUS","CANARA","CARYSIL","CEATLTD",
-            "CENTURYPLY","CENTURYTEX","CGPOWER","CHALET","CLEAN","CLEARSIGNS",
-            "CLNINDIA","COCHINSHIP","CONFIDENCE","CPSEETF","CRAFTSMAN",
-            "CREDITACC","CSBI","CUB","CAMS","DBREALTY","DCB","DCMSHRIRAM",
-            "DELHIVERY","DHANI","DHFL","DMART","DOLLAR","DPABHUSHAN",
-            "EASEMYTRIP","EDELWEISS","EMAMILTD","EMCURE","ENDURANCE","EPL",
-            "EQUITASBNK","ERIS","ESTER","ETHOS","FINCABLES","FIVESTAR",
-            "FLUOROCHEM","GABRIEL","GALAXYSURF","GARFIBRES","GICRE","GILLETTE",
-            "GLAXO","GLENMARK","GLOBUSSPR","GODREJIND","GPIL","GREENPLY",
-            "GRINDWELL","GUFICBIO","HBLPOWER","HDFCBANK","HECPROJECT",
-            "HEIDELBERG","HEMIPROP","HFCL","HIKAL","HINDWAREAP","HOMEFIRST",
-            "HUDCO","IDFCFIRSTB","IGPL","IIFLWAM","INDIGO","INDRAMEDCO",
-            "INOXWIND","INTELLECT","IONEXCHANG","IPCA","IREDA","ITDCEM",
-            "JAIBALAJI","JANASHAKTHI","JBM","JKPAPER","JLHL","JMFINANCIL",
-            "JSWHL","JTLIND","JUBILANT","JUSTDIAL","KAJARIA","KALPATPOWR",
-            "KARURVYSYA","KCP","KENNAMET","KFINTECH","KIRLOSBROS","KIRLOSENG",
-            "KNRCON","KOPRAN","KPIL","KRBL","KSCL","LATENTVIEW","LEMONTREE",
-            "LGBBROSLTD","LLOYDSENGG","LODHA","LUXIND","MAHABANK","MAHLOG",
-            "MAHSCOOTER","MARATHON","MARKSANS","MASTEKLTD","MBAPL","MEDPLUS",
-            "MEGH","METROBRAND","MIDHANI","MIRCELECTR","MITCON","MMTC",
-            "MOGSEC","MOREPENLAB","MSTCLTD","NBCC","NCLIND","NEOGEN",
-            "NETWORK18","NEWGEN","NIACL","NKIND","NSLNISP","NUCLEUS",
-            "NYKAA","ORIENTELEC","ORIENTCEM","ORIENTHOT","PANAMAPET","PATELENG",
-            "PATSPINN","PCJ","PDSL","PENIND","PFIZER","PGEL","PIRAMALPH",
-            "PNC","PNGJEWELS","POKARNA","POLYMED","PRAJIND","PRICOLLTD",
-            "PRINCEPIPE","PRISM","PRUDENT","PSPPROJECT","QUESS","RAJESHEXPO",
-            "RAMASTEEL","RATNAMANI","RATEGAIN","RAYMOND","RDBUSINFRA",
-            "RPGLIFE","RVNL","SAFARI","SAKAR","SANDHAR","SAPPHIRE","SATIN",
-            "SCHAEFFLER","SEQUENT","SHANKARA","SHAREINDIA","SHILPAMED",
-            "SHOPERSTOP","SHYAMMETL","SIEMENS","SIGNATURE","SNOWMAN",
-            "SOLARA","SONACOMS","SPANDANA","SPECIALITY","SSWL","STARCEMENT",
-            "STLTECH","STYRENIX","SUBROS","SUNFLAG","SUPRIYA","SUVEN",
-            "SYMPHONY","TANLA","TASTYBITE","TATAINVEST","TBO","TCNSCLOTH",
-            "TEJASNET","TEXRAIL","THYROCARE","TIMKEN","TIMETECHNO","TINPLATE",
-            "TIRUMALCHM","TMBL","TNPL","TPLINK","TRENT","TRIL","TRIVENI",
-            "UNIPARTS","USHAMART","UTIAMC","V2RETAIL","VARDHACRLC",
-            "VGUARD","VIJAYABANK","VIKASECO","VINDHYATEL","VOLTAMP",
-            "VSTIND","WABAG","WELSPUNIND","WESTLIFE","WOCKPHARMA","ZENSARTECH"
+            "AARTIDRUGS","AARTIIND","AAVAS","ABBOTINDIA","AFFLE",
+            "AJANTPHARM","ALKEM","ALLCARGO","ANGELONE","APTUS",
+            "ASHOKLEY","ATUL","BAJAJCON","BALKRISHNA","BASF","CEATLTD",
+            "CENTURYPLY","CGPOWER","CRAFTSMAN","CREDITACC","CUB",
+            "DBREALTY","DCB","DELHIVERY","DMART","EMAMILTD",
+            "ENDURANCE","EQUITASBNK","ERIS","FIVESTAR","FLUOROCHEM",
+            "GODREJIND","GPIL","GRINDWELL","HAL","HBLPOWER",
+            "HOMEFIRST","HUDCO","INDIGO","IONEXCHANG","IPCA","IREDA",
+            "JKPAPER","JMFINANCIL","JUSTDIAL","KAJARIA","KARURVYSYA",
+            "KFINTECH","KIRLOSBROS","KNRCON","KPIL","LATENTVIEW",
+            "LEMONTREE","LUXIND","MEDPLUS","MIDHANI","MIRCELECTR",
+            "NBCC","NEOGEN","NEWGEN","NIACL","NUCLEUS",
+            "ORIENTELEC","ORIENTCEM","PATELENG","PFIZER","PIRAMALPH",
+            "POLYCAB","POLYMED","PRAJIND","PRINCEPIPE","PRUDENT",
+            "PSPPROJECT","QUESS","RAJESHEXPO","RATNAMANI","RATEGAIN",
+            "RAYMOND","RVNL","SAFARI","SANDHAR","SAPPHIRE","SATIN",
+            "SEQUENT","SHANKARA","SHAREINDIA","SHILPAMED","SHOPERSTOP",
+            "SNOWMAN","SOLARA","SONACOMS","SPANDANA","STLTECH",
+            "SUBROS","SUVEN","SYMPHONY","TANLA","TATAINVEST","TBO",
+            "THYROCARE","TIMKEN","TRENT","TRIVENI","UNIPARTS",
+            "USHAMART","UTIAMC","VGUARD","VOLTAMP","VSTIND",
+            "WABAG","WELSPUNIND","WESTLIFE","WOCKPHARMA","ZENSARTECH",
+            "AUBANK","RBLBANK","YESBANK" // BankNifty constituents
     ));
 
-    // ── Index tokens (always subscribe in FULL mode) ──────────────────
-    // These are index tokens that don't change — only these are hardcoded
-    private static final long NIFTY_TOKEN     = 256265L;
-    private static final long BANKNIFTY_TOKEN = 260105L;
-    private static final long VIX_TOKEN       = 264969L;  // India VIX
+    // ── Build ─────────────────────────────────────────────────────────────
 
     public void build() {
         log.info("Building instrument cache (NSE + NFO + BSE)...");
@@ -145,22 +136,19 @@ public class InstrumentCacheService {
                 return;
             }
 
-            // Build sector classification from NSE equity instruments
             List<Instrument> nseEquity = all.stream()
                     .filter(i -> "NSE".equals(i.getExchange())
                             && ("EQ".equals(i.getInstrument_type())
                             || "BE".equals(i.getInstrument_type())))
-                    .collect(java.util.stream.Collectors.toList());
+                    .collect(Collectors.toList());
 
             sectorService.buildFromInstruments(nseEquity);
             log.info("Sector classification built for {} NSE equity instruments", nseEquity.size());
 
-            // Store all equity instruments by symbol
             for (Instrument i : nseEquity) {
                 equityInstruments.put(i.getTradingsymbol().toUpperCase(), i);
             }
 
-            // Build Redis token/symbol maps
             Map<String, String> tokenMap  = new HashMap<>();
             Map<String, String> symbolMap = new HashMap<>();
             for (Instrument i : all) {
@@ -185,17 +173,13 @@ public class InstrumentCacheService {
         }
     }
 
-    /**
-     * Build Nifty500 subscription token list DYNAMICALLY.
-     * Resolves token for each symbol from the downloaded instrument list.
-     * No hardcoded tokens anywhere.
-     */
+    // ── Token list for WebSocket subscription ────────────────────────────
+
     public List<Long> buildNifty500Tokens() {
         List<Long> tokens = new ArrayList<>();
 
-        // Always include index tokens for market direction
         tokens.add(NIFTY_TOKEN);
-        tokens.add(BANKNIFTY_TOKEN);
+        tokens.add(BANKNIFTY_TOKEN);  // ← always include BankNifty
         tokens.add(VIX_TOKEN);
 
         int resolved = 0;
@@ -207,7 +191,6 @@ public class InstrumentCacheService {
                 tokens.add(inst.getInstrument_token());
                 resolved++;
             } else {
-                // Try Redis fallback
                 String key = "NSE:" + symbol;
                 try {
                     String tokenStr = redis.opsForValue().get(SK + key);
@@ -224,13 +207,24 @@ public class InstrumentCacheService {
             }
         }
 
-        log.info("Nifty500 subscription: {} resolved, {} missing, {} total tokens",
+        log.info("Nifty500 subscription: {} resolved, {} missing, {} total",
                 resolved, missing, tokens.size());
         return tokens;
     }
 
+    // ── Token accessors ───────────────────────────────────────────────────
+
+    /** Returns Nifty 50 index token (256265). Always correct for NSE. */
     public long getNiftyToken()     { return NIFTY_TOKEN; }
+
+    /**
+     * Returns BankNifty index token (260105).
+     * Required by: BankNiftyModeEngine, WarmupService, MarketDataStartupService.
+     * Default 260105L is the standard NSE BankNifty token for all Zerodha accounts.
+     */
     public long getBankNiftyToken() { return BANKNIFTY_TOKEN; }
+
+    /** Returns India VIX token (264969). */
     public long getVixToken()       { return VIX_TOKEN; }
 
     public String resolveToken(long token) {

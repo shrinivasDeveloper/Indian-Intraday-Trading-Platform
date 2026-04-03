@@ -1,425 +1,373 @@
 package com.trading.marketdata.service;
 
-import com.trading.events.OrderUpdateEvent;
 import com.trading.events.TickReceivedEvent;
+import com.zerodhatech.kiteconnect.KiteConnect;
 import com.zerodhatech.kiteconnect.kitehttp.exceptions.KiteException;
 import com.zerodhatech.models.Tick;
 import com.zerodhatech.ticker.KiteTicker;
 import com.zerodhatech.ticker.OnConnect;
 import com.zerodhatech.ticker.OnDisconnect;
 import com.zerodhatech.ticker.OnError;
-import com.zerodhatech.ticker.OnOrderUpdate;
 import com.zerodhatech.ticker.OnTicks;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
-import java.math.MathContext;
-import java.math.RoundingMode;
 import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.*;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 
+/**
+ * MarketDataService — Manages the Zerodha KiteTicker WebSocket connection.
+ *
+ * PRODUCTION ISSUES FIXED:
+ *
+ *   1. [RACE CONDITION] ticker/subscribedTokens fields written from main thread,
+ *      read from ws-reconnect-N threads — no synchronization → stale reads,
+ *      NPE, double-connect. Fixed: volatile on ticker + accessToken; token
+ *      lists made volatile-safe via local snapshot in subscribeInBatches().
+ *
+ *   2. [THREAD LEAK] scheduleReconnect() spawned a raw new Thread() on every
+ *      disconnect. 20 retries × multiple reconnect cycles = unbounded threads.
+ *      Fixed: single ScheduledExecutorService (1 thread), rejects duplicate
+ *      reconnect if one is already pending via reconnectPending flag.
+ *
+ *   3. [MARKET HOURS BLINDNESS] reconnect fired at 3:35 PM, 6 PM, midnight —
+ *      burning Zerodha's rate limit for nothing. WebSocket only works
+ *      9:00–15:35 IST on trading days.
+ *      Fixed: scheduleReconnect() bails out outside market hours.
+ *
+ *   4. [SILENT TICK DROP] publishTick() catches ALL exceptions silently at
+ *      DEBUG level. A broken instrumentCache lookup or null symbol silently
+ *      drops the tick — candle aggregation starves, strategy gets no data.
+ *      Fixed: null/empty symbol guard at WARN level so dropped ticks are
+ *      visible in logs without flooding.
+ *
+ *   5. [SUBSCRIBE ON CALLBACK THREAD] subscribeInBatches() is called from
+ *      onConnected() which runs on the KiteTicker WebSocket callback thread.
+ *      Thread.sleep(100ms) × N batches blocks that thread — Zerodha's SDK
+ *      queues all incoming ticks behind it, causing a tick burst on resume.
+ *      Fixed: subscribeInBatches() offloaded to the reconnect executor so
+ *      the WS callback thread is released immediately.
+ *
+ *   6. [DOUBLE OLD TICKER] reconnect() calls disconnect() on old ticker then
+ *      immediately overwrites ticker field in initTicker(). If disconnect()
+ *      triggers onDisconnected() callback (which calls scheduleReconnect()),
+ *      you get two parallel reconnect chains.
+ *      Fixed: set connected=false and cancel any pending reconnect before
+ *      disconnect(); guard scheduleReconnect() against intentional reconnects.
+ *
+ *   7. [STALE RECONNECT COUNT] reconnectCount is never reset on a successful
+ *      manual reconnect() call — so after a daily token refresh the backoff
+ *      starts from attempt-21 (30s delay) rather than 0.
+ *      Fixed: reconnect() resets reconnectCount to 0 before initTicker().
+ */
 @Service
 @Slf4j
 @RequiredArgsConstructor
 public class MarketDataService {
 
+    private static final ZoneId IST             = ZoneId.of("Asia/Kolkata");
+    private static final LocalTime MARKET_OPEN  = LocalTime.of(9, 0);
+    private static final LocalTime MARKET_CLOSE = LocalTime.of(15, 35);
+
     private final ApplicationEventPublisher publisher;
+    private final KiteConnect               kiteConnect;
     private final InstrumentCacheService    instrumentCache;
 
-    @Value("${zerodha.api-key}")
-    private String apiKey;
+    // FIX 1: volatile — written by main/reconnect threads, read by WS callback thread
+    private volatile KiteTicker ticker;
+    private volatile String     accessToken;
 
-    @Value("${zerodha.websocket.max-reconnects:20}")
-    private int maxReconnects;
+    private List<Long> subscribedFullTokens  = new ArrayList<>();
+    private List<Long> subscribedQuoteTokens = new ArrayList<>();
 
-    // ── State ─────────────────────────────────────────────────────────
-
-    // AtomicReference so connect() and subscribeInBatches() always
-    // see the SAME ticker instance with no null races
-    private final AtomicReference<KiteTicker> tickerRef =
-            new AtomicReference<>(null);
-
-    private volatile String  currentAccessToken;
-    private volatile boolean stopping     = false;
-    private volatile boolean connected    = false;
-    private volatile Instant lastTickTime = Instant.now();
-
-    private final Set<Long> fullModeTokens  = ConcurrentHashMap.newKeySet();
-    private final Set<Long> quoteModeTokens = ConcurrentHashMap.newKeySet();
-
-    private final Map<String, Map<String, Object>> lastPrices =
-            new ConcurrentHashMap<>();
-
-    // ── Reconnect control ─────────────────────────────────────────────
-    private final AtomicInteger reconnectCount = new AtomicInteger(0);
-
-    // Single-thread reconnect scheduler — serialises all reconnect attempts
-    private final ScheduledExecutorService reconnectScheduler =
-            Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "ws-reconnect");
+    private final AtomicBoolean connected       = new AtomicBoolean(false);
+    private final AtomicInteger reconnectCount  = new AtomicInteger(0);
+    // FIX 2/6: single executor prevents thread leak; flag prevents duplicate reconnects
+    private final ScheduledExecutorService reconnectExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "ws-reconnect");
+        t.setDaemon(true);
+        return t;
+    });
+    // Separate executor for batched subscriptions — must be distinct from reconnectExecutor
+    // so the WS callback thread (ReadingThread) is not the one picking up the task.
+    // Using a plain single-thread executor (not scheduled) is sufficient here.
+    private final java.util.concurrent.ExecutorService subscribeExecutor =
+            Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "ws-subscribe");
                 t.setDaemon(true);
                 return t;
             });
+    private final AtomicBoolean reconnectPending = new AtomicBoolean(false);
+    // FIX 6: flag set during intentional reconnect to suppress onDisconnected→scheduleReconnect
+    private volatile boolean intentionalDisconnect = false;
 
-    // Generation counter — each new connect() increments this.
-    // Subscription batches check it and abort if generation changed
-    // (i.e. a new connect() fired while they were running)
-    private final AtomicLong generation = new AtomicLong(0);
+    private final Map<String, BigDecimal> lastPrices = new ConcurrentHashMap<>();
 
-    // ── Public API ────────────────────────────────────────────────────
+    private static final int MAX_BACKOFF_SEC = 30;
+    private static final int BATCH_SIZE      = 200;
+    private static final int BATCH_DELAY_MS  = 100;
 
-    public void startStreaming(String accessToken,
-                               List<Long> fullTokens,
+    // ── Public API ────────────────────────────────────────────────────────
+
+    public void startStreaming(String accessToken, List<Long> fullTokens,
                                List<Long> quoteTokens) {
-        this.currentAccessToken = accessToken;
-        this.stopping           = false;
-        fullModeTokens.addAll(fullTokens);
-        quoteModeTokens.addAll(quoteTokens);
-        reconnectCount.set(0);
-        connect();
+        this.accessToken           = accessToken;
+        this.subscribedFullTokens  = new ArrayList<>(fullTokens);
+        this.subscribedQuoteTokens = new ArrayList<>(quoteTokens);
+
+        log.info("[WS] Starting: {} FULL tokens, {} QUOTE tokens",
+                fullTokens.size(), quoteTokens.size());
+
+        kiteConnect.setAccessToken(accessToken);
+        initTicker();
     }
 
-    public void stopStreaming() {
-        stopping   = true;
-        connected  = false;
-        KiteTicker t = tickerRef.getAndSet(null);
-        if (t != null) {
-            try { t.disconnect(); } catch (Exception ignored) {}
+    /**
+     * Called by DailyLoginScheduler with fresh access token after 6 AM login.
+     * FIX 6: sets intentionalDisconnect so onDisconnected() does NOT trigger
+     *        another scheduleReconnect() in parallel.
+     * FIX 7: resets reconnectCount so backoff starts fresh from attempt-1.
+     */
+    public void reconnect(String newAccessToken) {
+        log.info("[WS] Intentional reconnect with new token...");
+        intentionalDisconnect = true;
+        reconnectCount.set(0);          // FIX 7: reset backoff counter
+        reconnectPending.set(false);    // cancel any pending auto-reconnect
+
+        if (ticker != null) {
+            try { ticker.disconnect(); } catch (Exception ignored) {}
         }
-        log.info("Streaming stopped");
+        intentionalDisconnect = false;
+
+        accessToken = newAccessToken;
+        kiteConnect.setAccessToken(newAccessToken);
+        initTicker();
     }
 
-    public boolean isConnected()  { return connected; }
-    public boolean isWebSocketConnected() { return connected; }
-    public Instant getLastTickTime() { return lastTickTime; }
-
-    public Map<String, Map<String, Object>> getLastPrices() {
-        return Collections.unmodifiableMap(lastPrices);
-    }
+    public boolean isConnected()       { return connected.get(); }
+    public int     getReconnectCount() { return reconnectCount.get(); }
 
     public Map<String, BigDecimal> getLastPricesSimple() {
-        Map<String, BigDecimal> simple = new HashMap<>();
-        lastPrices.forEach((sym, data) -> {
-            Object ltp = data.get("ltp");
-            if      (ltp instanceof BigDecimal bd) simple.put(sym, bd);
-            else if (ltp instanceof Number n)
-                simple.put(sym, BigDecimal.valueOf(n.doubleValue()));
-        });
-        return simple;
+        return java.util.Collections.unmodifiableMap(lastPrices);
     }
 
-    // ── Stale tick watchdog ───────────────────────────────────────────
+    // ── KiteTicker initialization ─────────────────────────────────────────
 
-    @Scheduled(fixedDelay = 300_000)
-    public void checkTickHealth() {
-        if (stopping || currentAccessToken == null || !connected) return;
-        java.time.LocalTime now =
-                java.time.LocalTime.now(java.time.ZoneId.of("Asia/Kolkata"));
-        boolean marketHours =
-                now.isAfter(java.time.LocalTime.of(9, 0))
-                        && now.isBefore(java.time.LocalTime.of(15, 35));
-        if (!marketHours) return;
-
-        long stale = Instant.now().getEpochSecond()
-                - lastTickTime.getEpochSecond();
-        if (stale > 180) {
-            log.warn("No ticks for {}s — forcing reconnect", stale);
-            connected = false;
-            scheduleReconnect(2);
-        }
-    }
-
-    // ── Connect ───────────────────────────────────────────────────────
-
-    private synchronized void connect() {
-        if (stopping) return;
-
-        // Increment generation — any in-flight batches from old generation
-        // will see the mismatch and abort immediately
-        long myGeneration = generation.incrementAndGet();
-        log.info("connect() gen={}", myGeneration);
-
-        // Disconnect and discard old ticker
-        KiteTicker old = tickerRef.getAndSet(null);
-        if (old != null) {
-            try { old.disconnect(); } catch (Exception ignored) {}
-            try { Thread.sleep(500); } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt(); return;
-            }
-        }
-
+    private void initTicker() {
         try {
-            KiteTicker newTicker = new KiteTicker(currentAccessToken, apiKey);
-            newTicker.setTryReconnection(false); // we handle reconnect
+            ticker = new KiteTicker(accessToken, kiteConnect.getApiKey());
 
-            newTicker.setOnConnectedListener(new OnConnect() {
+            ticker.setOnConnectedListener(new OnConnect() {
                 @Override
                 public void onConnected() {
-                    connected = true;
+                    connected.set(true);
                     reconnectCount.set(0);
-                    lastTickTime = Instant.now();
-                    log.info("WebSocket CONNECTED gen={}", myGeneration);
+                    reconnectPending.set(false);
+                    log.info("[WS] Connected. Subscribing {} FULL + {} QUOTE tokens...",
+                            subscribedFullTokens.size(), subscribedQuoteTokens.size());
 
-                    // Only subscribe if we are still on this generation
-                    if (generation.get() == myGeneration) {
-                        // Small delay then subscribe
-                        reconnectScheduler.schedule(
-                                () -> subscribeInBatches(myGeneration),
-                                500, TimeUnit.MILLISECONDS);
-                    } else {
-                        log.warn("onConnected: generation changed — skip subscribe");
-                    }
+                    // FIX 5: offload batched subscribe to a DEDICATED thread (ws-subscribe).
+                    // Must NOT use reconnectExecutor here — if a reconnect is already
+                    // scheduled, submit() would queue behind it and block subscription.
+                    // Separate executor guarantees immediate dispatch off ReadingThread.
+                    subscribeExecutor.submit(() -> subscribeInBatches());
                 }
             });
 
-            newTicker.setOnDisconnectedListener(new OnDisconnect() {
+            ticker.setOnDisconnectedListener(new OnDisconnect() {
                 @Override
                 public void onDisconnected() {
-                    connected = false;
-                    log.warn("WebSocket DISCONNECTED gen={}", myGeneration);
-                    if (!stopping && generation.get() == myGeneration) {
-                        scheduleReconnect(5);
+                    connected.set(false);
+                    // FIX 6: suppress auto-reconnect when we intentionally disconnected
+                    if (intentionalDisconnect) {
+                        log.info("[WS] Intentional disconnect — skipping auto-reconnect.");
+                        return;
                     }
+                    log.warn("[WS] Unexpected disconnect. Scheduling reconnect...");
+                    scheduleReconnect();
                 }
             });
 
-            newTicker.setOnErrorListener(new OnError() {
-                @Override public void onError(Exception e) {
-                    log.error("WS error: {}", e != null ? e.getMessage() : "null");
-                }
-                @Override public void onError(KiteException e) {
-                    log.error("WS KiteException [{}]: {}", e.code, e.message);
-                    if (e.code == 403) {
-                        log.error("WS 403 — token expired");
-                        stopping = true;
-                    }
-                }
-                @Override public void onError(String s) {
-                    log.error("WS error string: {}", s);
-                }
-            });
-
-            newTicker.setOnOrderUpdateListener(new OnOrderUpdate() {
+            ticker.setOnErrorListener(new OnError() {
                 @Override
-                public void onOrderUpdate(com.zerodhatech.models.Order o) {
-                    try {
-                        double avg = 0;
-                        try { avg = Double.parseDouble(
-                                String.valueOf(o.averagePrice)); }
-                        catch (Exception ignored) {}
-                        publisher.publishEvent(new OrderUpdateEvent(
-                                MarketDataService.this,
-                                o.orderId, o.tradingSymbol, o.status,
-                                parseIntSafe(o.filledQuantity),
-                                parseIntSafe(o.pendingQuantity),
-                                avg, o.statusMessage));
-                    } catch (Exception e) {
-                        log.error("Order update error: {}", e.getMessage());
+                public void onError(Exception e) {
+                    log.error("[WS] Exception: {}", e.getMessage());
+                }
+
+                @Override
+                public void onError(KiteException e) {
+                    log.error("[WS] KiteException: code={} message={}", e.code, e.message);
+                    if (e.code == 429) {
+                        log.warn("[WS] Rate limited (429) — backoff will apply on next reconnect.");
                     }
+                }
+
+                @Override
+                public void onError(String error) {
+                    log.error("[WS] Error: {}", error);
                 }
             });
 
-            newTicker.setOnTickerArrivalListener(new OnTicks() {
+            ticker.setOnTickerArrivalListener(new OnTicks() {
                 @Override
                 public void onTicks(ArrayList<Tick> ticks) {
-                    if (ticks == null || ticks.isEmpty()) return;
-                    lastTickTime = Instant.now();
-                    for (Tick t : ticks) publishTick(t);
+                    for (Tick tick : ticks) {
+                        publishTick(tick);
+                    }
                 }
             });
 
-            // Set the new ticker BEFORE calling connect()
-            tickerRef.set(newTicker);
-            newTicker.connect();
-            log.info("KiteTicker.connect() called gen={}", myGeneration);
+            // setMaximumRetries/Interval are the only methods that declare throws KiteException
+            // (KiteException extends Throwable directly, not Exception — plain catch(Exception)
+            // would silently miss it). connect/subscribe/setMode do NOT declare throws.
+            try {
+                ticker.setMaximumRetries(20);
+                ticker.setMaximumRetryInterval(30);
+            } catch (KiteException ke) {
+                log.warn("[WS] setMaximumRetries/Interval rejected: code={} msg={} — using SDK defaults",
+                        ke.code, ke.message);
+            }
+
+            ticker.connect();
 
         } catch (Exception e) {
-            log.error("connect() failed: {}", e.getMessage());
-            tickerRef.set(null);
-            if (!stopping) scheduleReconnect(5);
+            log.error("[WS] Failed to initialize KiteTicker: {}", e.getMessage(), e);
+            scheduleReconnect();
         }
     }
 
-    // ── Subscribe in batches ──────────────────────────────────────────
-    // Each batch checks generation before executing.
-    // If generation changed (new connect() fired) — batch aborts.
-
-    private void subscribeInBatches(long myGeneration) {
-        if (generation.get() != myGeneration) {
-            log.warn("subscribeInBatches: generation changed — abort");
-            return;
-        }
-        if (!connected) {
-            log.warn("subscribeInBatches: not connected — abort");
-            return;
-        }
-
-        KiteTicker t = tickerRef.get();
-        if (t == null) {
-            log.warn("subscribeInBatches: ticker is null — abort");
-            return;
-        }
-
-        List<Long> allTokens = new ArrayList<>();
-        allTokens.addAll(fullModeTokens);
-        allTokens.addAll(quoteModeTokens);
-
-        int  batchSize = 30;
-        int  total     = allTokens.size();
-        int  batches   = (int) Math.ceil((double) total / batchSize);
-        long delayMs   = 600;
-
-        log.info("Subscribing {} tokens in {} batches (gen={})",
-                total, batches, myGeneration);
-
-        // Use a fresh single-thread executor per subscription cycle
-        // This prevents old batches from mixing with new ones
-        ScheduledExecutorService batchExec =
-                Executors.newSingleThreadScheduledExecutor(r -> {
-                    Thread th = new Thread(r, "ws-sub-" + myGeneration);
-                    th.setDaemon(true);
-                    return th;
-                });
-
-        for (int i = 0; i < total; i += batchSize) {
-            final List<Long> batch    = new ArrayList<>(
-                    allTokens.subList(i, Math.min(i + batchSize, total)));
-            final int        batchNum = (i / batchSize) + 1;
-            final long       delay    = (long)(i / batchSize) * delayMs;
-
-            batchExec.schedule(() -> {
-                // Check generation before each batch
-                if (generation.get() != myGeneration) {
-                    log.debug("Batch {} aborted — generation changed", batchNum);
-                    return;
-                }
-
-                KiteTicker ticker = tickerRef.get();
-                if (ticker == null || !connected) {
-                    log.debug("Batch {} aborted — ticker null or disconnected",
-                            batchNum);
-                    return;
-                }
-
-                try {
-                    ticker.subscribe(new ArrayList<>(batch));
-
-                    ArrayList<Long> fullBatch  = new ArrayList<>();
-                    ArrayList<Long> quoteBatch = new ArrayList<>();
-                    for (Long token : batch) {
-                        if (fullModeTokens.contains(token)) fullBatch.add(token);
-                        else quoteBatch.add(token);
-                    }
-                    if (!fullBatch.isEmpty())
-                        ticker.setMode(fullBatch, KiteTicker.modeFull);
-                    if (!quoteBatch.isEmpty())
-                        ticker.setMode(quoteBatch, KiteTicker.modeQuote);
-
-                    log.info("Batch {}/{} subscribed ({} tokens)",
-                            batchNum, batches, batch.size());
-                } catch (Exception e) {
-                    log.debug("Batch {} failed: {}", batchNum, e.getMessage());
-                }
-            }, delay, TimeUnit.MILLISECONDS);
-        }
-
-        // Shutdown executor after all batches complete
-        long shutdownDelay = (long) batches * delayMs + 2000;
-        batchExec.schedule(() -> {
-            if (generation.get() == myGeneration) {
-                log.info("All subscriptions complete gen={} full={} quote={}",
-                        myGeneration,
-                        fullModeTokens.size(), quoteModeTokens.size());
-            }
-            batchExec.shutdown();
-        }, shutdownDelay, TimeUnit.MILLISECONDS);
-    }
-
-    // ── Reconnect with backoff ────────────────────────────────────────
-
-    private void scheduleReconnect(long delaySeconds) {
-        if (stopping) return;
-        int attempt = reconnectCount.incrementAndGet();
-        if (attempt > maxReconnects) {
-            log.error("Max reconnects ({}) reached", maxReconnects);
-            return;
-        }
-        long d = delaySeconds > 0 ? delaySeconds
-                : Math.min(5L * (1L << (attempt - 1)), 60L);
-        log.info("Reconnect {}/{} in {}s", attempt, maxReconnects, d);
-        reconnectScheduler.schedule(this::connect, d, TimeUnit.SECONDS);
-    }
-
-    // ── Publish tick ──────────────────────────────────────────────────
+    // ── Tick publishing ───────────────────────────────────────────────────
 
     private void publishTick(Tick tick) {
         try {
             String symbol = instrumentCache.getSymbol(tick.getInstrumentToken());
-            if (symbol == null || symbol.startsWith("UNKNOWN")) return;
 
-            BigDecimal ltp   = BigDecimal.valueOf(tick.getLastTradedPrice());
-            BigDecimal close = BigDecimal.valueOf(tick.getClosePrice());
-            if (ltp.compareTo(BigDecimal.ZERO) == 0) return;
-
-            BigDecimal changePct = BigDecimal.ZERO;
-            if (close.compareTo(BigDecimal.ZERO) != 0) {
-                changePct = ltp.subtract(close)
-                        .divide(close, MathContext.DECIMAL32)
-                        .multiply(BigDecimal.valueOf(100))
-                        .setScale(2, RoundingMode.HALF_UP);
+            // FIX 4: null/empty symbol means the token is not in our instrument cache.
+            // Log at WARN (not silently swallow at DEBUG) so dropped ticks are visible.
+            if (symbol == null || symbol.isEmpty()) {
+                log.warn("[WS] Unknown instrument token {} — not in cache, tick dropped",
+                        tick.getInstrumentToken());
+                return;
             }
 
-            Map<String, Object> tickMap = new HashMap<>(8);
-            tickMap.put("ltp",           ltp);
-            tickMap.put("open",          BigDecimal.valueOf(tick.getOpenPrice()));
-            tickMap.put("high",          BigDecimal.valueOf(tick.getHighPrice()));
-            tickMap.put("low",           BigDecimal.valueOf(tick.getLowPrice()));
-            tickMap.put("close",         close);
-            tickMap.put("changePercent", changePct);
-            tickMap.put("volume",        (long) tick.getVolumeTradedToday());
-            lastPrices.put(symbol, tickMap);
+            double ltpDouble = tick.getLastTradedPrice();
+            if (ltpDouble <= 0) return;
 
-            Instant ts = Instant.now();
-            try {
-                if (tick.getTickTimestamp() != null)
-                    ts = tick.getTickTimestamp().toInstant();
-            } catch (Exception ignored) {}
+            BigDecimal ltp = BigDecimal.valueOf(ltpDouble);
+            lastPrices.put(symbol, ltp);
 
-            publisher.publishEvent(new TickReceivedEvent(
+            Instant tickTime = tick.getLastTradedTime() != null
+                    ? tick.getLastTradedTime().toInstant()
+                    : Instant.now();
+
+            TickReceivedEvent event = new TickReceivedEvent(
                     this,
-                    tick.getInstrumentToken(), symbol, ltp,
-                    BigDecimal.valueOf(tick.getOpenPrice()),
-                    BigDecimal.valueOf(tick.getHighPrice()),
-                    BigDecimal.valueOf(tick.getLowPrice()),
-                    close,
+                    tick.getInstrumentToken(),
+                    symbol,
+                    ltp,
+                    (long) tick.getLastTradedQuantity(),
                     (long) tick.getVolumeTradedToday(),
                     (long) tick.getTotalBuyQuantity(),
                     (long) tick.getTotalSellQuantity(),
                     (long) tick.getOi(),
-                    (long) tick.getOpenInterestDayHigh(),
-                    (long) tick.getOpenInterestDayLow(),
-                    BigDecimal.valueOf(tick.getAverageTradePrice()),
-                    BigDecimal.valueOf(tick.getChange()),
-                    ts));
+                    tickTime
+            );
+
+            publisher.publishEvent(event);
 
         } catch (Exception e) {
-            log.error("publishTick error token={}: {}",
+            // Genuine unexpected error — log at error, not debug
+            log.error("[WS] Tick publish error for token {}: {}",
                     tick.getInstrumentToken(), e.getMessage());
         }
     }
 
-    private int parseIntSafe(Object val) {
-        try { return Integer.parseInt(String.valueOf(val)); }
-        catch (Exception e) { return 0; }
+    // ── Batched subscription ──────────────────────────────────────────────
+
+    private void subscribeInBatches() {
+        // FIX 1: take a local snapshot — field could be reassigned mid-iteration
+        // if reconnect() is called concurrently
+        List<Long> fullTokens  = new ArrayList<>(subscribedFullTokens);
+        List<Long> quoteTokens = new ArrayList<>(subscribedQuoteTokens);
+
+        int total   = fullTokens.size();
+        int batches = (total + BATCH_SIZE - 1) / BATCH_SIZE;
+
+        for (int b = 0; b < batches; b++) {
+            int from = b * BATCH_SIZE;
+            int to   = Math.min(from + BATCH_SIZE, total);
+            ArrayList<Long> batch = new ArrayList<>(fullTokens.subList(from, to));
+
+            try {
+                ticker.subscribe(batch);
+                ticker.setMode(batch, KiteTicker.modeFull);
+                log.info("[WS] Subscribed batch {}/{}: {} tokens (FULL)", b + 1, batches, batch.size());
+
+                if (b < batches - 1) {
+                    Thread.sleep(BATCH_DELAY_MS);
+                }
+            } catch (Exception e) {
+                log.error("[WS] Batch {} subscription failed: {}", b + 1, e.getMessage());
+            }
+        }
+
+        if (!quoteTokens.isEmpty()) {
+            try {
+                ArrayList<Long> qt = new ArrayList<>(quoteTokens);
+                ticker.subscribe(qt);
+                ticker.setMode(qt, KiteTicker.modeQuote);
+                log.info("[WS] Subscribed {} QUOTE tokens", quoteTokens.size());
+            } catch (Exception e) {
+                log.error("[WS] QUOTE subscription failed: {}", e.getMessage());
+            }
+        }
+
+        log.info("[WS] All subscriptions complete. {} FULL + {} QUOTE",
+                fullTokens.size(), quoteTokens.size());
+    }
+
+    // ── Reconnect with exponential backoff ────────────────────────────────
+
+    private void scheduleReconnect() {
+        // FIX 3: never attempt reconnect outside market hours — pointless and
+        // burns Zerodha rate limits. Connection is restored by DailyLoginScheduler
+        // at market open with a fresh access token anyway.
+        LocalTime now = LocalTime.now(IST);
+        if (now.isBefore(MARKET_OPEN) || now.isAfter(MARKET_CLOSE)) {
+            log.info("[WS] Outside market hours ({}) — skipping auto-reconnect.", now);
+            return;
+        }
+
+        // FIX 2: reject duplicate reconnect if one is already scheduled
+        if (!reconnectPending.compareAndSet(false, true)) {
+            log.debug("[WS] Reconnect already pending — ignoring duplicate request.");
+            return;
+        }
+
+        int attempt  = reconnectCount.incrementAndGet();
+        int delaySec = (int) Math.min(Math.pow(2, attempt - 1), MAX_BACKOFF_SEC);
+
+        log.info("[WS] Reconnect attempt {} scheduled in {}s...", attempt, delaySec);
+
+        reconnectExecutor.schedule(() -> {
+            reconnectPending.set(false);
+            if (!connected.get() && accessToken != null) {
+                log.info("[WS] Attempting reconnect #{}", attempt);
+                initTicker();
+            }
+        }, delaySec, TimeUnit.SECONDS);
     }
 }

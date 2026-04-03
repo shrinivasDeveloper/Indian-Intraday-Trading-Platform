@@ -136,7 +136,7 @@
           .bt-sum{grid-template-columns:repeat(2,1fr)}
         }
 
-        /* ══ VALIDATION DEBUG ══ */
+        /* ── Validation Debug Tab ── */
         .vd-pg-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px}
         .vd-pg-title{font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:800;color:#fff;letter-spacing:-.3px}
         .vd-pg-sub{font-size:9px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;margin-top:4px}
@@ -145,45 +145,58 @@
         .vd-sum-lbl{font-size:8px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dim);margin-bottom:5px}
         .vd-sum-val{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:800;color:#fff}
         .vd-sum-val.g{color:var(--green)}.vd-sum-val.r{color:var(--red)}.vd-sum-val.w{color:var(--warn)}
-        /* strategy selector tabs */
         .vd-stabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px;overflow-x:auto;scrollbar-width:none}
         .vd-stabs::-webkit-scrollbar{display:none}
-        .vd-stab{padding:9px 16px;cursor:pointer;font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.4px;border-bottom:2px solid transparent;transition:all .15s;white-space:nowrap;text-transform:uppercase;display:flex;align-items:center;gap:6px}
+        .vd-stab{padding:9px 18px;cursor:pointer;font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.4px;border-bottom:2px solid transparent;transition:all .15s;white-space:nowrap;text-transform:uppercase;display:flex;align-items:center;gap:6px}
         .vd-stab:hover{color:var(--text)}
         .vd-stab.active{color:var(--green);border-bottom-color:var(--green)}
         .vd-stab-cnt{font-size:8px;padding:1px 5px;border-radius:2px;background:var(--bg);color:var(--dim);font-weight:700}
         .vd-stab.active .vd-stab-cnt{background:rgba(0,229,160,.15);color:var(--green)}
-        /* table */
         .vd-tbl-wrap{overflow:auto;border-radius:var(--r);border:1px solid var(--border);max-height:520px}
         .vd-tbl-wrap::-webkit-scrollbar{width:4px;height:4px}
         .vd-tbl-wrap::-webkit-scrollbar-track{background:var(--bg)}
         .vd-tbl-wrap::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
         .vd-tbl{width:100%;border-collapse:collapse}
-        .vd-tbl thead th{font-size:8px;letter-spacing:.7px;text-transform:uppercase;color:var(--dim);padding:8px 10px;border-bottom:2px solid var(--border);background:var(--bg2);text-align:center;white-space:nowrap;position:sticky;top:0;z-index:2}
-        .vd-tbl thead th:first-child{text-align:left;position:sticky;left:0;z-index:3;background:var(--bg2);min-width:110px;border-right:1px solid var(--border)}
-        .vd-tbl thead th.vd-result-col{background:var(--bg2);border-left:1px solid var(--border)}
-        .vd-tbl tbody td{padding:7px 10px;border-bottom:1px solid rgba(22,32,48,.6);text-align:center;font-size:13px;line-height:1;transition:background .1s}
-        .vd-tbl tbody td:first-child{text-align:left;position:sticky;left:0;background:var(--bg3);font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:11px;color:#fff;z-index:1;border-right:1px solid var(--border)}
-        .vd-tbl tbody tr.vd-pass td:first-child{border-left:3px solid var(--green)}
-        .vd-tbl tbody tr.vd-fail td:first-child{border-left:3px solid var(--red)}
-        .vd-tbl tbody tr.vd-close td:first-child{border-left:3px solid var(--warn)}
+        .vd-tbl thead th{font-size:8px;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);padding:8px 10px;border-bottom:2px solid var(--border);background:var(--bg2);text-align:center;white-space:nowrap;position:sticky;top:0;z-index:2}
+        .vd-tbl thead th.vd-sym-col{text-align:left;position:sticky;left:0;z-index:3;background:var(--bg2);min-width:110px;border-right:1px solid var(--border)}
+        .vd-tbl thead th.vd-res-col{border-left:1px solid var(--border);background:var(--bg2)}
+        .vd-tbl tbody td{padding:7px 10px;border-bottom:1px solid rgba(22,32,48,.6);text-align:center;font-size:14px;line-height:1;transition:background .1s}
+        .vd-tbl tbody td.vd-sym-col{text-align:left;position:sticky;left:0;background:var(--bg3);font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:11px;color:#fff;z-index:1;border-right:1px solid var(--border)}
+        .vd-tbl tbody td.vd-res-col{border-left:1px solid var(--border);font-size:9px;font-weight:700;white-space:nowrap}
+        .vd-tbl tbody tr.vd-pass td.vd-sym-col{border-left:3px solid var(--green)}
+        .vd-tbl tbody tr.vd-fail td.vd-sym-col{border-left:3px solid var(--red)}
+        .vd-tbl tbody tr.vd-close td.vd-sym-col{border-left:3px solid var(--warn)}
         .vd-tbl tbody tr:hover td{background:rgba(17,29,43,.9)}
-        .vd-tbl tbody tr:hover td:first-child{background:rgba(17,29,43,.98)}
+        .vd-tbl tbody tr:hover td.vd-sym-col{background:rgba(17,29,43,.98)}
         .vd-tbl tbody tr:last-child td{border-bottom:none}
-        .vd-result-pass{font-size:9px;font-weight:700;color:var(--green);white-space:nowrap}
-        .vd-result-fail{font-size:9px;font-weight:700;color:var(--warn);white-space:nowrap}
-        .vd-result-col{border-left:1px solid var(--border)}
-        .vd-dir-tag{font-size:8px;padding:1px 5px;border-radius:2px;font-weight:700;margin-left:4px}
-        .vd-dir-long{background:var(--green-bg);color:var(--green)}
-        .vd-dir-sell{background:var(--red-bg);color:var(--red)}
-        /* heatmap */
+        .vd-pass-txt{color:var(--green)}.vd-fail-txt{color:var(--warn)}
+        .vd-dir-tag{font-size:8px;padding:1px 4px;border-radius:2px;font-weight:700;margin-left:4px}
+        .vd-dir-l{background:var(--green-bg);color:var(--green)}.vd-dir-s{background:var(--red-bg);color:var(--red)}
         .vd-heatmap{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}
         .vd-heat-cell{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px}
         .vd-heat-lbl{font-size:9px;color:var(--muted);margin-bottom:4px;line-height:1.5}
         .vd-heat-val{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:800;color:var(--red)}
         .vd-heat-bar{height:3px;border-radius:2px;background:var(--red);margin-top:5px;transition:width .4s}
         .vd-nodata{text-align:center;padding:44px 20px;color:var(--dim);font-size:11px;line-height:2.4}
+        .vd-statbar{display:flex;align-items:center;gap:14px;padding:6px 0 10px;font-size:10px;color:var(--muted)}
         @media(max-width:768px){.vd-sum-row{grid-template-columns:1fr 1fr}}
+
+        /* ── Market Mode ── */
+        .mode-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px}
+        .mode-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;position:relative;overflow:hidden;transition:border-color .2s}
+        .mode-card.active{border-color:var(--green-border)}
+        .mode-card.active::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--green)}
+        .mode-card.inactive{opacity:.5}
+        .mode-card-name{font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:800;color:#fff;margin-bottom:3px}
+        .mode-card-strats{font-size:9px;color:var(--muted);margin-bottom:6px}
+        .mode-card-row{display:flex;justify-content:space-between;font-size:9px;margin-bottom:2px}
+        .mode-card-row .mk{color:var(--dim)}.mode-card-row .mv{color:var(--text);font-weight:600}
+        .prob-bar-wrap{background:var(--bg);border-radius:2px;height:3px;margin-top:5px}
+        .prob-bar{height:100%;border-radius:2px;transition:width .4s,background .3s}
+        .ib-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px}
+        .ib-cell{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:9px 12px;text-align:center}
+        .ib-cell-lbl{font-size:8px;color:var(--dim);letter-spacing:.5px;text-transform:uppercase;margin-bottom:4px}
+        .ib-cell-val{font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:800;color:#fff}
     </style>
 </head>
 <body>
@@ -200,6 +213,7 @@
         <div class="pill pill-dim" id="cb-pill">CB</div>
         <div class="pill pill-dim" id="dir-pill">—</div>
         <div class="pill pill-dim" id="vix-pill">VIX —</div>
+        <div class="pill pill-warn" id="mode-pill">MODE —</div>
         <span class="time-badge" id="clock">—</span>
         <button class="logout-btn" onclick="doLogout()">LOGOUT</button>
     </div>
@@ -228,16 +242,76 @@
         <div class="stat"><div class="stat-label">VIX</div><div class="stat-val" id="ov-vix">—</div><div class="stat-sub" id="ov-vix-regime">—</div></div>
         <div class="stat"><div class="stat-label">Window</div><div class="stat-val" id="ov-window" style="font-size:13px;padding-top:3px">—</div><div class="stat-sub" id="ov-entry">—</div></div>
     </div>
+    <!-- Market Mode Panel -->
     <div class="card">
-        <div class="card-title">7-Gate Scanner Status <span id="gates-badge" class="badge WAIT">0/7</span></div>
+        <div class="card-title">Market Mode Engine
+            <span id="gates-badge" class="badge WAIT">—</span>
+        </div>
+        <!-- IB stats -->
+        <div class="ib-grid">
+            <div class="ib-cell"><div class="ib-cell-lbl">IB High</div><div class="ib-cell-val" id="ib-high">—</div></div>
+            <div class="ib-cell"><div class="ib-cell-lbl">IB Range %</div><div class="ib-cell-val w" id="ib-range">—</div></div>
+            <div class="ib-cell"><div class="ib-cell-lbl">IB Low</div><div class="ib-cell-val" id="ib-low">—</div></div>
+        </div>
+        <!-- 6 mode cards -->
+        <div class="mode-grid">
+            <div class="mode-card" id="mc-TREND_DAY">
+                <div class="mode-card-name">&#128200; TREND DAY</div>
+                <div class="mode-card-strats">ORB &middot; 7-Gate &middot; AutoMode &middot; Pullback &middot; RangeBreak</div>
+                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">1.0%</span></div>
+                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">65</span></div>
+                <div class="mode-card-row"><span class="mk">IB</span><span class="mv">&gt;0.8% + RVOL&gt;2</span></div>
+            </div>
+            <div class="mode-card" id="mc-NORMAL_VARIATION">
+                <div class="mode-card-name">&#128200; NORMAL VARIATION</div>
+                <div class="mode-card-strats">AutoMode &middot; Pullback &middot; RangeBreak</div>
+                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">0.75%</span></div>
+                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">65</span></div>
+                <div class="mode-card-row"><span class="mk">Rule</span><span class="mv">HH/HL required</span></div>
+            </div>
+            <div class="mode-card" id="mc-DOUBLE_DISTRIBUTION">
+                <div class="mode-card-name">&#128260; DOUBLE DISTRIBUTION</div>
+                <div class="mode-card-strats">AutoMode &middot; ORB &middot; Pullback &middot; RangeBreak</div>
+                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">0.75%</span></div>
+                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">65</span></div>
+                <div class="mode-card-row"><span class="mk">Rule</span><span class="mv">PM + Afternoon</span></div>
+            </div>
+            <div class="mode-card" id="mc-NORMAL_DAY">
+                <div class="mode-card-name">&#9135; NORMAL DAY</div>
+                <div class="mode-card-strats">Pullback &middot; RangeBreakout</div>
+                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">0.5%</span></div>
+                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">60</span></div>
+                <div class="mode-card-row"><span class="mk">Rule</span><span class="mv">Range edges only</span></div>
+            </div>
+            <div class="mode-card" id="mc-NEUTRAL_DAY">
+                <div class="mode-card-name">&#9867; NEUTRAL DAY</div>
+                <div class="mode-card-strats">VAP Pullback only</div>
+                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">0.5%</span></div>
+                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">70</span></div>
+                <div class="mode-card-row"><span class="mk">Rule</span><span class="mv">VAH/VAL only</span></div>
+            </div>
+            <div class="mode-card" id="mc-NON_TREND_DAY">
+                <div class="mode-card-name">&#128683; NON-TREND DAY</div>
+                <div class="mode-card-strats">NO TRADES</div>
+                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">0%</span></div>
+                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">&#8734;</span></div>
+                <div class="mode-card-row"><span class="mk">IB</span><span class="mv">&lt;0.4%</span></div>
+            </div>
+        </div>
+        <!-- Rationale -->
+        <div style="font-size:10px;color:var(--muted);padding:6px 0;border-top:1px solid var(--border);margin-top:4px" id="mode-rationale">Waiting for 9:15 IST…</div>
+    </div>
+    <!-- 7-Gate status (collapsed below) -->
+    <div class="card">
+        <div class="card-title">7-Gate Scanner Status <span id="gate7-badge" class="badge WAIT">0/7</span></div>
         <div class="gate-row">
-            <div class="gate" id="g1"><div class="gate-n">Gate 1</div><div class="gate-name">Market Direction</div><div class="gate-st WAIT">⏳ WAIT</div></div>
-            <div class="gate" id="g2"><div class="gate-n">Gate 2</div><div class="gate-name">Sector Alignment</div><div class="gate-st WAIT">⏳ WAIT</div></div>
-            <div class="gate" id="g3"><div class="gate-n">Gate 3</div><div class="gate-name">Compression</div><div class="gate-st WAIT">⏳ WAIT</div></div>
-            <div class="gate" id="g4"><div class="gate-n">Gate 4</div><div class="gate-name">Breakout Tick</div><div class="gate-st WAIT">⏳ WAIT</div></div>
-            <div class="gate" id="g5"><div class="gate-n">Gate 5</div><div class="gate-name">Key Level</div><div class="gate-st WAIT">⏳ WAIT</div></div>
-            <div class="gate" id="g6"><div class="gate-n">Gate 6</div><div class="gate-name">Liquidity</div><div class="gate-st WAIT">⏳ WAIT</div></div>
-            <div class="gate" id="g7"><div class="gate-n">Gate 7</div><div class="gate-name">Risk / RR</div><div class="gate-st WAIT">⏳ WAIT</div></div>
+            <div class="gate" id="g1"><div class="gate-n">Gate 1</div><div class="gate-name">Market Direction</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
+            <div class="gate" id="g2"><div class="gate-n">Gate 2</div><div class="gate-name">Sector Alignment</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
+            <div class="gate" id="g3"><div class="gate-n">Gate 3</div><div class="gate-name">Compression</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
+            <div class="gate" id="g4"><div class="gate-n">Gate 4</div><div class="gate-name">Breakout Tick</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
+            <div class="gate" id="g5"><div class="gate-n">Gate 5</div><div class="gate-name">Key Level</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
+            <div class="gate" id="g6"><div class="gate-n">Gate 6</div><div class="gate-name">Liquidity</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
+            <div class="gate" id="g7"><div class="gate-n">Gate 7</div><div class="gate-name">Risk / RR</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
         </div>
     </div>
     <div class="two-col">
@@ -403,17 +477,18 @@
             <div class="bt-field">
                 <label>Strategy</label>
                 <select id="bt-strategies">
-                    <option value="ALL">All 4 Strategies</option>
-                    <option value="SIMPLE_ORB">Simple ORB</option>
-                    <option value="VWAP_MOMENTUM">VWAP Momentum</option>
-                    <option value="VWAP_PULLBACK">VWAP Pullback</option>
+                    <option value="ALL">All 5 Strategies</option>
+                    <option value="AUTO_MODE">AutoMode</option>
+                    <option value="ORB_VWAP_SECTOR">ORB Strategy</option>
+                    <option value="VAP_PULLBACK">Pullback Detection</option>
+                    <option value="RANGE_BREAKOUT_3TOUCH">Range Breakout</option>
                     <option value="SCANNER_7GATE">7-Gate Scanner</option>
                 </select>
             </div>
             <button class="bt-run" id="bt-btn" onclick="runBacktest()">▶ RUN</button>
         </div>
         <div style="font-size:9px;color:var(--dim)">
-            Real candle data from Zerodha · 1% risk per trade · Runs in background · No VIX filter
+            Real candle data from Zerodha · 1% risk per trade · Runs in background · All 5 strategies supported
         </div>
     </div>
     <div class="card" id="bt-progress-card" style="display:none;margin-bottom:12px">
@@ -442,26 +517,31 @@
         <div class="bt-stat"><div class="bt-stat-label">Profit Factor</div><div class="bt-stat-val" id="bt-pf">—</div></div>
         <div class="bt-stat"><div class="bt-stat-label">Max Drawdown</div><div class="bt-stat-val r" id="bt-mdd">—</div></div>
     </div>
-    <div class="bt-strat-grid" id="bt-strat-sum" style="display:none">
-        <div class="bt-strat-card"><div class="bt-strat-title">Simple ORB</div><div class="bt-strat-desc">Break first 30min H/L + volume</div>
-            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-SIMPLE_ORB">—</span></div>
-            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-SIMPLE_ORB">—</span></div>
-            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-SIMPLE_ORB">—</span></div>
+    <div class="bt-strat-grid" id="bt-strat-sum" style="display:none;grid-template-columns:repeat(5,1fr)">
+        <div class="bt-strat-card"><div class="bt-strat-title">AutoMode</div><div class="bt-strat-desc">Trend &middot; Reversal &middot; Range</div>
+            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-AUTO_MODE">&#8212;</span></div>
+            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-AUTO_MODE">&#8212;</span></div>
+            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-AUTO_MODE">&#8212;</span></div>
         </div>
-        <div class="bt-strat-card"><div class="bt-strat-title">VWAP Momentum</div><div class="bt-strat-desc">5-candle high above VWAP + ATR SL</div>
-            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-VWAP_MOMENTUM">—</span></div>
-            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-VWAP_MOMENTUM">—</span></div>
-            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-VWAP_MOMENTUM">—</span></div>
+        <div class="bt-strat-card"><div class="bt-strat-title">ORB Strategy</div><div class="bt-strat-desc">ORB + VWAP + Sector 9:30&#8211;12:30</div>
+            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-ORB_VWAP_SECTOR">&#8212;</span></div>
+            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-ORB_VWAP_SECTOR">&#8212;</span></div>
+            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-ORB_VWAP_SECTOR">&#8212;</span></div>
         </div>
-        <div class="bt-strat-card"><div class="bt-strat-title">VWAP Pullback</div><div class="bt-strat-desc">Strong stock bounces off VWAP</div>
-            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-VWAP_PULLBACK">—</span></div>
-            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-VWAP_PULLBACK">—</span></div>
-            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-VWAP_PULLBACK">—</span></div>
+        <div class="bt-strat-card"><div class="bt-strat-title">Pullback Detection</div><div class="bt-strat-desc">POC / VWAP pullback setup</div>
+            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-VAP_PULLBACK">&#8212;</span></div>
+            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-VAP_PULLBACK">&#8212;</span></div>
+            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-VAP_PULLBACK">&#8212;</span></div>
         </div>
-        <div class="bt-strat-card"><div class="bt-strat-title">7-Gate Scanner</div><div class="bt-strat-desc">BB compression 3% breakout</div>
-            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-SCANNER_7GATE">—</span></div>
-            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-SCANNER_7GATE">—</span></div>
-            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-SCANNER_7GATE">—</span></div>
+        <div class="bt-strat-card"><div class="bt-strat-title">Range Breakout</div><div class="bt-strat-desc">3-touch support / resistance</div>
+            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-RANGE_BREAKOUT_3TOUCH">&#8212;</span></div>
+            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-RANGE_BREAKOUT_3TOUCH">&#8212;</span></div>
+            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-RANGE_BREAKOUT_3TOUCH">&#8212;</span></div>
+        </div>
+        <div class="bt-strat-card"><div class="bt-strat-title">7-Gate Scanner</div><div class="bt-strat-desc">BB compression + 7-gate breakout</div>
+            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-SCANNER_7GATE">&#8212;</span></div>
+            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-SCANNER_7GATE">&#8212;</span></div>
+            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-SCANNER_7GATE">&#8212;</span></div>
         </div>
     </div>
     <div class="card" id="bt-stocks-card" style="display:none">
@@ -608,69 +688,44 @@
 
 <!-- ═══════ VALIDATION DEBUG ═══════ -->
 <div id="page-validation" class="page">
-
-    <!-- Header -->
     <div class="vd-pg-header">
         <div>
             <div class="vd-pg-title">&#128269; Strategy Validation Debug</div>
-            <div class="vd-pg-sub">Real-time per-stock &middot; per-strategy &middot; per-step pass/fail &middot; auto-refresh 5s</div>
+            <div class="vd-pg-sub">Real-time &middot; Per-stock &middot; Per-strategy &middot; Per-step &middot; Auto-refresh 5s</div>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
             <span id="vd-updated" style="font-size:9px;color:var(--dim)">Not loaded</span>
             <button class="reset-btn" onclick="loadVd(true)" style="border-color:var(--green-border);color:var(--green)">&#8634; Refresh</button>
         </div>
     </div>
-
-    <!-- Summary cards -->
     <div class="vd-sum-row">
         <div class="vd-sum-card"><div class="vd-sum-lbl">Stocks Tracked</div><div class="vd-sum-val w" id="vd-tracked">0</div></div>
-        <div class="vd-sum-card"><div class="vd-sum-lbl">All Steps Pass &#9989;</div><div class="vd-sum-val g" id="vd-passing">0</div></div>
-        <div class="vd-sum-card"><div class="vd-sum-lbl">1 Step Away &#9889;</div><div class="vd-sum-val w" id="vd-close">0</div></div>
-        <div class="vd-sum-card"><div class="vd-sum-lbl">Stuck Early &#10060;</div><div class="vd-sum-val r" id="vd-early">0</div></div>
+        <div class="vd-sum-card"><div class="vd-sum-lbl">All Steps Pass</div><div class="vd-sum-val g" id="vd-passing">0</div></div>
+        <div class="vd-sum-card"><div class="vd-sum-lbl">1 Step Away</div><div class="vd-sum-val w" id="vd-close">0</div></div>
+        <div class="vd-sum-card"><div class="vd-sum-lbl">Stuck Early</div><div class="vd-sum-val r" id="vd-early">0</div></div>
     </div>
-
-    <!-- Failure Heatmap -->
     <div class="card" style="margin-bottom:12px">
-        <div class="card-title">Most Frequent Failure (Today)
-            <span style="font-size:9px;font-weight:400;text-transform:none;color:var(--dim)">Which validation step is blocking the most signals</span>
+        <div class="card-title">Most Frequent Failure Step Today
+            <span style="font-size:9px;font-weight:400;text-transform:none;color:var(--dim)">Which condition is blocking the most signals</span>
         </div>
-        <div class="vd-heatmap" id="vd-heatmap">
-            <div class="empty" style="grid-column:1/-1">Waiting for data&hellip;</div>
-        </div>
+        <div class="vd-heatmap" id="vd-heatmap"><div class="empty" style="grid-column:1/-1">Waiting for data&hellip;</div></div>
     </div>
-
-    <!-- Per-strategy validation table -->
     <div class="card">
-        <div class="card-title" style="margin-bottom:0">
-            Per-Stock Validation
-            <span style="font-size:9px;font-weight:400;text-transform:none;color:var(--dim)">&#9989; = step passed &nbsp;&nbsp; &#10060; = step failed &nbsp;&nbsp; &#8212; = not reached</span>
+        <div class="card-title" style="margin-bottom:0">Per-Stock Validation Tables
+            <span style="font-size:9px;font-weight:400;text-transform:none;color:var(--dim)">&#9989; = passed &nbsp;&#10060; = failed &nbsp;&#8212; = not reached &nbsp;&nbsp; Click a strategy tab to view its stocks</span>
         </div>
-
-        <!-- Strategy selector tabs -->
         <div class="vd-stabs" id="vd-stabs" style="margin-top:12px">
-            <div class="vd-stab active" onclick="selectVdStrat('AUTO_MODE',this)">
-                AutoMode <span class="vd-stab-cnt" id="vdn-AUTO_MODE">0</span>
-            </div>
-            <div class="vd-stab" onclick="selectVdStrat('ORB_VWAP_SECTOR',this)">
-                ORB Strategy <span class="vd-stab-cnt" id="vdn-ORB_VWAP_SECTOR">0</span>
-            </div>
-            <div class="vd-stab" onclick="selectVdStrat('VAP_PULLBACK',this)">
-                Pullback Detection <span class="vd-stab-cnt" id="vdn-VAP_PULLBACK">0</span>
-            </div>
-            <div class="vd-stab" onclick="selectVdStrat('RANGE_BREAKOUT_3TOUCH',this)">
-                Range Breakout <span class="vd-stab-cnt" id="vdn-RANGE_BREAKOUT_3TOUCH">0</span>
-            </div>
-            <div class="vd-stab" onclick="selectVdStrat('SCANNER_7GATE',this)">
-                7-Gate Scanner <span class="vd-stab-cnt" id="vdn-SCANNER_7GATE">0</span>
-            </div>
+            <div class="vd-stab active" onclick="selectVdStrat('AUTO_MODE',this)">AutoMode <span class="vd-stab-cnt" id="vdn-AUTO_MODE">0</span></div>
+            <div class="vd-stab" onclick="selectVdStrat('ORB_VWAP_SECTOR',this)">ORB Strategy <span class="vd-stab-cnt" id="vdn-ORB_VWAP_SECTOR">0</span></div>
+            <div class="vd-stab" onclick="selectVdStrat('VAP_PULLBACK',this)">Pullback Detection <span class="vd-stab-cnt" id="vdn-VAP_PULLBACK">0</span></div>
+            <div class="vd-stab" onclick="selectVdStrat('RANGE_BREAKOUT_3TOUCH',this)">Range Breakout <span class="vd-stab-cnt" id="vdn-RANGE_BREAKOUT_3TOUCH">0</span></div>
+            <div class="vd-stab" onclick="selectVdStrat('SCANNER_7GATE',this)">7-Gate Scanner <span class="vd-stab-cnt" id="vdn-SCANNER_7GATE">0</span></div>
         </div>
-
-        <!-- Table rendered here -->
         <div id="vd-table-area">
             <div class="vd-nodata">
                 Waiting for market data&hellip;<br>
                 <span style="font-size:9px">Validation data appears after first 5-min candle closes at 9:15 IST</span><br>
-                <span style="font-size:9px;color:var(--green)">Endpoint: GET /api/validation/steps</span>
+                <span style="font-size:9px;color:var(--green)">Backend endpoint: GET /api/validation/steps</span>
             </div>
         </div>
     </div>
@@ -693,17 +748,14 @@
 
     // ── Tabs ───────────────────────────────────────────────────────────────
     // ── Validation state ──────────────────────────────────────────────────
-    let vdTimer      = null;
-    let vdData       = {};          // raw { strategy: [logs] } from /api/validation/steps
-    let vdActiveSt   = 'AUTO_MODE'; // currently-selected strategy tab
-
+    let vdTimer    = null;
+    let vdData     = {};
+    let vdActiveSt = 'AUTO_MODE';
     const VD_STRATS = ['AUTO_MODE','ORB_VWAP_SECTOR','VAP_PULLBACK','RANGE_BREAKOUT_3TOUCH','SCANNER_7GATE'];
     const VD_NAMES  = {
-      'AUTO_MODE':             'AutoMode',
-      'ORB_VWAP_SECTOR':       'ORB Strategy',
-      'VAP_PULLBACK':          'Pullback Detection',
-      'RANGE_BREAKOUT_3TOUCH': 'Range Breakout',
-      'SCANNER_7GATE':         '7-Gate Scanner'
+      'AUTO_MODE':'AutoMode','ORB_VWAP_SECTOR':'ORB Strategy',
+      'VAP_PULLBACK':'Pullback Detection','RANGE_BREAKOUT_3TOUCH':'Range Breakout',
+      'SCANNER_7GATE':'7-Gate Scanner'
     };
 
     function showTab(name, el) {
@@ -792,9 +844,16 @@
       cb.textContent = cbOk ? 'CB ✓' : 'CB ✗';
 
       const dir = reg.name || 'SIDEWAYS';
-      const dp = document.getElementById('dir-pill');
-      dp.textContent = dir==='BULLISH'?'▲ BULL': dir==='BEARISH'?'▼ BEAR':'— SIDE';
-      dp.className = 'pill '+(dir==='BULLISH'?'pill-green':dir==='BEARISH'?'pill-red':'pill-dim');
+      const dp  = document.getElementById('dir-pill');
+      dp.textContent = dir==='BULLISH'?'▲ BULL': dir==='BEARISH'?'▼ BEAR':'↔ SIDE';
+      dp.className = 'pill '+(dir==='BULLISH'?'pill-green':dir==='BEARISH'?'pill-red':'pill-warn');
+      // Market Mode pill
+      const modeEl = document.getElementById('mode-pill');
+      if (modeEl && d.marketMode) {
+        const mmn = d.marketMode.mode || '';
+        modeEl.textContent = mmn.replace(/_/g,' ') || 'MODE —';
+        modeEl.className = 'pill '+(mmn==='TREND_DAY'?'pill-green':mmn==='NON_TREND_DAY'?'pill-red':'pill-warn');
+      }
 
       // FIX: VIX — show regime label when vix=0 (pre-market / no tick yet)
       const vix = parseFloat(sys.vix||0);
@@ -832,6 +891,23 @@
 
       // ── Gates ────────────────────────────────────────────────────────────
       const gs = d.gateStatus||{};
+      // ── Market Mode Engine UI ────────────────────────────────────────────
+      const mm = d.marketMode||{};
+      if (mm.mode) {
+        ['TREND_DAY','DOUBLE_DISTRIBUTION','NORMAL_DAY','NORMAL_VARIATION','NEUTRAL_DAY','NON_TREND_DAY'].forEach(m => {
+          const mc = document.getElementById('mc-'+m); if(!mc) return;
+          mc.className = 'mode-card'+(m===mm.mode?' active':' inactive');
+        });
+        const gbM = document.getElementById('gates-badge');
+        if (gbM) { gbM.textContent=mm.mode.replace(/_/g,' '); gbM.className='badge '+(mm.mode==='TREND_DAY'?'PASS':mm.mode==='NON_TREND_DAY'?'FAIL':'WAIT'); }
+        const ibHighEl=document.getElementById('ib-high'); if(ibHighEl)ibHighEl.textContent=mm.ibHigh>0?fmtN(mm.ibHigh):'—';
+        const ibLowEl=document.getElementById('ib-low');   if(ibLowEl)ibLowEl.textContent=mm.ibLow>0?fmtN(mm.ibLow):'—';
+        const ibRng=parseFloat(mm.ibRangePct||0);
+        const ibEl=document.getElementById('ib-range');
+        if(ibEl){ibEl.textContent=ibRng>0?ibRng.toFixed(2)+'%':'—';ibEl.className='ib-cell-val '+(ibRng>0.8?'g':ibRng>0.4?'w':'r');}
+        const mrEl=document.getElementById('mode-rationale'); if(mrEl)mrEl.textContent=mm.rationale||'—';
+      }
+      if((d.regime?.name||d.market?.direction)==='SIDEWAYS'){if(gs[1]==='PASS'||gs[1]==='WAIT')gs[1]='SIDE';}
       const gnames = {1:'Market Direction',2:'Sector Alignment',3:'Compression',4:'Breakout Tick',5:'Key Level',6:'Liquidity',7:'Risk / RR'};
       let passing = 0;
       for(let i=1;i<=7;i++){
@@ -842,9 +918,8 @@
           <div class="gate-st ${st}">${st==='PASS'?'✓ PASS':st==='FAIL'?'✗ FAIL':'⏳ WAIT'}</div>`;
         if(st==='PASS') passing++;
       }
-      const gb = document.getElementById('gates-badge');
-      gb.textContent = passing+'/7';
-      gb.className = 'badge '+(passing===7?'PASS':passing===0?'FAIL':'WAIT');
+      const gb7 = document.getElementById('gate7-badge');
+      if (gb7) { gb7.textContent=passing+'/7'; gb7.className='badge '+(passing===7?'PASS':passing===0?'FAIL':'WAIT'); }
 
       // ── Circuit Breaker ──────────────────────────────────────────────────
       const trip = !pnl.cbActive;
@@ -991,8 +1066,9 @@
       const fired = Array.isArray(ss.firedToday) ? ss.firedToday : Object.keys(ss.firedToday||{});
 
       strats.forEach(s => {
-        const sd  = pd[s]||{};
-        const aliases = s==='VAP_PULLBACK'?[s,'VWAP_PULLBACK']:[s];
+        const sd = pd[s]||{};
+        // VAP_PULLBACK and VWAP_PULLBACK are aliases — count both
+        const aliases = s==='VAP_PULLBACK' ? [s,'VWAP_PULLBACK'] : [s];
         const sig = fired.filter(k=>aliases.some(a=>k.endsWith(':'+a))).length;
         const card = document.getElementById('sc-'+s);
         if (card) card.className = 'strat-card'+(sig>0?' fired':'');
@@ -1131,24 +1207,42 @@
 
     function btRender(d) {
       document.getElementById('bt-summary').style.display = 'grid';
-      set('bt-total-trades', d.totalTrades);
+
+      // API returns aggregate data inside perStockAggregate OR portfolioResult
+      // Use portfolioResult first (real compound portfolio), fallback to perStockAggregate
+      const port = d.portfolioResult || {};
+      const agg  = d.perStockAggregate || {};
+
+      const totalTrades = port.totalTrades || agg.totalTrades || 0;
+      const winRate     = port.winRate     || agg.overallWinRate || '—';
+      const netPnl      = port.netPnl      || agg.overallPnl    || '0';
+      const pf          = port.profitFactor|| agg.profitFactor   || '—';
+      const mdd         = port.maxDrawdownPct || '—';
+
+      set('bt-total-trades', totalTrades);
       const we = document.getElementById('bt-wr');
-      we.textContent = d.overallWinRate; we.className = 'bt-stat-val g';
-      const pnl = parseFloat((d.overallPnl||'0').replace(/[^0-9.-]/g,''));
-      const pe  = document.getElementById('bt-pnl');
-      pe.textContent='₹'+fmtN(pnl); pe.className='bt-stat-val '+(pnl>=0?'g':'r');
-      set('bt-pf',  d.profitFactor);
-      set('bt-mdd', d.maxDrawdownPct);
+      we.textContent = winRate; we.className = 'bt-stat-val g';
+      const pnlNum = parseFloat((netPnl+'').replace(/[^0-9.-]/g,''));
+      const pe = document.getElementById('bt-pnl');
+      pe.textContent = '&#8377;' + fmtN(pnlNum); pe.className = 'bt-stat-val '+(pnlNum>=0?'g':'r');
+      set('bt-pf',  pf);
+      set('bt-mdd', mdd);
+
+      // Portfolio extra stats (if available)
+      if (port.returnPct)       set('bt-total-trades', totalTrades + ' trades · ' + port.returnPct + ' return');
+      if (port.sharpeRatio)     set('bt-pf', (pf+' · Sharpe '+port.sharpeRatio));
 
       document.getElementById('bt-strat-sum').style.display = 'grid';
+      // API key perStrategySummary has the correct 5 strategy keys
       const ps = d.perStrategySummary||{};
-      ['SIMPLE_ORB','VWAP_MOMENTUM','VWAP_PULLBACK','SCANNER_7GATE'].forEach(s => {
-        const sd = ps[s]||{};
-        set('bts-t-'+s,  sd.totalTrades||'—');
+      ['AUTO_MODE','ORB_VWAP_SECTOR','VAP_PULLBACK','RANGE_BREAKOUT_3TOUCH','SCANNER_7GATE'].forEach(s => {
+        // VAP_PULLBACK might be stored under VWAP_PULLBACK alias too
+        const sd = ps[s] || ps['VWAP_PULLBACK'] && s==='VAP_PULLBACK' ? (ps[s]||ps['VWAP_PULLBACK']||{}) : (ps[s]||{});
+        set('bts-t-'+s, sd.totalTrades != null ? sd.totalTrades : '—');
         set('bts-wr-'+s, sd.winRate||'—');
-        const p  = parseFloat((sd.totalPnl||'0').replace(/[^0-9.-]/g,''));
+        const p = parseFloat((sd.totalPnl||'0').replace(/[^0-9.-]/g,''));
         const el = document.getElementById('bts-pnl-'+s);
-        if (el) { el.textContent='₹'+fmtN(p); el.className=p>=0?'g':'r'; }
+        if (el) { el.textContent='&#8377;'+fmtN(p); el.className=p>=0?'g':'r'; }
       });
 
       document.getElementById('bt-stocks-card').style.display = 'block';
@@ -1164,9 +1258,10 @@
         const wr  = parseFloat((s.winRate||'0').replace('%',''));
         const wrc = wr>=58?'g':wr>=45?'':'r';
         const byS = Object.entries(s.byStrategy||{}).map(([st,sd])=>{
-          const n = st==='SIMPLE_ORB'?'ORB':st==='VWAP_MOMENTUM'?'VM':
-                    st==='VWAP_PULLBACK'?'VP':st==='SCANNER_7GATE'?'7G':'?';
-          return `<span style="font-size:9px;color:var(--muted)">${n}:<b style="color:var(--text)">${sd.winRate}</b></span>`;
+          const n = st==='AUTO_MODE'?'AM':st==='ORB_VWAP_SECTOR'?'ORB':
+                    st==='VAP_PULLBACK'||st==='VWAP_PULLBACK'?'PB':
+                    st==='RANGE_BREAKOUT_3TOUCH'?'RB':st==='SCANNER_7GATE'?'7G':'?';
+          return `<span style="font-size:9px;color:var(--muted)">${n}:<b style="color:var(--text)">${sd.winRate||'—'}</b></span>`;
         }).join(' ');
         return `<tr>
           <td class="mu">${i+1}</td>
@@ -1345,16 +1440,13 @@
     }, 5000);
 
     // ════════════════════════════════════════════════════════════════════════
-    // VALIDATION DEBUG — Professional Table Implementation
-    // Strategy tabs → click tab → shows table: rows=stocks, cols=actual step names
+    // VALIDATION DEBUG — full implementation
+    // Strategy tabs: click tab → table rows=stocks cols=real step labels
     // ════════════════════════════════════════════════════════════════════════
-
-    // ── Fetch from /api/validation/steps ─────────────────────────────────
     async function loadVd(force) {
       const activeTab = document.querySelector('.tab.active');
-      const onDbg     = activeTab && activeTab.textContent.includes('Debug');
+      const onDbg = activeTab && activeTab.textContent.includes('Debug');
       if (!force && !onDbg) return;
-
       const r = await safeFetch('/api/validation/steps');
       if (!r) return;
       try {
@@ -1367,16 +1459,15 @@
       } catch(e) { console.warn('[VD] parse error', e); }
     }
 
-    // ── Summary cards ──────────────────────────────────────────────────────
     function renderVdSummary() {
       let tracked=0, passing=0, close=0, early=0;
       Object.values(vdData).forEach(logs => {
         logs.forEach(log => {
           tracked++;
-          const n = (log.steps||[]).length;
-          if (log.failedAtStep===0)                             passing++;
-          else if (n>0 && log.failedAtStep >= n-1)             close++;
-          else if (log.failedAtStep>0 && log.failedAtStep<=2)  early++;
+          const n=(log.steps||[]).length;
+          if (log.failedAtStep===0)                           passing++;
+          else if (n>0 && log.failedAtStep>=n-1)             close++;
+          else if (log.failedAtStep>0 && log.failedAtStep<=2) early++;
         });
       });
       set('vd-tracked', tracked||'0');
@@ -1385,33 +1476,30 @@
       set('vd-early',   early||'0');
     }
 
-    // ── Update count badges on strategy tabs ──────────────────────────────
     function renderVdTabCounts() {
-      VD_STRATS.forEach(strat => {
-        const logs = vdData[strat]||[];
-        const el   = document.getElementById('vdn-'+strat);
-        if (el) el.textContent = logs.length;
+      VD_STRATS.forEach(s => {
+        const el = document.getElementById('vdn-'+s);
+        if (el) el.textContent = (vdData[s]||[]).length;
       });
     }
 
-    // ── Failure heatmap (top 12 most-failed steps) ────────────────────────
     function renderVdHeatmap() {
       const freq = {};
       Object.entries(vdData).forEach(([strat,logs]) => {
         const dname = VD_NAMES[strat]||strat;
         logs.forEach(log => {
-          const ff = (log.steps||[]).find(s => !s.passed);
+          const ff = (log.steps||[]).find(s=>!s.passed);
           if (ff) {
-            const lbl = ff.label || ff.stepId.replace(/_/g,' ');
-            const k   = dname + ' › ' + lbl.substring(0,28);
-            freq[k]   = (freq[k]||0) + 1;
+            const lbl = (ff.label||ff.stepId.replace(/_/g,' ')).substring(0,30);
+            const k   = dname + ' \u203a ' + lbl;
+            freq[k]   = (freq[k]||0)+1;
           }
         });
       });
-      const hm      = document.getElementById('vd-heatmap');
+      const hm = document.getElementById('vd-heatmap');
       const entries = Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,12);
       if (!entries.length) {
-        hm.innerHTML = '<div class="empty" style="grid-column:1/-1">No failure data yet — strategies are evaluating stocks</div>';
+        hm.innerHTML='<div class="empty" style="grid-column:1/-1">No failure data yet &mdash; strategies are evaluating stocks</div>';
         return;
       }
       const mx = entries[0][1]||1;
@@ -1419,43 +1507,38 @@
         const pct = Math.round(count/mx*100);
         return `<div class="vd-heat-cell">
           <div class="vd-heat-lbl">${key}</div>
-          <div class="vd-heat-val">${count}<span style="font-size:11px;color:var(--dim)">×</span></div>
+          <div class="vd-heat-val">${count}<span style="font-size:11px;color:var(--dim)">&times;</span></div>
           <div class="vd-heat-bar" style="width:${pct}%"></div>
         </div>`;
       }).join('');
     }
 
-    // ── Click strategy tab ────────────────────────────────────────────────
     function selectVdStrat(strat, el) {
       vdActiveSt = strat;
-      document.querySelectorAll('.vd-stab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.vd-stab').forEach(t=>t.classList.remove('active'));
       el.classList.add('active');
       renderVdTable(strat);
     }
 
-    // ── Build the main table: rows=stocks, cols=actual validation step names ──
     function renderVdTable(strat) {
       const area = document.getElementById('vd-table-area');
-      const logs  = (vdData[strat]||[]);
+      const logs  = vdData[strat]||[];
 
       if (!logs.length) {
         area.innerHTML = `<div class="vd-nodata">
           No data for <b>${VD_NAMES[strat]||strat}</b> yet<br>
-          <span style="font-size:9px">Waiting for first evaluation cycle&hellip;</span>
+          <span style="font-size:9px">Waiting for evaluation cycle&hellip;</span>
         </div>`;
         return;
       }
 
-      // ── Collect all step IDs in order from first complete log ─────────
-      const stepIds    = [];
-      const stepLabels = {};  // stepId → short display label
-
+      // ── Collect step IDs in order from first log that has steps ──
+      const stepIds = [], stepLabels = {};
       for (const log of logs) {
         if ((log.steps||[]).length > 0) {
           log.steps.forEach(s => {
             if (!stepLabels[s.stepId]) {
-              // Use actual label from backend — this is the real validation name
-              // e.g. "Nifty Bullish + HH/HL", "Price > VWAP", "Gate 3 — Compression"
+              // Use the REAL label from backend (actual validation name, not V1/V2)
               stepLabels[s.stepId] = s.label || s.stepId.replace(/_/g,' ');
               stepIds.push(s.stepId);
             }
@@ -1465,95 +1548,87 @@
       }
 
       if (!stepIds.length) {
-        area.innerHTML = '<div class="vd-nodata">No step data available yet</div>';
+        area.innerHTML = '<div class="vd-nodata">Step data not available yet</div>';
         return;
       }
 
-      // ── Sort: all-pass first, then by failedAtStep DESC (most steps passed first) ──
+      // ── Sort: all-pass first, then by failedAtStep DESC ──
       const sorted = [...logs].sort((a,b) => {
         if (a.failedAtStep===0 && b.failedAtStep!==0) return -1;
         if (b.failedAtStep===0 && a.failedAtStep!==0) return 1;
-        return (b.failedAtStep||0) - (a.failedAtStep||0);
+        return (b.failedAtStep||0)-(a.failedAtStep||0);
       });
 
-      const passCount  = sorted.filter(l=>l.failedAtStep===0).length;
-      const totalShown = sorted.length>250 ? 250 : sorted.length;
+      const passCount = sorted.filter(l=>l.failedAtStep===0).length;
+      const closeCount = sorted.filter(l=>{
+        const n=(l.steps||[]).length;
+        return l.failedAtStep>0 && n>0 && l.failedAtStep>=n-1;
+      }).length;
 
-      // ── Build table header: Symbol | [validation step names] | Result ──
-      const thCells = stepIds.map((sid,i) => {
+      // ── Table header: Symbol | [real step labels] | Result ──
+      const thCells = stepIds.map(sid => {
         const fullLbl = stepLabels[sid];
-        // Short label for narrow column header — keep key words
-        const short = fullLbl.length>16 ? fullLbl.substring(0,15)+'…' : fullLbl;
-        return `<th title="${fullLbl.replace(/"/g,'&quot;')}" style="min-width:52px">
-          <div style="font-size:8px;white-space:normal;max-width:60px;margin:0 auto;line-height:1.3">${short}</div>
+        const short   = fullLbl.length>18 ? fullLbl.substring(0,17)+'…' : fullLbl;
+        return `<th title="${fullLbl.replace(/"/g,'&quot;')}" style="min-width:50px">
+          <div style="font-size:8px;white-space:normal;max-width:65px;margin:0 auto;line-height:1.4">${short}</div>
         </th>`;
       }).join('');
 
-      // ── Build table rows ───────────────────────────────────────────────
-      const tbRows = sorted.slice(0,250).map(log => {
-        // Build lookup map: stepId → step result
+      // ── Table rows ──
+      const rows = sorted.slice(0,300).map(log => {
         const byId = {};
-        (log.steps||[]).forEach(s => { byId[s.stepId] = s; });
+        (log.steps||[]).forEach(s => { byId[s.stepId]=s; });
 
         const cells = stepIds.map(sid => {
           const s = byId[sid];
-          if (!s) return `<td title="Not evaluated" style="font-size:12px;color:var(--dim)">&#8212;</td>`;
-          if (s.passed) {
-            return `<td class="vd-cell" title="${(s.detail||'').replace(/"/g,'&quot;').substring(0,110)}" style="font-size:15px">&#9989;</td>`;
-          } else {
-            return `<td class="vd-cell" title="${(s.detail||'').replace(/"/g,'&quot;').substring(0,110)}" style="font-size:15px">&#10060;</td>`;
-          }
+          if (!s) return `<td style="font-size:12px;color:var(--dim)" title="Not evaluated">&mdash;</td>`;
+          const detail = (s.detail||'').replace(/"/g,'&quot;').substring(0,120);
+          if (s.passed) return `<td title="${detail}">&#9989;</td>`;
+          return `<td title="${detail}">&#10060;</td>`;
         }).join('');
 
-        const allOk    = log.failedAtStep===0;
-        const numSteps = (log.steps||[]).length;
-        const isClose  = !allOk && numSteps>0 && log.failedAtStep >= numSteps-1;
-        const rowCls   = allOk ? 'vd-pass' : isClose ? 'vd-close' : 'vd-fail';
+        const allOk   = log.failedAtStep===0;
+        const n       = (log.steps||[]).length;
+        const isClose = !allOk && n>0 && log.failedAtStep>=n-1;
+        const rowCls  = allOk?'vd-pass':isClose?'vd-close':'vd-fail';
+        const dirStr  = log.direction||'BUY';
+        const dirCls  = (dirStr.includes('SELL')||dirStr.includes('SHORT'))?'vd-dir-s':'vd-dir-l';
 
-        const dirStr = (log.direction||'BUY');
-        const dirCls = (dirStr.includes('SELL')||dirStr.includes('SHORT')) ? 'vd-dir-sell' : 'vd-dir-long';
-
-        const resultTd = allOk
-          ? `<td class="vd-result-col"><span class="vd-result-pass">&#9989; PASS</span></td>`
-          : `<td class="vd-result-col"><span class="vd-result-fail">&#10060; FAIL @ step ${log.failedAtStep}</span></td>`;
-
-        // Show failed step label on hover of result
-        const failLabel = !allOk && log.firstFailedLabel
+        const failHint = !allOk && log.firstFailedLabel
           ? ` title="Failed: ${log.firstFailedLabel.replace(/"/g,'&quot;')}"` : '';
 
+        const resultTd = allOk
+          ? `<td class="vd-res-col vd-pass-txt">&#9989; PASS</td>`
+          : `<td class="vd-res-col vd-fail-txt"${failHint}>&#10060; FAIL S${log.failedAtStep}</td>`;
+
         return `<tr class="${rowCls}">
-          <td${failLabel}>
-            ${log.symbol}
-            <span class="vd-dir-tag ${dirCls}">${dirStr.substring(0,4)}</span>
+          <td class="vd-sym-col">
+            ${log.symbol}<span class="vd-dir-tag ${dirCls}">${dirStr.substring(0,4)}</span>
           </td>
           ${cells}
           ${resultTd}
         </tr>`;
       }).join('');
 
-      // ── Stat bar above table ───────────────────────────────────────────
-      const statsBar = `<div style="display:flex;align-items:center;gap:12px;padding:8px 0 10px;font-size:10px;color:var(--muted)">
-        <span><b style="color:#fff">${sorted.length}</b> stocks evaluated</span>
-        ${passCount>0?`<span><b style="color:var(--green)">${passCount}</b> all-pass &#9989;</span>`:''}
-        <span><b style="color:var(--warn)">${sorted.filter(l=>!allPassing(l,logs)).filter(l=>{const n=(l.steps||[]).length;return n>0&&l.failedAtStep>=n-1;}).length}</b> almost there &#9889;</span>
-        ${sorted.length>250?`<span style="color:var(--dim)">Showing first 250 of ${sorted.length}</span>`:''}
+      const statsBar = `<div class="vd-statbar">
+        <span><b style="color:#fff">${sorted.length}</b> stocks</span>
+        ${passCount>0?`<span><b style="color:var(--green)">${passCount}</b> all pass &#9989;</span>`:''}
+        ${closeCount>0?`<span><b style="color:var(--warn)">${closeCount}</b> almost there &#9889;</span>`:''}
+        ${sorted.length>300?`<span style="color:var(--dim)">Showing 300 of ${sorted.length}</span>`:''}
+        <span style="color:var(--dim);font-size:9px">Hover any cell for exact values</span>
       </div>`;
 
       area.innerHTML = statsBar + `<div class="vd-tbl-wrap">
         <table class="vd-tbl">
-          <thead>
-            <tr>
-              <th style="text-align:left">Symbol</th>
-              ${thCells}
-              <th class="vd-result-col">Result</th>
-            </tr>
-          </thead>
-          <tbody>${tbRows}</tbody>
+          <thead><tr>
+            <th class="vd-sym-col">Symbol</th>
+            ${thCells}
+            <th class="vd-res-col">Result</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
         </table>
       </div>`;
     }
-
-    function allPassing(log) { return log.failedAtStep===0; }
 
     // Background refresh every 30s
     setInterval(()=>loadVd(false), 30000);

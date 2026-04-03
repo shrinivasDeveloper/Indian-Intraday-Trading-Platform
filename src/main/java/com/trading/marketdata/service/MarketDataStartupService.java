@@ -1,13 +1,12 @@
-// ========== MODIFIED FILE ==========
+// ============================================================
+// REPLACE FILE (full replacement)
 // Path: src/main/java/com/trading/marketdata/service/MarketDataStartupService.java
 // CHANGES vs original:
-//   1. Added NiftyHistoricalLoaderService dependency (one new constructor param).
-//   2. Added loadNiftyHistory() call BEFORE streaming starts.
-//      This warm-ups MarketDirectionService buffer immediately so direction is
-//      BULLISH / BEARISH right from first live candle, not SIDEWAYS for 8 days.
-//   3. Zero changes to existing logic — purely additive.
-// ============================================================================
-
+//   1. Replaced NiftyHistoricalLoaderService with WarmupService
+//      (WarmupService covers Nifty + BankNifty + 5m + 15m + IB persistence)
+//   2. Added getBankNiftyToken() to subscription token list
+//   3. All original token subscription logic preserved
+// ============================================================
 package com.trading.marketdata.service;
 
 import com.trading.auth.model.ZerodhaToken;
@@ -19,30 +18,26 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * MarketDataStartupService – FIXED.
+ * MarketDataStartupService — FIXED v2.
  *
- * ROOT CAUSE of SIDEWAYS-always bug:
- *   MarketDirectionService.recalculate() requires 200 Nifty 15-min candles
- *   to compute EMA200. The buffer starts empty. Live candles trickle in at
- *   25/day (market hours). Result: SIDEWAYS for ~8 trading days, blocking
- *   ALL strategy signals the entire time.
+ * Startup sequence:
+ *   1. Build instrument cache (token → symbol mapping)
+ *   2. Run WarmupService (pre-loads 300 Nifty + BankNifty candles, computes IB if missed)
+ *   3. Subscribe all tokens in FULL mode → WebSocket streaming starts
  *
- * FIX: Step 2a — call niftyHistoricalLoader.loadNiftyHistory() right after
- *   instrument cache is built and BEFORE WebSocket streaming starts.
- *   This fetches last 300 historical Nifty 15-min candles, fills the buffer,
- *   and triggers recalculate() so direction is BULLISH/BEARISH immediately.
- *
- * FIX: Step 1 (pre-existing) — ALL Nifty500 tokens go into fullTokens (FULL mode)
- *   so CandleAggregatorService gets tick timestamps to build 5min/15min candles.
+ * This order guarantees:
+ *   - Direction is BULLISH/BEARISH from first live candle (not SIDEWAYS for 8 days)
+ *   - IB is already computed if restart happened mid-session
+ *   - BankNifty mode is correct from startup
  */
 @Service
 @Slf4j
 @RequiredArgsConstructor
 public class MarketDataStartupService {
 
-    private final InstrumentCacheService      instrumentCache;
-    private final MarketDataService           marketDataService;
-    private final NiftyHistoricalLoaderService niftyHistoricalLoader; // ← ADDED
+    private final InstrumentCacheService instrumentCache;
+    private final MarketDataService      marketDataService;
+    private final WarmupService          warmupService;  // REPLACES NiftyHistoricalLoaderService
 
     public void onTokenReady(ZerodhaToken token) {
         log.info("Token ready — starting market data pipeline");
@@ -54,50 +49,46 @@ public class MarketDataStartupService {
             log.warn("Instrument cache build failed — continuing: {}", e.getMessage());
         }
 
-        // ── Step 2a: Pre-load Nifty 15-min history (THE CRITICAL FIX) ─────────
-        // This MUST happen before streaming starts. It warms up MarketDirectionService
-        // so direction is correct from the first live candle, not after 8 days.
+        // ── Step 2: Warmup (THE CRITICAL FIX — ISSUES 1, 2, 5) ──────────────
+        // Pre-loads Nifty + BankNifty history. Forces IB computation if mid-session.
+        // MUST happen before WebSocket streaming starts.
         try {
-            log.info("Pre-loading Nifty 15-min history for market direction warm-up...");
-            niftyHistoricalLoader.loadNiftyHistory();
+            log.info("Running WarmupService (Nifty + BankNifty historical pre-load)...");
+            warmupService.runWarmup();
         } catch (Exception e) {
-            log.warn("Nifty history pre-load failed — market direction may show SIDEWAYS until " +
-                    "200 live 15-min candles accumulate: {}", e.getMessage());
+            log.warn("WarmupService failed — market direction may be SIDEWAYS until 200 live candles: {}", e.getMessage());
         }
 
-        // ── Step 2b: Build subscription token lists ────────────────────────────
+        // ── Step 3: Build subscription token list ─────────────────────────────
         List<Long> fullTokens;
         List<Long> quoteTokens;
 
         try {
-            // ALL Nifty500 tokens → FULL mode
-            // buildNifty500Tokens() already includes:
-            //   - NIFTY_TOKEN (256265) — for Gate 1 market direction
-            //   - BANKNIFTY_TOKEN (260105)
-            //   - VIX_TOKEN (264969) — for VixService
-            //   - All ~402 resolved Nifty500 stock tokens
-            //
-            // FULL mode gives CandleAggregatorService the tick timestamps
-            // it needs to build 5min and 15min candles for every stock.
-            fullTokens  = new ArrayList<>(instrumentCache.buildNifty500Tokens());
-            quoteTokens = List.of(); // nothing in quote mode
+            fullTokens = new ArrayList<>(instrumentCache.buildNifty500Tokens());
 
+            // Ensure BankNifty token is included (important for BankNiftyModeEngine)
+            long bankNiftyToken = instrumentCache.getBankNiftyToken();
+            if (bankNiftyToken != 0 && !fullTokens.contains(bankNiftyToken)) {
+                fullTokens.add(bankNiftyToken);
+                log.info("Added BankNifty token {} to FULL subscription", bankNiftyToken);
+            }
+
+            quoteTokens = List.of();
             log.info("Subscription: {} tokens ALL in FULL mode", fullTokens.size());
 
         } catch (Exception e) {
             log.warn("Subscription list build failed — using fallback: {}", e.getMessage());
             fullTokens  = new ArrayList<>();
-            fullTokens.add(256265L); // Nifty 50
-            fullTokens.add(264969L); // VIX
+            fullTokens.add(256265L);  // Nifty 50
+            fullTokens.add(260105L);  // BankNifty
+            fullTokens.add(264969L);  // VIX
             quoteTokens = List.of();
         }
 
-        // ── Step 3: Start WebSocket streaming ─────────────────────────────────
+        // ── Step 4: Start WebSocket streaming ─────────────────────────────────
         try {
-            marketDataService.startStreaming(
-                    token.getAccessToken(), fullTokens, quoteTokens);
-            log.info("Market data pipeline READY — full={} quote={} (ALL in FULL mode)",
-                    fullTokens.size(), quoteTokens.size());
+            marketDataService.startStreaming(token.getAccessToken(), fullTokens, quoteTokens);
+            log.info("Market data pipeline READY — full={} quote={}", fullTokens.size(), quoteTokens.size());
         } catch (Exception e) {
             log.error("WebSocket startup failed: {}", e.getMessage());
         }
