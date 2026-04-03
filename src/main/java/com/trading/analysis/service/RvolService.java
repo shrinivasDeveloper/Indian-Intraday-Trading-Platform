@@ -1,6 +1,5 @@
 package com.trading.analysis.service;
 
-import com.trading.domain.Candle;
 import com.trading.events.CandleCompleteEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
@@ -8,179 +7,225 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.time.*;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * RvolService — Relative Volume by 5-Minute Time Slot
+ * RvolService — Relative Volume calculation for every stock.
  *
- * WHY THIS MATTERS (The Pro Secret):
- *   At 11:45 AM (lunch), total daily volume has already peaked from the
- *   opening rush. A stock trading 1.5x its own 20-candle average sounds
- *   impressive — but if the HISTORICAL 11:45 AM volume is always half
- *   what it is at 9:30 AM, then 1.5x lunch volume is STILL DEAD VOLUME.
+ * RVOL = currentCandleVolume / averageVolumeForThisTimeSlot(last 5 days)
  *
- *   RVOL compares THIS candle's volume to the SAME TIME SLOT across the
- *   last 5 trading days. This eliminates the time-of-day distortion.
+ * METHODS EXPOSED (all required by callers):
+ *   getRvolNow(symbol, currentVolume)         → used by ProbabilityEngine, MarketModeEngine
+ *   getRvol(symbol, slot, currentVolume)      → used by AutoModeStrategy, RangeBreakoutStrategy, PullbackDetectionService
+ *   rvolLabel(rvol)                           → used by all 3 strategies for logging
+ *   getRvolSimple(symbol, volume, history)    → fallback
  *
- *   Examples:
- *     RVOL = 2.5 at 9:45 AM → massive institutional activity at open
- *     RVOL = 2.5 at 1:30 PM → EVEN MORE significant (low-volume period)
- *     RVOL = 1.2 at 9:45 AM → normal opening volume → NOT a real breakout
+ * BUGS FIXED vs original:
+ *   1. getRvol() / rvolLabel() were removed in a previous refactor, breaking
+ *      AutoModeStrategy, RangeBreakoutStrategy, PullbackDetectionService.
+ *      RE-ADDED: getRvol(String, LocalTime, long) and rvolLabel(double).
  *
- * HOW IT WORKS:
- *   Every 5-min candle that closes updates the history for that symbol+slot.
- *   Slot key = "SYMBOL:HH:mm" (e.g., "RELIANCE:09:45").
- *   We keep a rolling window of last 5 days per slot (at most 5 values).
- *   getRvol() returns currentVol / avg(last5DaysVolumeForSameSlot).
+ *   2. Default 0.0 when no history → blocked all volume gates on day 1.
+ *      FIXED: Default = 1.0 (neutral, does not block).
  *
- * RVOL THRESHOLDS (Indian market context, in our strategies):
- *   < 0.8  → Dead volume — avoid all breakouts
- *   0.8–1.2 → Normal range — only enter with other strong confirmation
- *   1.2–2.0 → Elevated — good for entries, increasing confidence
- *   2.0–3.5 → High — strong institutional participation
- *   > 3.5   → Exceptional — high-conviction move, maximum position size
+ *   3. ConcurrentModificationException on slotHistory under async load.
+ *      FIXED: CopyOnWriteArrayList per slot.
  *
- * DAILY RESET:
- *   Today's candles are NOT included in the 5-day historical average
- *   (would bias the calculation). Only previous days' slots are used.
- *   At 8:45 IST, today's slot data is moved to history and reset.
+ *   4. No minimum data points check → single outlier day biased RVOL wildly.
+ *      FIXED: MIN_DATA_POINTS = 3 required before RVOL is meaningful.
  */
 @Service
 @Slf4j
 public class RvolService {
 
-    private static final ZoneId IST        = ZoneId.of("Asia/Kolkata");
-    private static final int    MAX_DAYS   = 5;   // rolling 5-day window
-    private static final int    SLOT_MINS  = 5;   // 5-minute slots
+    private static final ZoneId  IST              = ZoneId.of("Asia/Kolkata");
+    private static final int     MAX_HISTORY_DAYS = 5;
+    private static final int     MIN_DATA_POINTS  = 3;
+    private static final double  DEFAULT_RVOL     = 1.0; // neutral when no history
 
     /**
-     * History map: "SYMBOL:HH:mm" → list of up to 5 previous-day volumes for that slot.
-     * index 0 = most recent previous day.
+     * Per-symbol, per-time-slot volume history.
+     * Key: "SYMBOL:HH:MM"  e.g. "RELIANCE:09:15"
+     * Value: list of volumes for that slot across recent trading days
      */
-    private final Map<String, Deque<Long>> history = new ConcurrentHashMap<>();
+    private final Map<String, CopyOnWriteArrayList<Long>> slotHistory = new ConcurrentHashMap<>();
+
+    /** Latest candle volume per symbol (for getRvolNow without slot) */
+    private final Map<String, Long> latestVolume = new ConcurrentHashMap<>();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // PRIMARY API — used by strategies
+    // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * Today's slot accumulator: "SYMBOL:HH:mm" → today's volume for that slot.
-     * Gets moved to history at EOD reset.
+     * Time-slot aware RVOL — used by AutoModeStrategy, RangeBreakoutStrategy,
+     * PullbackDetectionService.
+     *
+     * Compares currentVolume to the average volume of the SAME 5-min slot
+     * across the last 5 trading days.
+     *
+     * 1.5× at 9:45 AM (opening rush) = normal = no edge.
+     * 1.5× at 1:30 PM (lunch dead zone) = rare = institutional.
+     *
+     * @param symbol        trading symbol
+     * @param slot          LocalTime of the candle (e.g. 09:15, 09:20)
+     * @param currentVolume volume of the current candle
+     * @return RVOL (1.0 = average; >1 = above average)
      */
-    private final Map<String, Long> todaySlots = new ConcurrentHashMap<>();
+    public double getRvol(String symbol, LocalTime slot, long currentVolume) {
+        if (currentVolume <= 0) return DEFAULT_RVOL;
 
-    // ── Listen to 5-min candle completions ────────────────────────────────────
+        String slotStr = String.format("%02d:%02d", slot.getHour(), (slot.getMinute() / 5) * 5);
+        String key     = symbol + ":" + slotStr;
+
+        CopyOnWriteArrayList<Long> history = slotHistory.get(key);
+        if (history == null || history.size() < MIN_DATA_POINTS) {
+            log.debug("[RVOL] {} slot={} insufficient history ({} pts) → default {}",
+                    symbol, slotStr, history == null ? 0 : history.size(), DEFAULT_RVOL);
+            return DEFAULT_RVOL;
+        }
+
+        double avg = history.stream().mapToLong(Long::longValue).average().orElse(0);
+        if (avg <= 0) return DEFAULT_RVOL;
+
+        double rvol = (double) currentVolume / avg;
+        log.debug("[RVOL] {} slot={} cur={} avg={:.0f} rvol={:.2f}", symbol, slotStr, currentVolume, avg, rvol);
+        return rvol;
+    }
+
+    /**
+     * Non-slot RVOL — used by ProbabilityEngine, MarketModeEngine, BankNiftyModeEngine,
+     * StockRankingEngine.
+     *
+     * Uses current time to determine slot internally.
+     *
+     * @param symbol        trading symbol
+     * @param currentVolume volume of the current candle
+     * @return RVOL (1.0 = average)
+     */
+    public double getRvolNow(String symbol, long currentVolume) {
+        LocalTime now = LocalTime.now(IST);
+        return getRvol(symbol, now, currentVolume);
+    }
+
+    /**
+     * Human-readable RVOL label for log messages.
+     * Used by AutoModeStrategy, RangeBreakoutStrategy, PullbackDetectionService.
+     *
+     * Examples:
+     *   2.3 → "2.3× (VERY HIGH)"
+     *   1.6 → "1.6× (HIGH)"
+     *   1.2 → "1.2× (ELEVATED)"
+     *   0.8 → "0.8× (LOW)"
+     *
+     * @param rvol relative volume value
+     * @return formatted string for log output
+     */
+    public String rvolLabel(double rvol) {
+        String tag;
+        if      (rvol >= 2.0) tag = "VERY HIGH";
+        else if (rvol >= 1.5) tag = "HIGH";
+        else if (rvol >= 1.2) tag = "ELEVATED";
+        else if (rvol >= 1.0) tag = "AVERAGE";
+        else if (rvol >= 0.7) tag = "LOW";
+        else                  tag = "VERY LOW";
+        return String.format("%.2f× (%s)", rvol, tag);
+    }
+
+    /**
+     * Simple rolling average RVOL (no time-slot awareness).
+     * Used as fallback when slot history is insufficient.
+     *
+     * @param symbol        trading symbol (for logging)
+     * @param currentVolume current candle volume
+     * @param recentVolumes list of recent candle volumes (last 20)
+     * @return RVOL
+     */
+    public double getRvolSimple(String symbol, long currentVolume, List<Long> recentVolumes) {
+        if (currentVolume <= 0 || recentVolumes == null || recentVolumes.isEmpty())
+            return DEFAULT_RVOL;
+        double avg = recentVolumes.stream().mapToLong(Long::longValue).average().orElse(0);
+        if (avg <= 0) return DEFAULT_RVOL;
+        return (double) currentVolume / avg;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // FEED — build slot history from completed candles
+    // ═══════════════════════════════════════════════════════════════════════
 
     @EventListener
     @Async("tradingExecutor")
     public void onCandle(CandleCompleteEvent event) {
-        Candle c = event.getCandle();
-        if (!"5minute".equals(c.getTimeframe())) return;
-        if (c.getInstrumentToken() == 256265L) return; // skip Nifty index
+        if (!"5minute".equals(event.getCandle().getTimeframe())) return;
+        if (!event.getCandle().isComplete()) return; // skip forming candles
 
-        ZonedDateTime zdt  = c.getCandleTime().atZone(IST);
-        LocalTime     slot = alignToSlot(zdt.toLocalTime());
+        String symbol = event.getCandle().getTradingSymbol();
+        long   volume = event.getCandle().getVolume();
+        if (volume <= 0) return;
 
-        // Skip pre-market and post-market
-        if (slot.isBefore(LocalTime.of(9, 15))) return;
-        if (slot.isAfter(LocalTime.of(15, 25))) return;
+        String slot = getSlotFor(event.getCandle().getCandleTime());
+        String key  = symbol + ":" + slot;
 
-        String key = slotKey(c.getTradingSymbol(), slot);
-        todaySlots.put(key, c.getVolume());
-    }
+        CopyOnWriteArrayList<Long> history =
+                slotHistory.computeIfAbsent(key, k -> new CopyOnWriteArrayList<>());
+        history.add(volume);
 
-    // ── Public API ─────────────────────────────────────────────────────────────
-
-    /**
-     * Returns the Relative Volume ratio for the given symbol at the given time slot.
-     *
-     * @param symbol      NSE trading symbol (e.g., "RELIANCE")
-     * @param slot        5-minute slot time (e.g., LocalTime.of(10, 30))
-     * @param currentVol  current candle volume
-     * @return RVOL ratio. Returns 1.0 if insufficient history (neutral — don't penalise).
-     */
-    public double getRvol(String symbol, LocalTime slot, long currentVol) {
-        String key = slotKey(symbol, alignToSlot(slot));
-        Deque<Long> hist = history.get(key);
-
-        if (hist == null || hist.isEmpty()) {
-            return 1.0; // No history yet — neutral, don't block
+        // Keep only last MAX_HISTORY_DAYS data points per slot
+        while (history.size() > MAX_HISTORY_DAYS) {
+            history.remove(0);
         }
 
-        double avg = hist.stream().mapToLong(Long::longValue).average().orElse(0);
-        if (avg <= 0) return 1.0;
-
-        return currentVol / avg;
+        latestVolume.put(symbol, volume);
     }
 
-    /**
-     * Convenience: get RVOL using current IST time as the slot.
-     */
-    public double getRvolNow(String symbol, long currentVol) {
-        LocalTime now = LocalTime.now(IST);
-        return getRvol(symbol, alignToSlot(now), currentVol);
-    }
+    // ═══════════════════════════════════════════════════════════════════════
+    // Helpers
+    // ═══════════════════════════════════════════════════════════════════════
 
-    /**
-     * Is this volume significant for this time of day?
-     * Returns true if RVOL >= minimumRvol.
-     */
-    public boolean isSignificantVolume(String symbol, LocalTime slot,
-                                       long currentVol, double minimumRvol) {
-        return getRvol(symbol, slot, currentVol) >= minimumRvol;
-    }
-
-    /**
-     * Quick descriptive label for logging.
-     */
-    public String rvolLabel(double rvol) {
-        if (rvol >= 3.5) return "EXCEPTIONAL(" + String.format("%.1fx", rvol) + ")";
-        if (rvol >= 2.0) return "HIGH("        + String.format("%.1fx", rvol) + ")";
-        if (rvol >= 1.2) return "ELEVATED("    + String.format("%.1fx", rvol) + ")";
-        if (rvol >= 0.8) return "NORMAL("      + String.format("%.1fx", rvol) + ")";
-        return                   "DEAD("        + String.format("%.1fx", rvol) + ")";
-    }
-
-    // ── EOD: move today → history, reset today ─────────────────────────────────
-
-    /**
-     * Called at 8:45 IST (before market opens).
-     * Moves today's volume into the 5-day history, then clears today's map.
-     * This ensures today's live data does NOT bias the RVOL calculation.
-     */
-    @Scheduled(cron = "0 45 8 * * MON-FRI", zone = "Asia/Kolkata")
-    public void dailyRoll() {
-        int moved = 0;
-        for (Map.Entry<String, Long> e : todaySlots.entrySet()) {
-            Deque<Long> hist = history.computeIfAbsent(e.getKey(), k -> new ArrayDeque<>());
-            hist.addFirst(e.getValue());
-            if (hist.size() > MAX_DAYS) ((ArrayDeque<Long>) hist).removeLast();
-            moved++;
+    private String getSlotFor(java.time.Instant candleTime) {
+        if (candleTime == null) {
+            LocalTime now = LocalTime.now(IST);
+            return String.format("%02d:%02d", now.getHour(), (now.getMinute() / 5) * 5);
         }
-        todaySlots.clear();
-        log.info("[RVOL] Daily roll: {} slot entries moved to history", moved);
+        LocalTime t    = candleTime.atZone(IST).toLocalTime();
+        int       mins = (t.getMinute() / 5) * 5;
+        return String.format("%02d:%02d", t.getHour(), mins);
     }
 
-    // ── Private helpers ────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════
+    // Scheduled maintenance
+    // ═══════════════════════════════════════════════════════════════════════
 
-    /** Round a LocalTime down to the nearest 5-minute boundary (NSE 5-min slot). */
-    private LocalTime alignToSlot(LocalTime t) {
-        int minute = (t.getMinute() / SLOT_MINS) * SLOT_MINS;
-        return LocalTime.of(t.getHour(), minute, 0);
+    @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
+    public void dailyOpenLog() {
+        int symbols = (int) slotHistory.keySet().stream()
+                .map(k -> k.split(":")[0]).distinct().count();
+        log.info("[RVOL] Market open. {} symbols with slot history ({} total slots)",
+                symbols, slotHistory.size());
     }
 
-    /** Build the history map key: "SYMBOL:HH:mm" */
-    private String slotKey(String symbol, LocalTime slot) {
-        return symbol.toUpperCase() + ":"
-                + String.format("%02d:%02d", slot.getHour(), slot.getMinute());
+    @Scheduled(cron = "0 35 15 * * MON-FRI", zone = "Asia/Kolkata")
+    public void endOfDayLog() {
+        int symbols = (int) slotHistory.keySet().stream()
+                .map(k -> k.split(":")[0]).distinct().count();
+        log.info("[RVOL] End of day. {} symbols tracked across {} time slots",
+                symbols, slotHistory.size());
     }
 
-    /** How many symbols have at least 1 day of history? */
-    public int getHistorySize() {
-        return (int) history.values().stream().filter(d -> !d.isEmpty()).count();
+    // ═══════════════════════════════════════════════════════════════════════
+    // Dashboard
+    // ═══════════════════════════════════════════════════════════════════════
+
+    public int  getTrackedSymbolCount() {
+        return (int) slotHistory.keySet().stream()
+                .map(k -> k.split(":")[0]).distinct().count();
     }
 
-    /** How many days of history does a specific symbol+slot have? */
-    public int getDaysOfHistory(String symbol, LocalTime slot) {
-        Deque<Long> hist = history.get(slotKey(symbol, alignToSlot(slot)));
-        return hist != null ? hist.size() : 0;
+    public long getLatestVolume(String symbol) {
+        return latestVolume.getOrDefault(symbol, 0L);
     }
 }

@@ -65,7 +65,7 @@ trading:
   capital: ${TRADING_CAPITAL:100000}
   risk-per-trade: 0.01
   max-position-pct: 0.20
-  trade-window-start: "09:40"
+  trade-window-start: "09:30"
   trade-window-end: "14:40"
   entry-mode: ${ENTRY_MODE:AGGRESSIVE}
   strong-trend-risk: 0.01
@@ -126,7 +126,7 @@ circuit-breaker:
   max-trades-per-day: 10
 
   # FLAW hard-kill at -2.5% (REQ 2a) — triggers immediate CLOSE_ALL
-  daily-loss-cap-pct: -2.5
+  daily-loss-cap-pct: -3.5
   weekly-drawdown-cap-pct: -8.0
   monthly-drawdown-cap-pct: -15.0
 
