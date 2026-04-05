@@ -1,1638 +1,891 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8"/>
-    <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-    <title>Trading Platform</title>
-    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Dashboard v7.0</title>
     <style>
-        *{margin:0;padding:0;box-sizing:border-box}
-        :root{
-          --bg:#050810;--bg2:#080d16;--bg3:#0d1520;--bg4:#111d2b;
-          --border:#162030;--border2:#1e2d3d;
-          --text:#c8d8e8;--muted:#4a6078;--dim:#2a3d52;
-          --green:#00e5a0;--green2:#00c488;--green-bg:rgba(0,229,160,.08);--green-border:rgba(0,229,160,.2);
-          --red:#ff4060;  --red2:#e03050;  --red-bg:rgba(255,64,96,.08);  --red-border:rgba(255,64,96,.2);
-          --warn:#ffaa00; --warn-bg:rgba(255,170,0,.08); --warn-border:rgba(255,170,0,.2);
-          --blue:#4499ff; --blue-bg:rgba(68,153,255,.08);
-          --accent:#00e5a0;
-          --r:6px;
+        :root {
+          --bg: #0d1117; --card: #161b22; --border: #30363d;
+          --text: #e6edf3; --muted: #8b949e; --green: #3fb950; --red: #f85149;
+          --yellow: #d29922; --blue: #58a6ff; --purple: #bc8cff; --orange: #ffa657;
+          --gold: #f0c040;
         }
-        html{background:var(--bg)}
-        body{background:var(--bg);color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:12px;min-height:100vh;overflow-x:hidden}
-        body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,229,160,.008) 3px,rgba(0,229,160,.008) 4px);pointer-events:none;z-index:0}
-        header{position:sticky;top:0;z-index:300;display:flex;align-items:center;justify-content:space-between;padding:0 20px;height:48px;background:rgba(5,8,16,.95);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
-        .logo{font-family:'Space Grotesk',sans-serif;font-size:15px;font-weight:800;color:#fff;letter-spacing:-0.5px;display:flex;align-items:center;gap:7px}
-        .logo-spark{color:var(--green);font-size:18px}
-        .header-pills{display:flex;align-items:center;gap:6px;flex-wrap:nowrap}
-        .pill{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:20px;font-size:10px;font-weight:600;letter-spacing:.4px;cursor:default;border:1px solid;transition:all .3s;white-space:nowrap}
-        .pill-green{color:var(--green);border-color:var(--green-border);background:var(--green-bg)}
-        .pill-red  {color:var(--red);  border-color:var(--red-border);  background:var(--red-bg)}
-        .pill-warn {color:var(--warn); border-color:var(--warn-border); background:var(--warn-bg)}
-        .pill-dim  {color:var(--muted);border-color:var(--border);     background:transparent}
-        .dot{width:5px;height:5px;border-radius:50%;background:currentColor}
-        .pulse{animation:pulse 1.4s ease-in-out infinite}
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
-        .time-badge{font-size:10px;color:var(--dim);font-variant-numeric:tabular-nums}
-        .logout-btn{padding:4px 12px;border:1px solid rgba(255,64,96,.35);background:transparent;color:var(--red);font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:600;cursor:pointer;border-radius:var(--r);transition:all .2s;letter-spacing:.4px}
-        .logout-btn:hover{background:var(--red-bg)}
-        #session-banner{display:none;position:fixed;top:48px;left:0;right:0;z-index:400;background:var(--red);color:#fff;text-align:center;padding:9px;font-size:11px;font-weight:700;cursor:pointer;letter-spacing:.3px}
-        nav{display:flex;padding:0 20px;background:var(--bg2);border-bottom:1px solid var(--border);overflow-x:auto;gap:2px;scrollbar-width:none}
-        nav::-webkit-scrollbar{display:none}
-        .tab{padding:10px 16px 8px;cursor:pointer;font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.5px;border-bottom:2px solid transparent;transition:all .15s;white-space:nowrap;text-transform:uppercase}
-        .tab:hover{color:var(--text)}
-        .tab.active{color:var(--green);border-bottom-color:var(--green)}
-        .page{display:none;padding:18px 20px;position:relative;z-index:1;min-height:calc(100vh - 88px)}
-        .page.active{display:block}
-        .stat-row{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-bottom:16px}
-        .stat{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:14px;transition:border-color .2s}
-        .stat:hover{border-color:var(--border2)}
-        .stat.accent{border-left:2px solid var(--green)}
-        .stat-label{font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:7px}
-        .stat-val{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:800;color:#fff;line-height:1}
-        .stat-val.g{color:var(--green)}.stat-val.r{color:var(--red)}.stat-val.w{color:var(--warn)}
-        .stat-sub{font-size:10px;color:var(--muted);margin-top:4px}
-        .card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:16px;margin-bottom:12px}
-        .card-title{font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}
-        .two-col{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
-        .three-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px}
-        .gate-row{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:16px}
-        .gate{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:12px 8px;text-align:center;transition:all .2s}
-        .gate.pass{border-color:var(--green-border);background:var(--green-bg)}
-        .gate.fail{border-color:var(--red-border);background:var(--red-bg)}
-        .gate-n{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);margin-bottom:5px}
-        .gate-name{font-size:10px;font-weight:600;color:var(--text);margin-bottom:7px;line-height:1.3}
-        .gate-st{font-size:9px;font-weight:700;letter-spacing:.5px}
-        .gate-st.PASS{color:var(--green)}.gate-st.FAIL{color:var(--red)}.gate-st.WAIT{color:var(--dim)}
-        .tbl-wrap{overflow:auto;max-height:400px;border-radius:var(--r)}
-        .tbl-wrap::-webkit-scrollbar{width:3px;height:3px}
-        .tbl-wrap::-webkit-scrollbar-track{background:var(--bg)}
-        .tbl-wrap::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
-        table{width:100%;border-collapse:collapse}
-        th{font-size:8px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dim);padding:6px 10px;border-bottom:1px solid var(--border);text-align:left;position:sticky;top:0;background:var(--bg2)}
-        td{padding:8px 10px;border-bottom:1px solid rgba(22,32,48,.6);font-size:11px;transition:background .1s}
-        tr:last-child td{border-bottom:none}
-        tr:hover td{background:var(--bg3)}
-        .num{text-align:right;font-variant-numeric:tabular-nums}
-        .g{color:var(--green)}.r{color:var(--red)}.w{color:var(--warn)}.mu{color:var(--muted)}.wh{color:#e8f0f8}
-        .badge{display:inline-block;padding:2px 7px;border-radius:3px;font-size:9px;font-weight:700;letter-spacing:.5px}
-        .badge.LONG,.badge.BULL,.badge.PASS,.badge.STRONG{background:var(--green-bg);color:var(--green);border:1px solid var(--green-border)}
-        .badge.SHORT,.badge.BEAR,.badge.FAIL,.badge.WEAK{background:var(--red-bg);color:var(--red);border:1px solid var(--red-border)}
-        .badge.NEUTRAL,.badge.WAIT,.badge.SIDE{background:var(--bg3);color:var(--muted);border:1px solid var(--border)}
-        .badge.OPEN{background:var(--blue-bg);color:var(--blue);border:1px solid rgba(68,153,255,.25)}
-        .cb-row{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid rgba(22,32,48,.6);font-size:11px}
-        .cb-row:last-child{border-bottom:none}
-        .bar-wrap{background:var(--bg3);border-radius:2px;height:3px;margin-top:3px}
-        .bar-fill{height:100%;border-radius:2px;background:var(--green);transition:width .5s}
-        .bar-fill.w{background:var(--warn)}.bar-fill.r{background:var(--red)}
-        .cb-status-bar{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-radius:var(--r);margin-bottom:10px;font-size:11px}
-        .cb-status-bar.ok   {background:var(--green-bg);border:1px solid var(--green-border)}
-        .cb-status-bar.trip {background:var(--red-bg);  border:1px solid var(--red-border)}
-        .armed-item{display:flex;align-items:center;gap:10px;padding:9px;border-bottom:1px solid rgba(22,32,48,.6);transition:background .1s}
-        .armed-item:hover{background:var(--bg3)}.armed-item:last-child{border-bottom:none}
-        .armed-sym{font-family:'Space Grotesk',sans-serif;font-weight:700;color:#fff;width:85px;flex-shrink:0}
-        .armed-meta{flex:1;display:flex;gap:14px;flex-wrap:wrap;font-size:10px;color:var(--muted)}
-        .strat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
-        .strat-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:14px;transition:border-color .2s}
-        .strat-card.fired{border-color:var(--green-border)}
-        .strat-name{font-family:'Space Grotesk',sans-serif;font-size:12px;font-weight:800;color:#fff;margin-bottom:2px}
-        .strat-type{font-size:9px;color:var(--muted);letter-spacing:.5px;margin-bottom:10px;text-transform:uppercase}
-        .strat-row{display:flex;justify-content:space-between;font-size:10px;margin-bottom:5px;align-items:center}
-        .strat-row .val{font-weight:700}
-        .bt-form{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px}
-        .bt-field{display:flex;flex-direction:column;gap:4px}
-        .bt-field label{font-size:9px;letter-spacing:1.2px;text-transform:uppercase;color:var(--muted)}
-        .bt-field input,.bt-field select{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:11px;padding:6px 10px;outline:none;min-width:120px;transition:border-color .2s}
-        .bt-field input:focus,.bt-field select:focus{border-color:var(--green)}
-        .bt-run{padding:7px 18px;background:var(--green);border:none;border-radius:var(--r);color:#050810;font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:700;cursor:pointer;letter-spacing:.4px;transition:background .2s}
-        .bt-run:hover{background:var(--green2)}.bt-run:disabled{background:var(--border);color:var(--muted);cursor:not-allowed}
-        .bt-sum{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
-        .bt-stat{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:11px;text-align:center}
-        .bt-stat-label{font-size:8px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);margin-bottom:5px}
-        .bt-stat-val{font-family:'Space Grotesk',sans-serif;font-size:18px;font-weight:800;color:#fff}
-        .bt-strat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
-        .bt-strat-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:12px}
-        .bt-strat-title{font-size:9px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:3px;font-weight:700}
-        .bt-strat-desc{font-size:9px;color:var(--dim);margin-bottom:9px}
-        .bt-strat-row{display:flex;justify-content:space-between;font-size:10px;margin-bottom:4px}
-        .prog-wrap{background:var(--bg3);border-radius:3px;height:5px;overflow:hidden;margin:8px 0}
-        .prog-fill{height:100%;background:linear-gradient(90deg,var(--green),var(--green2));border-radius:3px;width:0;transition:width .5s}
-        .prog-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:10px 0}
-        .prog-stat{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:9px;text-align:center}
-        .prog-stat-label{font-size:8px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:3px}
-        .prog-stat-val{font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:800;color:#fff}
-        .prog-stat-val.w{color:var(--warn)}
-        .empty{text-align:center;padding:28px;color:var(--dim);font-size:11px;letter-spacing:.3px}
-        .reset-btn{padding:5px 11px;border:1px solid rgba(255,64,96,.35);background:transparent;color:var(--red);font-family:'IBM Plex Mono',monospace;font-size:10px;cursor:pointer;border-radius:var(--r);transition:all .2s;font-weight:600}
-        .reset-btn:hover{background:var(--red-bg)}
-        .phase{font-size:9px;padding:2px 6px;border-radius:3px;background:var(--bg3);color:var(--muted);border:1px solid var(--border)}
-        .phase.trail{background:var(--green-bg);color:var(--green);border-color:var(--green-border)}
-        .phase.be{background:var(--warn-bg);color:var(--warn);border-color:var(--warn-border)}
-        @media(max-width:768px){
-          .stat-row{grid-template-columns:repeat(2,1fr)}
-          .gate-row{grid-template-columns:repeat(3,1fr)}
-          .strat-grid,.bt-strat-grid{grid-template-columns:1fr 1fr}
-          .two-col,.three-col{grid-template-columns:1fr}
-          .bt-sum{grid-template-columns:repeat(2,1fr)}
-        }
-
-        /* ── Validation Debug Tab ── */
-        .vd-pg-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:10px}
-        .vd-pg-title{font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:800;color:#fff;letter-spacing:-.3px}
-        .vd-pg-sub{font-size:9px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;margin-top:4px}
-        .vd-sum-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
-        .vd-sum-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px}
-        .vd-sum-lbl{font-size:8px;letter-spacing:1.2px;text-transform:uppercase;color:var(--dim);margin-bottom:5px}
-        .vd-sum-val{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:800;color:#fff}
-        .vd-sum-val.g{color:var(--green)}.vd-sum-val.r{color:var(--red)}.vd-sum-val.w{color:var(--warn)}
-        .vd-stabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px;overflow-x:auto;scrollbar-width:none}
-        .vd-stabs::-webkit-scrollbar{display:none}
-        .vd-stab{padding:9px 18px;cursor:pointer;font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.4px;border-bottom:2px solid transparent;transition:all .15s;white-space:nowrap;text-transform:uppercase;display:flex;align-items:center;gap:6px}
-        .vd-stab:hover{color:var(--text)}
-        .vd-stab.active{color:var(--green);border-bottom-color:var(--green)}
-        .vd-stab-cnt{font-size:8px;padding:1px 5px;border-radius:2px;background:var(--bg);color:var(--dim);font-weight:700}
-        .vd-stab.active .vd-stab-cnt{background:rgba(0,229,160,.15);color:var(--green)}
-        .vd-tbl-wrap{overflow:auto;border-radius:var(--r);border:1px solid var(--border);max-height:520px}
-        .vd-tbl-wrap::-webkit-scrollbar{width:4px;height:4px}
-        .vd-tbl-wrap::-webkit-scrollbar-track{background:var(--bg)}
-        .vd-tbl-wrap::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
-        .vd-tbl{width:100%;border-collapse:collapse}
-        .vd-tbl thead th{font-size:8px;letter-spacing:.6px;text-transform:uppercase;color:var(--dim);padding:8px 10px;border-bottom:2px solid var(--border);background:var(--bg2);text-align:center;white-space:nowrap;position:sticky;top:0;z-index:2}
-        .vd-tbl thead th.vd-sym-col{text-align:left;position:sticky;left:0;z-index:3;background:var(--bg2);min-width:110px;border-right:1px solid var(--border)}
-        .vd-tbl thead th.vd-res-col{border-left:1px solid var(--border);background:var(--bg2)}
-        .vd-tbl tbody td{padding:7px 10px;border-bottom:1px solid rgba(22,32,48,.6);text-align:center;font-size:14px;line-height:1;transition:background .1s}
-        .vd-tbl tbody td.vd-sym-col{text-align:left;position:sticky;left:0;background:var(--bg3);font-family:'Space Grotesk',sans-serif;font-weight:700;font-size:11px;color:#fff;z-index:1;border-right:1px solid var(--border)}
-        .vd-tbl tbody td.vd-res-col{border-left:1px solid var(--border);font-size:9px;font-weight:700;white-space:nowrap}
-        .vd-tbl tbody tr.vd-pass td.vd-sym-col{border-left:3px solid var(--green)}
-        .vd-tbl tbody tr.vd-fail td.vd-sym-col{border-left:3px solid var(--red)}
-        .vd-tbl tbody tr.vd-close td.vd-sym-col{border-left:3px solid var(--warn)}
-        .vd-tbl tbody tr:hover td{background:rgba(17,29,43,.9)}
-        .vd-tbl tbody tr:hover td.vd-sym-col{background:rgba(17,29,43,.98)}
-        .vd-tbl tbody tr:last-child td{border-bottom:none}
-        .vd-pass-txt{color:var(--green)}.vd-fail-txt{color:var(--warn)}
-        .vd-dir-tag{font-size:8px;padding:1px 4px;border-radius:2px;font-weight:700;margin-left:4px}
-        .vd-dir-l{background:var(--green-bg);color:var(--green)}.vd-dir-s{background:var(--red-bg);color:var(--red)}
-        .vd-heatmap{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}
-        .vd-heat-cell{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px}
-        .vd-heat-lbl{font-size:9px;color:var(--muted);margin-bottom:4px;line-height:1.5}
-        .vd-heat-val{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:800;color:var(--red)}
-        .vd-heat-bar{height:3px;border-radius:2px;background:var(--red);margin-top:5px;transition:width .4s}
-        .vd-nodata{text-align:center;padding:44px 20px;color:var(--dim);font-size:11px;line-height:2.4}
-        .vd-statbar{display:flex;align-items:center;gap:14px;padding:6px 0 10px;font-size:10px;color:var(--muted)}
-        @media(max-width:768px){.vd-sum-row{grid-template-columns:1fr 1fr}}
-
-        /* ── Market Mode ── */
-        .mode-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:12px}
-        .mode-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;position:relative;overflow:hidden;transition:border-color .2s}
-        .mode-card.active{border-color:var(--green-border)}
-        .mode-card.active::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--green)}
-        .mode-card.inactive{opacity:.5}
-        .mode-card-name{font-family:'Space Grotesk',sans-serif;font-size:11px;font-weight:800;color:#fff;margin-bottom:3px}
-        .mode-card-strats{font-size:9px;color:var(--muted);margin-bottom:6px}
-        .mode-card-row{display:flex;justify-content:space-between;font-size:9px;margin-bottom:2px}
-        .mode-card-row .mk{color:var(--dim)}.mode-card-row .mv{color:var(--text);font-weight:600}
-        .prob-bar-wrap{background:var(--bg);border-radius:2px;height:3px;margin-top:5px}
-        .prob-bar{height:100%;border-radius:2px;transition:width .4s,background .3s}
-        .ib-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px}
-        .ib-cell{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:9px 12px;text-align:center}
-        .ib-cell-lbl{font-size:8px;color:var(--dim);letter-spacing:.5px;text-transform:uppercase;margin-bottom:4px}
-        .ib-cell-val{font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:800;color:#fff}
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', sans-serif; font-size: 13px; }
+        .header { background: var(--card); border-bottom: 1px solid var(--border); padding: 10px 20px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 100; }
+        .header h1 { font-size: 16px; font-weight: 700; color: var(--blue); }
+        .badge { padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+        .badge-green { background: #1a4220; color: var(--green); }
+        .badge-red { background: #3d1a1a; color: var(--red); }
+        .badge-yellow { background: #3d2e00; color: var(--yellow); }
+        .badge-blue { background: #0d2544; color: var(--blue); }
+        .badge-purple { background: #2a1a3e; color: var(--purple); }
+        .badge-gold { background: #3d2e00; color: var(--gold); }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 12px; }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px; }
+        .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; padding: 12px; }
+        .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+        .card-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+        .stat { font-size: 22px; font-weight: 700; }
+        .stat-green { color: var(--green); }
+        .stat-red { color: var(--red); }
+        .stat-blue { color: var(--blue); }
+        .stat-yellow { color: var(--yellow); }
+        .stat-gold { color: var(--gold); }
+        .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th { color: var(--muted); font-weight: 600; text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 11px; }
+        td { padding: 7px 8px; border-bottom: 1px solid #1c2129; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background: #1c2129; }
+        .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 10px; font-weight: 600; }
+        .pill-green { background: #1a4220; color: var(--green); }
+        .pill-red { background: #3d1a1a; color: var(--red); }
+        .pill-yellow { background: #3d2e00; color: var(--yellow); }
+        .pill-blue { background: #0d2544; color: var(--blue); }
+        .pill-purple { background: #2a1a3e; color: var(--purple); }
+        .pill-gold { background: #3d2e00; color: var(--gold); }
+        .pill-grey { background: #21262d; color: var(--muted); }
+        .tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--card); }
+        .tab { padding: 10px 16px; cursor: pointer; font-size: 13px; color: var(--muted); border-bottom: 2px solid transparent; transition: 0.2s; }
+        .tab:hover { color: var(--text); }
+        .tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .gate-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid #1c2129; }
+        .gate-row:last-child { border-bottom: none; }
+        .gate-num { width: 24px; height: 24px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; }
+        .gate-pass { background: #1a4220; color: var(--green); }
+        .gate-fail { background: #3d1a1a; color: var(--red); }
+        .gate-wait { background: #21262d; color: var(--muted); }
+        .phase-bar { height: 6px; border-radius: 3px; background: #21262d; overflow: hidden; margin-top: 6px; }
+        .phase-fill { height: 100%; border-radius: 3px; transition: width 0.5s; }
+        .mode-card { padding: 10px; border-radius: 6px; margin-bottom: 8px; cursor: pointer; border: 1px solid transparent; }
+        .mode-card.active { border-color: var(--blue); background: #0d2544; }
+        .mode-card:hover { background: #1c2129; }
+        .sector-bar { height: 4px; border-radius: 2px; background: #21262d; overflow: hidden; margin-top: 4px; }
+        .sector-fill { height: 100%; border-radius: 2px; }
+        .pnl-positive { color: var(--green); }
+        .pnl-negative { color: var(--red); }
+        .pnl-zero { color: var(--muted); }
+        .ws-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+        .ws-on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+        .ws-off { background: var(--red); box-shadow: 0 0 6px var(--red); }
+        .latency-ok { color: var(--green); }
+        .latency-warn { color: var(--yellow); }
+        .latency-bad { color: var(--red); }
+        .refresh-time { font-size: 11px; color: var(--muted); margin-left: auto; }
+        .stale-banner { background: #3d1a1a; border: 1px solid var(--red); color: var(--red); padding: 8px 16px; text-align: center; font-weight: 700; display: none; }
+        .info-row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid #1c2129; font-size: 12px; }
+        .info-row:last-child { border-bottom: none; }
+        .info-label { color: var(--muted); }
+        .info-val { font-weight: 600; }
+        .rank-badge { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; flex-shrink: 0; }
+        .rank-1 { background: var(--gold); color: #000; }
+        .rank-2 { background: var(--muted); color: #000; }
+        .rank-3 { background: #cd7f32; color: #000; }
+        .rank-n { background: #21262d; color: var(--muted); }
+        .phase-chip { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; }
+        .phase-early { background: #3d2e00; color: var(--gold); }
+        .phase-confirmed { background: #0d2544; color: var(--blue); }
+        .phase-pre { background: #21262d; color: var(--muted); }
+        .phase-closed { background: #21262d; color: var(--muted); }
+        .btn { padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border); background: #21262d; color: var(--text); cursor: pointer; font-size: 12px; }
+        .btn:hover { background: #2d333b; }
+        .btn-danger { border-color: var(--red); color: var(--red); }
+        .btn-danger:hover { background: #3d1a1a; }
+        #loading { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 999; font-size: 18px; color: var(--blue); }
     </style>
 </head>
 <body>
 
-<div id="session-banner" onclick="window.location.href='/login?session=expired'">
-    ⏱ Session expired — click to re-login
+<div id="loading">⚡ Loading Trading Dashboard...</div>
+
+<div id="stale-banner" class="stale-banner">
+    ⚠️ DATA STALE — Candle lag detected. All trades BLOCKED until data recovers.
 </div>
 
 <!-- HEADER -->
-<header>
-    <div class="logo"><span class="logo-spark">⚡</span>TRADING<span style="color:var(--green)">PLATFORM</span></div>
-    <div class="header-pills">
-        <div class="pill pill-dim" id="ws-pill"><div class="dot pulse"></div>WS</div>
-        <div class="pill pill-dim" id="cb-pill">CB</div>
-        <div class="pill pill-dim" id="dir-pill">—</div>
-        <div class="pill pill-dim" id="vix-pill">VIX —</div>
-        <div class="pill pill-warn" id="mode-pill">MODE —</div>
-        <span class="time-badge" id="clock">—</span>
-        <button class="logout-btn" onclick="doLogout()">LOGOUT</button>
-    </div>
-</header>
+<div class="header">
+    <h1>⚡ Trading Dashboard v7.0</h1>
+    <span id="h-mode" class="badge badge-blue">PAPER</span>
+    <span id="h-phase" class="phase-chip phase-pre">PRE_OPEN</span>
+    <span id="h-market" class="badge badge-yellow">SIDEWAYS</span>
+    <span id="h-mode-type" class="badge badge-blue">NORMAL_DAY</span>
+    <span class="ws-dot ws-off" id="ws-dot"></span>
+    <span id="ws-label" style="font-size:11px;color:var(--muted)">WS: OFF</span>
+    <span id="h-latency" style="font-size:11px"></span>
+    <span class="refresh-time" id="refresh-time">—</span>
+    <button class="btn" onclick="loadData()">↻ Refresh</button>
+</div>
 
 <!-- TABS -->
-<nav>
-    <div class="tab active" onclick="showTab('overview',this)">Overview</div>
-    <div class="tab" onclick="showTab('scanner',this)">Scanner</div>
-    <div class="tab" onclick="showTab('trades',this)">Trades</div>
-    <div class="tab" onclick="showTab('strategy',this)">Strategy</div>
-    <div class="tab" onclick="showTab('sectors',this)">Sectors</div>
-    <div class="tab" onclick="showTab('backtest',this)">Backtest</div>
-    <div class="tab" onclick="showTab('risk',this)">Risk</div>
-    <div class="tab" onclick="showTab('paper',this)">📄 Paper</div>
-    <div class="tab" onclick="showTab('validation',this)">🔍 Debug</div>
-</nav>
+<div class="tabs">
+    <div class="tab active" onclick="switchTab('overview')">Overview</div>
+    <div class="tab" onclick="switchTab('trades')">Trades</div>
+    <div class="tab" onclick="switchTab('scanner')">Scanner</div>
+    <div class="tab" onclick="switchTab('strategies')">Strategies</div>
+    <div class="tab" onclick="switchTab('sectors')">Sectors</div>
+    <div class="tab" onclick="switchTab('risk')">Risk</div>
+    <div class="tab" onclick="switchTab('validation')">Validation</div>
+</div>
 
-<!-- ═══════ OVERVIEW ═══════ -->
-<div id="page-overview" class="page active">
-    <div class="stat-row">
-        <div class="stat accent"><div class="stat-label">Market</div><div class="stat-val" id="ov-regime">—</div><div class="stat-sub" id="ov-regime-sub">Waiting</div></div>
-        <div class="stat"><div class="stat-label">Today P&amp;L</div><div class="stat-val g" id="ov-pnl">₹0</div><div class="stat-sub" id="ov-pnl-pct">+0.00%</div></div>
-        <div class="stat"><div class="stat-label">Open Trades</div><div class="stat-val g" id="ov-open">0</div><div class="stat-sub" id="ov-open-sub">No positions</div></div>
-        <div class="stat"><div class="stat-label">Armed</div><div class="stat-val w" id="ov-armed">0</div><div class="stat-sub">Ready to breakout</div></div>
-        <div class="stat"><div class="stat-label">VIX</div><div class="stat-val" id="ov-vix">—</div><div class="stat-sub" id="ov-vix-regime">—</div></div>
-        <div class="stat"><div class="stat-label">Window</div><div class="stat-val" id="ov-window" style="font-size:13px;padding-top:3px">—</div><div class="stat-sub" id="ov-entry">—</div></div>
-    </div>
-    <!-- Market Mode Panel -->
-    <div class="card">
-        <div class="card-title">Market Mode Engine
-            <span id="gates-badge" class="badge WAIT">—</span>
-        </div>
-        <!-- IB stats -->
-        <div class="ib-grid">
-            <div class="ib-cell"><div class="ib-cell-lbl">IB High</div><div class="ib-cell-val" id="ib-high">—</div></div>
-            <div class="ib-cell"><div class="ib-cell-lbl">IB Range %</div><div class="ib-cell-val w" id="ib-range">—</div></div>
-            <div class="ib-cell"><div class="ib-cell-lbl">IB Low</div><div class="ib-cell-val" id="ib-low">—</div></div>
-        </div>
-        <!-- 6 mode cards -->
-        <div class="mode-grid">
-            <div class="mode-card" id="mc-TREND_DAY">
-                <div class="mode-card-name">&#128200; TREND DAY</div>
-                <div class="mode-card-strats">ORB &middot; 7-Gate &middot; AutoMode &middot; Pullback &middot; RangeBreak</div>
-                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">1.0%</span></div>
-                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">65</span></div>
-                <div class="mode-card-row"><span class="mk">IB</span><span class="mv">&gt;0.8% + RVOL&gt;2</span></div>
-            </div>
-            <div class="mode-card" id="mc-NORMAL_VARIATION">
-                <div class="mode-card-name">&#128200; NORMAL VARIATION</div>
-                <div class="mode-card-strats">AutoMode &middot; Pullback &middot; RangeBreak</div>
-                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">0.75%</span></div>
-                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">65</span></div>
-                <div class="mode-card-row"><span class="mk">Rule</span><span class="mv">HH/HL required</span></div>
-            </div>
-            <div class="mode-card" id="mc-DOUBLE_DISTRIBUTION">
-                <div class="mode-card-name">&#128260; DOUBLE DISTRIBUTION</div>
-                <div class="mode-card-strats">AutoMode &middot; ORB &middot; Pullback &middot; RangeBreak</div>
-                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">0.75%</span></div>
-                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">65</span></div>
-                <div class="mode-card-row"><span class="mk">Rule</span><span class="mv">PM + Afternoon</span></div>
-            </div>
-            <div class="mode-card" id="mc-NORMAL_DAY">
-                <div class="mode-card-name">&#9135; NORMAL DAY</div>
-                <div class="mode-card-strats">Pullback &middot; RangeBreakout</div>
-                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">0.5%</span></div>
-                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">60</span></div>
-                <div class="mode-card-row"><span class="mk">Rule</span><span class="mv">Range edges only</span></div>
-            </div>
-            <div class="mode-card" id="mc-NEUTRAL_DAY">
-                <div class="mode-card-name">&#9867; NEUTRAL DAY</div>
-                <div class="mode-card-strats">VAP Pullback only</div>
-                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">0.5%</span></div>
-                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">70</span></div>
-                <div class="mode-card-row"><span class="mk">Rule</span><span class="mv">VAH/VAL only</span></div>
-            </div>
-            <div class="mode-card" id="mc-NON_TREND_DAY">
-                <div class="mode-card-name">&#128683; NON-TREND DAY</div>
-                <div class="mode-card-strats">NO TRADES</div>
-                <div class="mode-card-row"><span class="mk">Risk</span><span class="mv">0%</span></div>
-                <div class="mode-card-row"><span class="mk">Min Prob</span><span class="mv">&#8734;</span></div>
-                <div class="mode-card-row"><span class="mk">IB</span><span class="mv">&lt;0.4%</span></div>
-            </div>
-        </div>
-        <!-- Rationale -->
-        <div style="font-size:10px;color:var(--muted);padding:6px 0;border-top:1px solid var(--border);margin-top:4px" id="mode-rationale">Waiting for 9:15 IST…</div>
-    </div>
-    <!-- 7-Gate status (collapsed below) -->
-    <div class="card">
-        <div class="card-title">7-Gate Scanner Status <span id="gate7-badge" class="badge WAIT">0/7</span></div>
-        <div class="gate-row">
-            <div class="gate" id="g1"><div class="gate-n">Gate 1</div><div class="gate-name">Market Direction</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
-            <div class="gate" id="g2"><div class="gate-n">Gate 2</div><div class="gate-name">Sector Alignment</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
-            <div class="gate" id="g3"><div class="gate-n">Gate 3</div><div class="gate-name">Compression</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
-            <div class="gate" id="g4"><div class="gate-n">Gate 4</div><div class="gate-name">Breakout Tick</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
-            <div class="gate" id="g5"><div class="gate-n">Gate 5</div><div class="gate-name">Key Level</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
-            <div class="gate" id="g6"><div class="gate-n">Gate 6</div><div class="gate-name">Liquidity</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
-            <div class="gate" id="g7"><div class="gate-n">Gate 7</div><div class="gate-name">Risk / RR</div><div class="gate-st WAIT">&#9203; WAIT</div></div>
-        </div>
-    </div>
-    <div class="two-col">
+<!-- ═══════════════════════════════ OVERVIEW ═══════════════════════════════ -->
+<div id="tab-overview" class="tab-content active">
+    <div class="grid" style="grid-template-columns: repeat(4,1fr)">
         <div class="card">
-            <div class="card-title">Circuit Breaker</div>
-            <div class="cb-status-bar ok" id="cb-bar">
-                <span><b id="cb-status-txt">ACTIVE</b></span>
-                <span class="mu" id="cb-trades-txt">0/4 trades</span>
-            </div>
-            <div class="cb-row"><span>Trades today</span><span id="cb-trades">0/4</span></div>
-            <div class="cb-row"><span>Daily loss</span><span id="cb-daily-pct" class="mu">0.00%</span></div>
-            <div class="bar-wrap"><div class="bar-fill" id="cb-fill" style="width:0%"></div></div>
-            <div style="margin-top:10px"><button class="reset-btn" onclick="resetCB()">⚠ Emergency Reset</button></div>
+            <div class="card-title">Daily P&L</div>
+            <div class="stat" id="daily-pnl">—</div>
+            <div class="sub" id="daily-pct">—</div>
         </div>
         <div class="card">
-            <div class="card-title">P&amp;L Summary</div>
-            <div class="cb-row"><span>Capital</span><span class="wh" id="pnl-cap">₹1,00,000</span></div>
-            <div class="cb-row"><span>Today</span><span id="pnl-today" class="g">₹0</span></div>
-            <div class="cb-row"><span>This week</span><span id="pnl-week" class="g">₹0</span></div>
-            <div class="cb-row"><span>This month</span><span id="pnl-month" class="g">₹0</span></div>
-            <div class="cb-row"><span>Nifty EMA</span><span id="ov-emas" class="mu">—</span></div>
-        </div>
-    </div>
-    <div class="card">
-        <div class="card-title">Active Trades <span id="at-count" class="badge WAIT">0</span></div>
-        <div class="tbl-wrap">
-            <table><thead><tr>
-                <th>Symbol</th><th>Dir</th><th>Strategy</th>
-                <th class="num">Entry</th><th class="num">LTP</th>
-                <th class="num">SL</th><th class="num">Target</th>
-                <th class="num">P&amp;L</th><th class="num">R-Mult</th>
-                <th>Phase</th><th class="num">Qty</th>
-            </tr></thead><tbody id="at-body"><tr><td colspan="11" class="empty">No active trades</td></tr></tbody></table>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════ SCANNER ═══════ -->
-<div id="page-scanner" class="page">
-    <div class="two-col">
-        <div class="card">
-            <div class="card-title">Armed Stocks <span id="armed-count" class="badge WAIT">0</span></div>
-            <div id="armed-list"><div class="empty">No armed stocks</div></div>
-        </div>
-        <div class="card">
-            <div class="card-title">Gate Rejections Today</div>
-            <div class="tbl-wrap">
-                <table><thead><tr><th>Gate</th><th class="num">Count</th></tr></thead>
-                    <tbody id="rej-body"><tr><td colspan="2" class="empty">No data</td></tr></tbody></table>
-            </div>
-        </div>
-    </div>
-    <div class="card">
-        <div class="card-title">Today's Signals</div>
-        <div class="tbl-wrap">
-            <table><thead><tr>
-                <th>Symbol</th><th>Dir</th><th>Strategy</th>
-                <th class="num">Entry</th><th class="num">Exit</th>
-                <th class="num">SL</th><th class="num">Target</th>
-                <th>Status</th><th>Exit Reason</th><th class="num">P&amp;L</th>
-            </tr></thead><tbody id="sig-body"><tr><td colspan="10" class="empty">No trades today</td></tr></tbody></table>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════ TRADES ═══════ -->
-<div id="page-trades" class="page">
-    <div class="card">
-        <div class="card-title">All Trades Today</div>
-        <div class="tbl-wrap">
-            <table><thead><tr>
-                <th>Time</th><th>Symbol</th><th>Dir</th><th>Strategy</th>
-                <th class="num">Entry</th><th class="num">Exit</th>
-                <th class="num">Qty</th><th class="num">SL</th><th class="num">Target</th>
-                <th>Status</th><th>Reason</th><th class="num">P&amp;L</th><th class="num">Score</th>
-            </tr></thead><tbody id="trades-body"><tr><td colspan="13" class="empty">No trades today</td></tr></tbody></table>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════ STRATEGY ═══════ -->
-<div id="page-strategy" class="page">
-    <div class="strat-grid" style="grid-template-columns:repeat(5,1fr)">
-        <div class="strat-card" id="sc-AUTO_MODE">
-            <div class="strat-name">AutoMode</div>
-            <div class="strat-type">Trend &middot; Reversal &middot; Range</div>
-            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-AUTO_MODE">0</span></div>
-            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-AUTO_MODE">&#8377;0</span></div>
-            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-AUTO_MODE">0</span></div>
-            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-AUTO_MODE">&#8212;</span></div>
-        </div>
-        <div class="strat-card" id="sc-ORB_VWAP_SECTOR">
-            <div class="strat-name">ORB Strategy</div>
-            <div class="strat-type">ORB + VWAP + Sector (9:30&#8211;12:30)</div>
-            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-ORB_VWAP_SECTOR">0</span></div>
-            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-ORB_VWAP_SECTOR">&#8377;0</span></div>
-            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-ORB_VWAP_SECTOR">0</span></div>
-            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-ORB_VWAP_SECTOR">&#8212;</span></div>
-        </div>
-        <div class="strat-card" id="sc-VAP_PULLBACK">
-            <div class="strat-name">Pullback Detection</div>
-            <div class="strat-type">POC / VWAP pullback setup</div>
-            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-VAP_PULLBACK">0</span></div>
-            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-VAP_PULLBACK">&#8377;0</span></div>
-            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-VAP_PULLBACK">0</span></div>
-            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-VAP_PULLBACK">&#8212;</span></div>
-        </div>
-        <div class="strat-card" id="sc-RANGE_BREAKOUT_3TOUCH">
-            <div class="strat-name">Range Breakout</div>
-            <div class="strat-type">3-touch support / resistance</div>
-            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-RANGE_BREAKOUT_3TOUCH">0</span></div>
-            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-RANGE_BREAKOUT_3TOUCH">&#8377;0</span></div>
-            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-RANGE_BREAKOUT_3TOUCH">0</span></div>
-            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-RANGE_BREAKOUT_3TOUCH">&#8212;</span></div>
-        </div>
-        <div class="strat-card" id="sc-SCANNER_7GATE">
-            <div class="strat-name">7-Gate Scanner</div>
-            <div class="strat-type">BB Compression + 7-Gate breakout</div>
-            <div class="strat-row"><span>Signals</span><span class="val g" id="sc-sig-SCANNER_7GATE">0</span></div>
-            <div class="strat-row"><span>Today P&amp;L</span><span class="val" id="sc-pnl-SCANNER_7GATE">&#8377;0</span></div>
-            <div class="strat-row"><span>Trades</span><span class="val" id="sc-trades-SCANNER_7GATE">0</span></div>
-            <div class="strat-row"><span>Win Rate</span><span class="val" id="sc-wr-SCANNER_7GATE">&#8212;</span></div>
-        </div>
-    </div>
-    <div class="card">
-        <div class="card-title">Signals Fired Today</div>
-        <div class="tbl-wrap">
-            <table><thead><tr><th>Symbol</th><th>Strategy</th></tr></thead>
-                <tbody id="fired-body"><tr><td colspan="2" class="empty">No signals yet</td></tr></tbody></table>
-        </div>
-    </div>
-    <div class="card">
-        <div class="card-title">Strategy Performance Today</div>
-        <table><thead><tr>
-            <th>Strategy</th><th class="num">Trades</th><th class="num">Wins</th>
-            <th class="num">Losses</th><th class="num">Win %</th><th class="num">P&amp;L</th>
-        </tr></thead><tbody id="strat-perf-body"><tr><td colspan="6" class="empty">No trades today</td></tr></tbody></table>
-    </div>
-</div>
-
-<!-- ═══════ SECTORS ═══════ -->
-<div id="page-sectors" class="page">
-    <div class="card">
-        <div class="card-title">Sector Strength (Live)</div>
-        <div class="tbl-wrap">
-            <table><thead><tr>
-                <th>Sector</th><th>Status</th><th class="num">Chg%</th>
-                <th class="num">RS</th><th class="num">Green%</th>
-                <th class="num">Total</th><th class="num">↑</th><th class="num">↓</th>
-            </tr></thead><tbody id="sectors-body"><tr><td colspan="8" class="empty">Loading...</td></tr></tbody></table>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════ BACKTEST ═══════ -->
-<div id="page-backtest" class="page">
-    <div class="card" style="margin-bottom:12px">
-        <div class="card-title">Strategy Backtest — Nifty500 Stocks (Real Zerodha Data)</div>
-        <div class="bt-form">
-            <div class="bt-field"><label>Start Date</label><input type="date" id="bt-start"/></div>
-            <div class="bt-field"><label>End Date</label><input type="date" id="bt-end"/></div>
-            <div class="bt-field"><label>Capital (₹)</label><input type="number" id="bt-capital" value="100000" min="10000"/></div>
-            <div class="bt-field">
-                <label>Strategy</label>
-                <select id="bt-strategies">
-                    <option value="ALL">All 5 Strategies</option>
-                    <option value="AUTO_MODE">AutoMode</option>
-                    <option value="ORB_VWAP_SECTOR">ORB Strategy</option>
-                    <option value="VAP_PULLBACK">Pullback Detection</option>
-                    <option value="RANGE_BREAKOUT_3TOUCH">Range Breakout</option>
-                    <option value="SCANNER_7GATE">7-Gate Scanner</option>
-                </select>
-            </div>
-            <button class="bt-run" id="bt-btn" onclick="runBacktest()">▶ RUN</button>
-        </div>
-        <div style="font-size:9px;color:var(--dim)">
-            Real candle data from Zerodha · 1% risk per trade · Runs in background · All 5 strategies supported
-        </div>
-    </div>
-    <div class="card" id="bt-progress-card" style="display:none;margin-bottom:12px">
-        <div class="card-title">Running <span id="bt-job-id" style="font-size:9px;font-weight:400;color:var(--muted)"></span></div>
-        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
-            <span id="bt-prog-label" style="font-size:10px;color:var(--muted)">Processing...</span>
-            <span id="bt-pct" style="font-size:12px;color:var(--green);font-weight:700">0%</span>
-        </div>
-        <div class="prog-wrap"><div class="prog-fill" id="bt-prog-fill"></div></div>
-        <div class="prog-stats">
-            <div class="prog-stat"><div class="prog-stat-label">Processed</div><div class="prog-stat-val" id="bt-processed">0</div></div>
-            <div class="prog-stat"><div class="prog-stat-label">Total</div><div class="prog-stat-val" id="bt-total-sym">—</div></div>
-            <div class="prog-stat"><div class="prog-stat-label">Elapsed</div><div class="prog-stat-val" id="bt-elapsed">0s</div></div>
-            <div class="prog-stat"><div class="prog-stat-label">ETA</div><div class="prog-stat-val w" id="bt-eta">—</div></div>
-        </div>
-        <div style="font-size:10px;color:var(--muted);margin-top:6px">
-            Current: <span id="bt-cur-sym" class="wh">—</span>
-            <span style="margin-left:14px;color:var(--dim)">You can close this tab — backtest continues on server</span>
-        </div>
-        <div style="margin-top:8px"><button class="reset-btn" onclick="btCancelPoll()">✕ Stop Polling</button></div>
-    </div>
-    <div class="bt-sum" id="bt-summary" style="display:none">
-        <div class="bt-stat"><div class="bt-stat-label">Total Trades</div><div class="bt-stat-val" id="bt-total-trades">—</div></div>
-        <div class="bt-stat"><div class="bt-stat-label">Win Rate</div><div class="bt-stat-val g" id="bt-wr">—</div></div>
-        <div class="bt-stat"><div class="bt-stat-label">Net P&amp;L</div><div class="bt-stat-val" id="bt-pnl">—</div></div>
-        <div class="bt-stat"><div class="bt-stat-label">Profit Factor</div><div class="bt-stat-val" id="bt-pf">—</div></div>
-        <div class="bt-stat"><div class="bt-stat-label">Max Drawdown</div><div class="bt-stat-val r" id="bt-mdd">—</div></div>
-    </div>
-    <div class="bt-strat-grid" id="bt-strat-sum" style="display:none;grid-template-columns:repeat(5,1fr)">
-        <div class="bt-strat-card"><div class="bt-strat-title">AutoMode</div><div class="bt-strat-desc">Trend &middot; Reversal &middot; Range</div>
-            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-AUTO_MODE">&#8212;</span></div>
-            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-AUTO_MODE">&#8212;</span></div>
-            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-AUTO_MODE">&#8212;</span></div>
-        </div>
-        <div class="bt-strat-card"><div class="bt-strat-title">ORB Strategy</div><div class="bt-strat-desc">ORB + VWAP + Sector 9:30&#8211;12:30</div>
-            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-ORB_VWAP_SECTOR">&#8212;</span></div>
-            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-ORB_VWAP_SECTOR">&#8212;</span></div>
-            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-ORB_VWAP_SECTOR">&#8212;</span></div>
-        </div>
-        <div class="bt-strat-card"><div class="bt-strat-title">Pullback Detection</div><div class="bt-strat-desc">POC / VWAP pullback setup</div>
-            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-VAP_PULLBACK">&#8212;</span></div>
-            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-VAP_PULLBACK">&#8212;</span></div>
-            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-VAP_PULLBACK">&#8212;</span></div>
-        </div>
-        <div class="bt-strat-card"><div class="bt-strat-title">Range Breakout</div><div class="bt-strat-desc">3-touch support / resistance</div>
-            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-RANGE_BREAKOUT_3TOUCH">&#8212;</span></div>
-            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-RANGE_BREAKOUT_3TOUCH">&#8212;</span></div>
-            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-RANGE_BREAKOUT_3TOUCH">&#8212;</span></div>
-        </div>
-        <div class="bt-strat-card"><div class="bt-strat-title">7-Gate Scanner</div><div class="bt-strat-desc">BB compression + 7-gate breakout</div>
-            <div class="bt-strat-row"><span>Trades</span><span id="bts-t-SCANNER_7GATE">&#8212;</span></div>
-            <div class="bt-strat-row"><span>Win Rate</span><span class="g" id="bts-wr-SCANNER_7GATE">&#8212;</span></div>
-            <div class="bt-strat-row"><span>P&amp;L</span><span id="bts-pnl-SCANNER_7GATE">&#8212;</span></div>
-        </div>
-    </div>
-    <div class="card" id="bt-stocks-card" style="display:none">
-        <div class="card-title">Per-Stock Results <span id="bt-stock-count" style="font-size:9px;font-weight:400;color:var(--muted)"></span></div>
-        <div class="tbl-wrap">
-            <table><thead><tr>
-                <th>#</th><th>Symbol</th><th>Sector</th>
-                <th class="num">Trades</th><th class="num">Wins</th><th class="num">Losses</th>
-                <th class="num">Win%</th><th class="num">Net P&amp;L</th>
-                <th class="num">Avg Win</th><th class="num">Avg Loss</th>
-                <th class="num">PF</th><th class="num">Best</th><th class="num">Worst</th>
-                <th>By Strategy</th>
-            </tr></thead><tbody id="bt-stocks-body"><tr><td colspan="14" class="empty">Run backtest to see results</td></tr></tbody></table>
-        </div>
-    </div>
-</div>
-
-<!-- ═══════ RISK ═══════ -->
-<div id="page-risk" class="page">
-    <div class="three-col">
-        <div class="card">
-            <div class="card-title">Circuit Breaker</div>
-            <div class="cb-row"><span>Trades today</span><span id="r-trades">0/4</span></div>
-            <div class="cb-row"><span>Daily P&amp;L</span><span id="r-daily" class="g">₹0</span></div>
-            <div class="cb-row"><span>Weekly P&amp;L</span><span id="r-weekly" class="g">₹0</span></div>
-            <div class="cb-row"><span>Monthly P&amp;L</span><span id="r-monthly" class="g">₹0</span></div>
-            <div class="cb-row"><span>Status</span><span id="r-cb-st">—</span></div>
-            <div style="margin-top:10px"><button class="reset-btn" onclick="resetCB()">⚠ Emergency Reset</button></div>
+            <div class="card-title">Trades Today</div>
+            <div class="stat stat-blue" id="trades-today">—</div>
+            <div class="sub" id="cb-reason">—</div>
         </div>
         <div class="card">
             <div class="card-title">India VIX</div>
-            <div class="cb-row"><span>Current VIX</span><span id="r-vix">—</span></div>
-            <div class="cb-row"><span>Regime</span><span id="r-vix-regime">—</span></div>
-            <div class="cb-row"><span>Trades Allowed</span><span id="r-vix-ok">—</span></div>
-            <div class="cb-row"><span>Position Size</span><span id="r-pos-size">—</span></div>
+            <div class="stat" id="vix-val">—</div>
+            <div class="sub" id="vix-regime">—</div>
         </div>
         <div class="card">
-            <div class="card-title">Market Direction (Nifty 15min)</div>
-            <div class="cb-row"><span>Direction</span><span id="r-dir">—</span></div>
-            <div class="cb-row"><span>EMA20</span><span id="r-ema20" class="mu">—</span></div>
-            <div class="cb-row"><span>EMA50</span><span id="r-ema50" class="mu">—</span></div>
-            <div class="cb-row"><span>EMA200</span><span id="r-ema200" class="mu">—</span></div>
-            <div class="cb-row"><span>ATR%</span><span id="r-atr" class="mu">—</span></div>
-            <div class="cb-row"><span>Fail Reason</span><span id="r-fail" class="mu" style="font-size:10px">—</span></div>
+            <div class="card-title">Latency</div>
+            <div class="stat" id="latency-stat">—</div>
+            <div class="sub" id="latency-status">—</div>
+        </div>
+    </div>
+
+    <div class="grid-2">
+        <!-- Market Phase -->
+        <div class="card">
+            <div class="card-title">🎯 Market Phase (v7.0)</div>
+            <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px">
+                <div id="phase-chip-big" class="phase-chip phase-pre" style="font-size:14px;padding:5px 14px">PRE_OPEN</div>
+                <div style="flex:1">
+                    <div id="phase-desc" style="font-size:11px;color:var(--muted)">—</div>
+                    <div style="margin-top:4px">
+                        <span id="orb-allowed" class="pill pill-grey">ORB: —</span>
+                        <span id="threshold-chip" class="pill pill-blue" style="margin-left:4px">Threshold: —</span>
+                    </div>
+                </div>
+            </div>
+            <div class="phase-bar"><div id="phase-progress" class="phase-fill" style="width:0%;background:var(--blue)"></div></div>
+        </div>
+
+        <!-- Market Mode -->
+        <div class="card">
+            <div class="card-title">📊 Market Mode</div>
+            <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+                <div id="mode-chip-big" class="badge badge-blue" style="font-size:14px;padding:5px 12px">—</div>
+                <div>
+                    <div id="mode-rationale" style="font-size:11px;color:var(--muted)">—</div>
+                    <div style="margin-top:4px;font-size:11px">
+                        IB: <span id="ib-range" class="stat-blue">—%</span>
+                        &nbsp;|&nbsp; RVOL: <span id="nifty-rvol">—</span>×
+                    </div>
+                </div>
+            </div>
+            <div class="info-row"><span class="info-label">IB High/Low</span><span class="info-val" id="ib-hl">—</span></div>
+            <div class="info-row"><span class="info-label">Active Strategies</span><span class="info-val" id="active-strats" style="font-size:10px">—</span></div>
+            <div class="info-row"><span class="info-label">Min Probability</span><span class="info-val" id="min-prob">—</span></div>
+        </div>
+    </div>
+
+    <div class="grid" style="grid-template-columns: repeat(4,1fr)">
+        <!-- Market Direction -->
+        <div class="card">
+            <div class="card-title">🧭 Market Direction</div>
+            <div class="stat" id="dir-label">—</div>
+            <div class="sub">EMA20: <span id="ema20">—</span></div>
+            <div class="sub">EMA50: <span id="ema50">—</span></div>
+            <div class="sub">EMA200: <span id="ema200">—</span></div>
+            <div class="sub" id="dir-fail" style="color:var(--red)"></div>
+        </div>
+
+        <!-- BankNifty Mode -->
+        <div class="card">
+            <div class="card-title">🏦 BankNifty Mode</div>
+            <div class="stat stat-blue" id="bnf-mode">—</div>
+            <div class="sub">IB: <span id="bnf-ib">—</span></div>
+            <div class="sub">MinProb: <span id="bnf-prob">—</span></div>
+            <div class="sub" id="bnf-strats" style="font-size:10px">—</div>
+        </div>
+
+        <!-- Circuit Breaker -->
+        <div class="card">
+            <div class="card-title">⚡ Circuit Breaker</div>
+            <div id="cb-status" class="stat stat-green">OK</div>
+            <div class="sub">Daily: <span id="cb-daily-pct">—</span></div>
+            <div class="sub">Weekly: <span id="weekly-pnl">—</span></div>
+            <div class="sub">Monthly: <span id="monthly-pnl">—</span></div>
+        </div>
+
+        <!-- Risk Slots -->
+        <div class="card">
+            <div class="card-title">🎰 10-2-3 Slots</div>
+            <div style="display:flex;gap:6px;margin-bottom:8px" id="phase1-dots"></div>
+            <div class="info-row"><span class="info-label">Phase-1 Used</span><span class="info-val" id="p1-count">—</span></div>
+            <div class="info-row"><span class="info-label">Any at Breakeven</span><span class="info-val" id="any-be">—</span></div>
+            <div class="sub" id="sector-exp" style="margin-top:6px;font-size:11px"></div>
         </div>
     </div>
 </div>
-<!-- ═══════ PAPER TRADING ═══════ -->
-<!-- FIX: This div is now a SIBLING of page-risk (not nested inside it).
-     Old code had it nested inside page-risk, causing it to be hidden
-     whenever page-risk got display:none from the tab switcher. -->
-<div id="page-paper" class="page">
-    <div id="paper-banner" style="display:none;padding:10px 16px;border-radius:6px;
-     margin-bottom:14px;font-size:11px;font-weight:700;letter-spacing:.3px;text-align:center"></div>
-    <div class="stat-row" style="grid-template-columns:repeat(6,1fr)">
-        <div class="stat accent">
-            <div class="stat-label">Virtual Capital</div>
-            <div class="stat-val" id="pt-capital">₹—</div>
-            <div class="stat-sub" id="pt-total-ret">+0.00%</div>
+
+<!-- ═══════════════════════════════ TRADES ═══════════════════════════════ -->
+<div id="tab-trades" class="tab-content">
+    <div class="grid-2">
+        <div class="card">
+            <div class="card-title">📈 Active Paper Trades</div>
+            <div id="paper-trades-empty" style="color:var(--muted);font-size:12px;padding:10px 0">No active paper trades</div>
+            <table id="paper-trades-table" style="display:none">
+                <thead>
+                <tr><th>Symbol</th><th>Dir</th><th>Qty</th><th>Entry</th><th>LTP</th><th>SL</th><th>PnL</th><th>R</th><th>Phase</th></tr>
+                </thead>
+                <tbody id="paper-trades-body"></tbody>
+            </table>
         </div>
-        <div class="stat">
-            <div class="stat-label">Today P&amp;L</div>
-            <div class="stat-val g" id="pt-daily-pnl">₹0</div>
-            <div class="stat-sub" id="pt-daily-pct">+0.00%</div>
-        </div>
-        <div class="stat">
-            <div class="stat-label">Today Trades</div>
-            <div class="stat-val" id="pt-daily-trades">0</div>
-            <div class="stat-sub" id="pt-daily-wr">—</div>
-        </div>
-        <div class="stat">
-            <div class="stat-label">Total P&amp;L</div>
-            <div class="stat-val" id="pt-total-pnl">₹0</div>
-            <div class="stat-sub" id="pt-total-wr">—</div>
-        </div>
-        <div class="stat">
-            <div class="stat-label">Profit Factor</div>
-            <div class="stat-val" id="pt-pf">—</div>
-            <div class="stat-sub" id="pt-total-cnt">0 trades</div>
-        </div>
-        <div class="stat">
-            <div class="stat-label">Max Drawdown</div>
-            <div class="stat-val r" id="pt-mdd">0%</div>
-            <div class="stat-sub" id="pt-mdd-rs">₹0</div>
-        </div>
-    </div>
-    <div class="card">
-        <div class="card-title">
-            Active Positions
-            <span style="display:flex;align-items:center;gap:8px">
-            <span id="pt-open-count" class="badge WAIT">0</span>
-            <button class="reset-btn" onclick="resetPaperAccount()">⚠ Reset Account</button>
-        </span>
-        </div>
-        <div class="tbl-wrap">
-            <table>
-                <thead><tr>
-                    <th>Symbol</th><th>Dir</th><th>Strategy</th>
-                    <th class="num">Entry</th><th class="num">LTP</th>
-                    <th class="num">SL</th><th class="num">Target</th>
-                    <th class="num">Unrealized P&amp;L</th><th class="num">R-Mult</th>
-                    <th>Phase</th><th class="num">Qty</th>
-                </tr></thead>
-                <tbody id="pt-open-body">
-                <tr><td colspan="11" class="empty">No active positions</td></tr>
-                </tbody>
+        <div class="card">
+            <div class="card-title">📋 Today's Closed Trades</div>
+            <div id="closed-trades-empty" style="color:var(--muted);font-size:12px;padding:10px 0">No closed trades today</div>
+            <table id="closed-trades-table" style="display:none">
+                <thead>
+                <tr><th>Symbol</th><th>Dir</th><th>Strategy</th><th>Entry</th><th>Exit</th><th>Net P&L</th><th>Reason</th></tr>
+                </thead>
+                <tbody id="closed-trades-body"></tbody>
             </table>
         </div>
     </div>
-    <div class="two-col">
+</div>
+
+<!-- ═══════════════════════════════ SCANNER ═══════════════════════════════ -->
+<div id="tab-scanner" class="tab-content">
+    <div class="grid-2">
         <div class="card">
-            <div class="card-title">Today's Closed Trades</div>
-            <div class="tbl-wrap" style="max-height:320px">
-                <table>
-                    <thead><tr>
-                        <th>Symbol</th><th>Dir</th><th>Strategy</th>
-                        <th class="num">Entry</th><th class="num">Exit</th>
-                        <th>Reason</th><th class="num">Net P&amp;L</th>
-                    </tr></thead>
-                    <tbody id="pt-today-body">
-                    <tr><td colspan="7" class="empty">No closed trades today</td></tr>
-                    </tbody>
-                </table>
-            </div>
+            <div class="card-title">🎯 Armed Stocks (<span id="armed-count">0</span>)</div>
+            <div id="armed-empty" style="color:var(--muted);font-size:12px;padding:10px 0">No armed stocks</div>
+            <table id="armed-table" style="display:none">
+                <thead>
+                <tr><th>Symbol</th><th>Dir</th><th>Sector</th><th>Comp H</th><th>Comp L</th><th>SL</th><th>Tgt</th><th>RR</th><th>Gap</th></tr>
+                </thead>
+                <tbody id="armed-body"></tbody>
+            </table>
         </div>
         <div class="card">
-            <div class="card-title">Strategy Breakdown Today</div>
-            <div class="tbl-wrap" style="max-height:320px">
-                <table>
-                    <thead><tr>
-                        <th>Strategy</th>
-                        <th class="num">Trades</th><th class="num">Wins</th>
-                        <th class="num">Win%</th><th class="num">P&amp;L</th>
-                    </tr></thead>
-                    <tbody id="pt-strat-body">
-                    <tr><td colspan="5" class="empty">No data</td></tr>
-                    </tbody>
-                </table>
-            </div>
+            <div class="card-title">❌ Gate Rejections</div>
+            <div id="rejections-body" style="font-size:12px"></div>
+        </div>
+    </div>
+
+    <div class="grid-2">
+        <div class="card">
+            <div class="card-title">🏆 Stock Rankings (v7.0 Top-3 Only)</div>
+            <div id="rankings-empty" style="color:var(--muted);font-size:12px;padding:10px 0">No rankings yet</div>
+            <div id="rankings-body"></div>
+        </div>
+        <div class="card">
+            <div class="card-title">📡 System Health</div>
+            <div class="info-row"><span class="info-label">WebSocket</span><span class="info-val" id="sys-ws">—</span></div>
+            <div class="info-row"><span class="info-label">Reconnects</span><span class="info-val" id="sys-reconnects">—</span></div>
+            <div class="info-row"><span class="info-label">Candle Lag</span><span class="info-val" id="sys-lag">—</span></div>
+            <div class="info-row"><span class="info-label">Last Candle</span><span class="info-val" id="sys-last-candle">—</span></div>
+            <div class="info-row"><span class="info-label">Candles Processed</span><span class="info-val" id="sys-candles">—</span></div>
+            <div class="info-row"><span class="info-label">Data Status</span><span class="info-val" id="sys-status">—</span></div>
+            <div class="info-row"><span class="info-label">Trading Mode</span><span class="info-val" id="sys-mode">—</span></div>
+            <div class="info-row"><span class="info-label">Entry Allowed</span><span class="info-val" id="sys-entry">—</span></div>
+            <div class="info-row"><span class="info-label">Window</span><span class="info-val" id="sys-window">—</span></div>
         </div>
     </div>
 </div>
 
-
-<!-- ═══════ VALIDATION DEBUG ═══════ -->
-<div id="page-validation" class="page">
-    <div class="vd-pg-header">
-        <div>
-            <div class="vd-pg-title">&#128269; Strategy Validation Debug</div>
-            <div class="vd-pg-sub">Real-time &middot; Per-stock &middot; Per-strategy &middot; Per-step &middot; Auto-refresh 5s</div>
+<!-- ═══════════════════════════════ STRATEGIES ═══════════════════════════════ -->
+<div id="tab-strategies" class="tab-content">
+    <div class="grid">
+        <div class="card">
+            <div class="card-title">📊 Strategy Signal Counts</div>
+            <div id="strategy-counts"></div>
         </div>
-        <div style="display:flex;gap:8px;align-items:center">
-            <span id="vd-updated" style="font-size:9px;color:var(--dim)">Not loaded</span>
-            <button class="reset-btn" onclick="loadVd(true)" style="border-color:var(--green-border);color:var(--green)">&#8634; Refresh</button>
+        <div class="card">
+            <div class="card-title">💰 Per-Strategy P&L</div>
+            <div id="strategy-pnl"></div>
         </div>
-    </div>
-    <div class="vd-sum-row">
-        <div class="vd-sum-card"><div class="vd-sum-lbl">Stocks Tracked</div><div class="vd-sum-val w" id="vd-tracked">0</div></div>
-        <div class="vd-sum-card"><div class="vd-sum-lbl">All Steps Pass</div><div class="vd-sum-val g" id="vd-passing">0</div></div>
-        <div class="vd-sum-card"><div class="vd-sum-lbl">1 Step Away</div><div class="vd-sum-val w" id="vd-close">0</div></div>
-        <div class="vd-sum-card"><div class="vd-sum-lbl">Stuck Early</div><div class="vd-sum-val r" id="vd-early">0</div></div>
-    </div>
-    <div class="card" style="margin-bottom:12px">
-        <div class="card-title">Most Frequent Failure Step Today
-            <span style="font-size:9px;font-weight:400;text-transform:none;color:var(--dim)">Which condition is blocking the most signals</span>
-        </div>
-        <div class="vd-heatmap" id="vd-heatmap"><div class="empty" style="grid-column:1/-1">Waiting for data&hellip;</div></div>
-    </div>
-    <div class="card">
-        <div class="card-title" style="margin-bottom:0">Per-Stock Validation Tables
-            <span style="font-size:9px;font-weight:400;text-transform:none;color:var(--dim)">&#9989; = passed &nbsp;&#10060; = failed &nbsp;&#8212; = not reached &nbsp;&nbsp; Click a strategy tab to view its stocks</span>
-        </div>
-        <div class="vd-stabs" id="vd-stabs" style="margin-top:12px">
-            <div class="vd-stab active" onclick="selectVdStrat('AUTO_MODE',this)">AutoMode <span class="vd-stab-cnt" id="vdn-AUTO_MODE">0</span></div>
-            <div class="vd-stab" onclick="selectVdStrat('ORB_VWAP_SECTOR',this)">ORB Strategy <span class="vd-stab-cnt" id="vdn-ORB_VWAP_SECTOR">0</span></div>
-            <div class="vd-stab" onclick="selectVdStrat('VAP_PULLBACK',this)">Pullback Detection <span class="vd-stab-cnt" id="vdn-VAP_PULLBACK">0</span></div>
-            <div class="vd-stab" onclick="selectVdStrat('RANGE_BREAKOUT_3TOUCH',this)">Range Breakout <span class="vd-stab-cnt" id="vdn-RANGE_BREAKOUT_3TOUCH">0</span></div>
-            <div class="vd-stab" onclick="selectVdStrat('SCANNER_7GATE',this)">7-Gate Scanner <span class="vd-stab-cnt" id="vdn-SCANNER_7GATE">0</span></div>
-        </div>
-        <div id="vd-table-area">
-            <div class="vd-nodata">
-                Waiting for market data&hellip;<br>
-                <span style="font-size:9px">Validation data appears after first 5-min candle closes at 9:15 IST</span><br>
-                <span style="font-size:9px;color:var(--green)">Backend endpoint: GET /api/validation/steps</span>
-            </div>
+        <div class="card">
+            <div class="card-title">🔔 Fired Today</div>
+            <div id="fired-today" style="font-size:11px;color:var(--muted)">None</div>
         </div>
     </div>
 </div>
 
-<!-- ═══════════════════ SCRIPT ═══════════════════ -->
-<script>
-    'use strict';
-    const BASE = '';
-    let refreshTimer = null;
-    let sessionDead  = false;
-    let btJobId      = null;
-    let btPoll       = null;
-
-    // ── Clock ──────────────────────────────────────────────────────────────
-    setInterval(() => {
-      document.getElementById('clock').textContent =
-        new Date().toLocaleTimeString('en-IN', {hour12:false});
-    }, 1000);
-
-    // ── Tabs ───────────────────────────────────────────────────────────────
-    // ── Validation state ──────────────────────────────────────────────────
-    let vdTimer    = null;
-    let vdData     = {};
-    let vdActiveSt = 'AUTO_MODE';
-    const VD_STRATS = ['AUTO_MODE','ORB_VWAP_SECTOR','VAP_PULLBACK','RANGE_BREAKOUT_3TOUCH','SCANNER_7GATE'];
-    const VD_NAMES  = {
-      'AUTO_MODE':'AutoMode','ORB_VWAP_SECTOR':'ORB Strategy',
-      'VAP_PULLBACK':'Pullback Detection','RANGE_BREAKOUT_3TOUCH':'Range Breakout',
-      'SCANNER_7GATE':'7-Gate Scanner'
-    };
-
-    function showTab(name, el) {
-      document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
-      document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-      el.classList.add('active');
-      document.getElementById('page-'+name).classList.add('active');
-      if (name==='strategy')   loadStratPerf();
-      if (name==='paper')      loadPaperSnapshot();
-      if (name==='validation') {
-        loadVd(true);
-        if (!vdTimer) vdTimer = setInterval(()=>loadVd(false), 5000);
-      } else {
-        if (vdTimer) { clearInterval(vdTimer); vdTimer=null; }
-      }
-    }
-
-    // ── Helpers ────────────────────────────────────────────────────────────
-    const fmt  = n => '₹'+Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:2});
-    const fmtN = n => Number(n||0).toLocaleString('en-IN',{maximumFractionDigits:2});
-    const pc   = v => parseFloat(v||0) > 0 ? 'g' : parseFloat(v||0) < 0 ? 'r' : 'mu';
-    function set(id,val){const e=document.getElementById(id);if(e)e.textContent=val??'—';}
-    function setPnl(id,val){
-      const e=document.getElementById(id);if(!e)return;
-      const v=parseFloat(val||0);e.textContent=fmt(v);
-      e.className=pc(v);
-    }
-
-    // ── safeFetch ──────────────────────────────────────────────────────────
-    async function safeFetch(url, opts={}) {
-      if (sessionDead) return null;
-      try {
-        const r = await fetch(url, {...opts, credentials:'same-origin'});
-        if (r.status===401) { sessionExpired(); return null; }
-        const ct = r.headers.get('content-type')||'';
-        if (!ct.includes('application/json') && !ct.includes('text/plain')) {
-          const txt = await r.text();
-          if (txt.trim().startsWith('<!')) { sessionExpired(); return null; }
-        }
-        return r;
-      } catch(e) { console.warn('fetch',url,e.message); return null; }
-    }
-
-    function sessionExpired() {
-      sessionDead = true;
-      if (refreshTimer) { clearInterval(refreshTimer); refreshTimer=null; }
-      if (btPoll) { clearInterval(btPoll); btPoll=null; }
-      document.getElementById('session-banner').style.display = 'block';
-    }
-
-    // ── Logout ─────────────────────────────────────────────────────────────
-    function doLogout() {
-      if (confirm('Logout from Trading Platform?'))
-        window.location.href = '/logout';
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // SNAPSHOT
-    // ══════════════════════════════════════════════════════════════════════
-    async function loadSnapshot() {
-      const r = await safeFetch(BASE+'/api/dashboard/snapshot');
-      if (!r) return;
-      try { renderSnapshot(await r.json()); }
-      catch(e) { console.warn('snapshot parse',e); }
-    }
-
-    function renderSnapshot(d) {
-      const sys = d.system    || {};
-      const reg = d.regime    || {};
-      const pnl = d.pnl       || {};
-      const mkt = d.marketDirection || {};
-
-      // ── Header pills ────────────────────────────────────────────────────
-      // FIX: WS — treat as connected if websocketConnected OR vixRegime is set
-      // (vixRegime being set means the pipeline ran = WS was up at startup)
-      const wsOk = sys.websocketConnected || (sys.vixRegime && sys.vixRegime !== '—');
-      const ws = document.getElementById('ws-pill');
-      ws.className = wsOk ? 'pill pill-green' : 'pill pill-red';
-      ws.innerHTML = `<div class="dot${wsOk ? ' pulse' : ''}"></div>WS`;
-
-      // FIX: CB — cbActive=true means "circuit breaker is active and healthy" = GREEN
-      // Old code was: const cbOk = !pnl.cbActive  (inverted — always showed red)
-      const cbOk = pnl.cbActive;
-      const cb = document.getElementById('cb-pill');
-      cb.className = cbOk ? 'pill pill-green' : 'pill pill-red';
-      cb.textContent = cbOk ? 'CB ✓' : 'CB ✗';
-
-      const dir = reg.name || 'SIDEWAYS';
-      const dp  = document.getElementById('dir-pill');
-      dp.textContent = dir==='BULLISH'?'▲ BULL': dir==='BEARISH'?'▼ BEAR':'↔ SIDE';
-      dp.className = 'pill '+(dir==='BULLISH'?'pill-green':dir==='BEARISH'?'pill-red':'pill-warn');
-      // Market Mode pill
-      const modeEl = document.getElementById('mode-pill');
-      if (modeEl && d.marketMode) {
-        const mmn = d.marketMode.mode || '';
-        modeEl.textContent = mmn.replace(/_/g,' ') || 'MODE —';
-        modeEl.className = 'pill '+(mmn==='TREND_DAY'?'pill-green':mmn==='NON_TREND_DAY'?'pill-red':'pill-warn');
-      }
-
-      // FIX: VIX — show regime label when vix=0 (pre-market / no tick yet)
-      const vix = parseFloat(sys.vix||0);
-      const vp  = document.getElementById('vix-pill');
-      const vixDisplay = vix > 0 ? vix.toFixed(1) : (sys.vixRegime || '—');
-      vp.textContent = 'VIX ' + vixDisplay;
-      vp.className = 'pill ' + (vix > 28 ? 'pill-red' : vix > 20 ? 'pill-warn' : vix > 0 ? 'pill-green' : 'pill-dim');
-
-      // ── Overview stats ──────────────────────────────────────────────────
-      const re = document.getElementById('ov-regime');
-      re.textContent = reg.label || dir;
-      re.className = 'stat-val '+(dir==='BULLISH'?'g':dir==='BEARISH'?'r':'w');
-      set('ov-regime-sub', reg.failReason || (dir==='SIDEWAYS'?'No clear trend':'Trending'));
-
-      const dp2 = parseFloat(pnl.dailyPnl||0);
-      const dp2e = document.getElementById('ov-pnl');
-      dp2e.textContent = fmt(dp2); dp2e.className = 'stat-val '+pc(dp2);
-      const dpct = parseFloat(pnl.dailyPct||0);
-      set('ov-pnl-pct', (dpct>=0?'+':'')+dpct.toFixed(2)+'%');
-
-      const at = d.activeTrades||[];
-      set('ov-open', at.length);
-      set('ov-open-sub', at.length ? at.length+' position(s)' : 'No positions');
-      document.getElementById('at-count').textContent = at.length;
-
-      const armed = Object.keys(d.armedStocks||{}).length;
-      set('ov-armed', armed); set('armed-count', armed);
-
-      const ve = document.getElementById('ov-vix');
-      ve.textContent = vix > 0 ? vix.toFixed(1) : '—';
-      ve.className = 'stat-val '+(vix>28?'r':vix>20?'w':'g');
-      set('ov-vix-regime', sys.vixRegime||'—');
-      set('ov-window', sys.currentWindow||'—');
-      set('ov-entry', sys.entryAllowed?'✓ Entries open':'✗ Entries closed');
-
-      // ── Gates ────────────────────────────────────────────────────────────
-      const gs = d.gateStatus||{};
-      // ── Market Mode Engine UI ────────────────────────────────────────────
-      const mm = d.marketMode||{};
-      if (mm.mode) {
-        ['TREND_DAY','DOUBLE_DISTRIBUTION','NORMAL_DAY','NORMAL_VARIATION','NEUTRAL_DAY','NON_TREND_DAY'].forEach(m => {
-          const mc = document.getElementById('mc-'+m); if(!mc) return;
-          mc.className = 'mode-card'+(m===mm.mode?' active':' inactive');
-        });
-        const gbM = document.getElementById('gates-badge');
-        if (gbM) { gbM.textContent=mm.mode.replace(/_/g,' '); gbM.className='badge '+(mm.mode==='TREND_DAY'?'PASS':mm.mode==='NON_TREND_DAY'?'FAIL':'WAIT'); }
-        const ibHighEl=document.getElementById('ib-high'); if(ibHighEl)ibHighEl.textContent=mm.ibHigh>0?fmtN(mm.ibHigh):'—';
-        const ibLowEl=document.getElementById('ib-low');   if(ibLowEl)ibLowEl.textContent=mm.ibLow>0?fmtN(mm.ibLow):'—';
-        const ibRng=parseFloat(mm.ibRangePct||0);
-        const ibEl=document.getElementById('ib-range');
-        if(ibEl){ibEl.textContent=ibRng>0?ibRng.toFixed(2)+'%':'—';ibEl.className='ib-cell-val '+(ibRng>0.8?'g':ibRng>0.4?'w':'r');}
-        const mrEl=document.getElementById('mode-rationale'); if(mrEl)mrEl.textContent=mm.rationale||'—';
-      }
-      if((d.regime?.name||d.market?.direction)==='SIDEWAYS'){if(gs[1]==='PASS'||gs[1]==='WAIT')gs[1]='SIDE';}
-      const gnames = {1:'Market Direction',2:'Sector Alignment',3:'Compression',4:'Breakout Tick',5:'Key Level',6:'Liquidity',7:'Risk / RR'};
-      let passing = 0;
-      for(let i=1;i<=7;i++){
-        const st = gs[i]||'WAIT';
-        const el = document.getElementById('g'+i); if(!el) continue;
-        el.className = 'gate'+(st==='PASS'?' pass':st==='FAIL'?' fail':'');
-        el.innerHTML = `<div class="gate-n">Gate ${i}</div><div class="gate-name">${gnames[i]}</div>
-          <div class="gate-st ${st}">${st==='PASS'?'✓ PASS':st==='FAIL'?'✗ FAIL':'⏳ WAIT'}</div>`;
-        if(st==='PASS') passing++;
-      }
-      const gb7 = document.getElementById('gate7-badge');
-      if (gb7) { gb7.textContent=passing+'/7'; gb7.className='badge '+(passing===7?'PASS':passing===0?'FAIL':'WAIT'); }
-
-      // ── Circuit Breaker ──────────────────────────────────────────────────
-      const trip = !pnl.cbActive;
-      document.getElementById('cb-bar').className = 'cb-status-bar '+(trip?'trip':'ok');
-      set('cb-status-txt', trip?'TRIPPED — '+(pnl.cbReason||''):'ACTIVE');
-      set('cb-trades-txt', (pnl.tradesToday||0)+'/'+(pnl.maxTradesPerDay||4)+' trades');
-      set('cb-trades',     (pnl.tradesToday||0)+'/'+(pnl.maxTradesPerDay||4));
-      const dailyCapPct = Math.abs(dpct)/4*100;
-      const bf = document.getElementById('cb-fill');
-      bf.style.width = Math.min(100,dailyCapPct)+'%';
-      bf.className = 'bar-fill'+(dailyCapPct>80?' r':dailyCapPct>50?' w':'');
-      set('cb-daily-pct', dpct.toFixed(2)+'%');
-
-      // ── P&L ──────────────────────────────────────────────────────────────
-      set('pnl-cap', fmt(pnl.capital||100000));
-      setPnl('pnl-today', pnl.dailyPnl);
-      setPnl('pnl-week',  pnl.weeklyPnl);
-      setPnl('pnl-month', pnl.monthlyPnl);
-      set('ov-emas', fmtN(mkt.niftyEma20)+'/'+fmtN(mkt.niftyEma50)+'/'+fmtN(mkt.niftyEma200));
-
-      // ── Risk tab ──────────────────────────────────────────────────────────
-      set('r-trades',  (pnl.tradesToday||0)+'/'+(pnl.maxTradesPerDay||4));
-      setPnl('r-daily',  pnl.dailyPnl);
-      setPnl('r-weekly', pnl.weeklyPnl);
-      setPnl('r-monthly',pnl.monthlyPnl);
-      document.getElementById('r-cb-st').innerHTML = trip
-        ? '<span class="r">TRIPPED</span>' : '<span class="g">ACTIVE</span>';
-      set('r-vix', vix > 0 ? vix.toFixed(1) : '—');
-      set('r-vix-regime', sys.vixRegime||'—');
-      set('r-vix-ok', vix>28?'✗ NO (>28)':'✓ YES');
-      set('r-pos-size', vix>20?'50% (elevated)':'100% (normal)');
-      set('r-dir',   reg.label||dir);
-      set('r-ema20', fmtN(mkt.niftyEma20));
-      set('r-ema50', fmtN(mkt.niftyEma50));
-      set('r-ema200',fmtN(mkt.niftyEma200));
-      set('r-atr',   fmtN(mkt.niftyAtrPct)+'%');
-      set('r-fail',  reg.failReason||'—');
-
-      // ── Render tables ─────────────────────────────────────────────────────
-      renderActiveTrades(at);
-      renderArmed(d.armedStocks||{});
-      renderRejections(d.gateRejections||{});
-      renderTodayTrades(d.todayTrades||[]);
-      renderSectors(d.sectors||[]);
-      if (d.strategyStatus) renderStratStatus(d.strategyStatus);
-    }
-
-    function renderActiveTrades(trades) {
-      const tb = document.getElementById('at-body');
-      if (!trades.length) { tb.innerHTML='<tr><td colspan="11" class="empty">No active trades</td></tr>'; return; }
-      tb.innerHTML = trades.map(t => {
-        const pnl = parseFloat(t.unrealizedPnl||0);
-        const ph  = (t.tradePhase||'').toLowerCase().includes('trail')?'trail':(t.tradePhase||'').toLowerCase().includes('break')?'be':'';
-        return `<tr>
-          <td class="wh">${t.tradingSymbol}</td>
-          <td><span class="badge ${t.direction}">${t.direction}</span></td>
-          <td class="mu" style="font-size:10px">${t.strategyName||'—'}</td>
-          <td class="num">${fmtN(t.entryPrice)}</td>
-          <td class="num wh">${fmtN(t.ltp)}</td>
-          <td class="num r">${fmtN(t.stopLoss)}</td>
-          <td class="num g">${fmtN(t.target)}</td>
-          <td class="num ${pc(pnl)}">${fmt(pnl)}</td>
-          <td class="num">${t.rMultiple||'0.00'}R</td>
-          <td><span class="phase ${ph}">${t.tradePhase||'—'}</span></td>
-          <td class="num">${t.remainingQty||t.quantity||0}</td>
-        </tr>`;
-      }).join('');
-    }
-
-    function renderArmed(map) {
-      const el = document.getElementById('armed-list');
-      const list = Object.values(map);
-      if (!list.length) { el.innerHTML='<div class="empty">No armed stocks</div>'; return; }
-      el.innerHTML = list.map(a=>`
-        <div class="armed-item">
-          <div class="armed-sym">${a.symbol}</div>
-          <div class="armed-meta">
-            <span><b class="${a.direction==='LONG'?'g':'r'}">${a.direction}</b></span>
-            <span>SL:<b>${fmtN(a.stopLoss)}</b></span>
-            <span>Tgt:<b class="g">${fmtN(a.target)}</b></span>
-            <span>${a.gapType}</span>
-            <span class="mu">${a.sector||''}</span>
-          </div>
-        </div>`).join('');
-    }
-
-    function renderRejections(rej) {
-      const tb = document.getElementById('rej-body');
-      const entries = Object.entries(rej).sort((a,b)=>b[1]-a[1]);
-      if (!entries.length) { tb.innerHTML='<tr><td colspan="2" class="empty">No rejections</td></tr>'; return; }
-      tb.innerHTML = entries.map(([g,c])=>`<tr><td>${g}</td><td class="num r">${c}</td></tr>`).join('');
-    }
-
-    function renderTodayTrades(trades) {
-      ['sig-body','trades-body'].forEach(id => {
-        const tb = document.getElementById(id); if(!tb) return;
-        if (!trades.length) { tb.innerHTML=`<tr><td colspan="13" class="empty">No trades today</td></tr>`; return; }
-        tb.innerHTML = trades.map(t => {
-          const pnl = parseFloat(t.netPnl||0);
-          return `<tr>
-            <td class="mu" style="font-size:10px">${t.entryTime?new Date(t.entryTime).toLocaleTimeString('en-IN',{hour12:false}):'—'}</td>
-            <td class="wh">${t.tradingSymbol}</td>
-            <td><span class="badge ${t.direction}">${t.direction}</span></td>
-            <td class="mu" style="font-size:10px">${t.strategyName||'—'}</td>
-            <td class="num">${fmtN(t.entryPrice)}</td>
-            <td class="num">${t.exitPrice?fmtN(t.exitPrice):'—'}</td>
-            <td class="num">${t.quantity||0}</td>
-            <td class="num r">${fmtN(t.stopLoss)}</td>
-            <td class="num g">${fmtN(t.target)}</td>
-            <td><span class="badge ${t.status==='OPEN'?'OPEN':'NEUTRAL'}">${t.status}</span></td>
-            <td class="mu">${t.exitReason||'—'}</td>
-            <td class="num ${pc(pnl)}">${t.netPnl?fmt(pnl):'—'}</td>
-            <td class="num mu">${t.probabilityScore?fmtN(t.probabilityScore):'—'}</td>
-          </tr>`;
-        }).join('');
-      });
-    }
-
-    function renderSectors(sectors) {
-      const tb = document.getElementById('sectors-body');
-      if (!sectors.length) { tb.innerHTML='<tr><td colspan="8" class="empty">No data</td></tr>'; return; }
-      tb.innerHTML = [...sectors].sort((a,b)=>b.changePercent-a.changePercent).map(s => {
-        const cc = s.changePercent>0?'g':s.changePercent<0?'r':'mu';
-        const rc = s.relativeStrength>1?'g':s.relativeStrength<1?'r':'mu';
-        return `<tr>
-          <td class="wh">${s.name}</td>
-          <td><span class="badge ${s.classification}">${s.classification}</span></td>
-          <td class="num ${cc}">${s.changePercent>0?'+':''}${fmtN(s.changePercent)}%</td>
-          <td class="num ${rc}">${fmtN(s.relativeStrength)}</td>
-          <td class="num">${s.greenPct}%</td>
-          <td class="num">${s.totalStocks}</td>
-          <td class="num g">${s.greenStocks}</td>
-          <td class="num r">${s.redStocks}</td>
-        </tr>`;
-      }).join('');
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // STRATEGY PANEL
-    // ══════════════════════════════════════════════════════════════════════
-    function renderStratStatus(ss) {
-      const strats = ['AUTO_MODE','ORB_VWAP_SECTOR','VAP_PULLBACK','RANGE_BREAKOUT_3TOUCH','SCANNER_7GATE'];
-      const pd = ss.perStrategyPnl || {};
-      const fired = Array.isArray(ss.firedToday) ? ss.firedToday : Object.keys(ss.firedToday||{});
-
-      strats.forEach(s => {
-        const sd = pd[s]||{};
-        // VAP_PULLBACK and VWAP_PULLBACK are aliases — count both
-        const aliases = s==='VAP_PULLBACK' ? [s,'VWAP_PULLBACK'] : [s];
-        const sig = fired.filter(k=>aliases.some(a=>k.endsWith(':'+a))).length;
-        const card = document.getElementById('sc-'+s);
-        if (card) card.className = 'strat-card'+(sig>0?' fired':'');
-        set('sc-sig-'+s, sig);
-        const pnl = parseFloat(sd.pnl||0);
-        const pe  = document.getElementById('sc-pnl-'+s);
-        if (pe) { pe.textContent=fmt(pnl); pe.className='val '+pc(pnl); }
-        set('sc-trades-'+s, sd.trades||0);
-        set('sc-wr-'+s, sd.winRate||'—');
-      });
-
-      const fb = document.getElementById('fired-body');
-      if (!fired.length) { fb.innerHTML='<tr><td colspan="2" class="empty">No signals yet</td></tr>'; }
-      else fb.innerHTML = fired.map(k=>{
-        const [sym,st] = k.split(':');
-        return `<tr><td class="wh">${sym}</td><td class="mu">${st}</td></tr>`;
-      }).join('');
-
-      const pb = document.getElementById('strat-perf-body');
-      const ent = Object.entries(pd);
-      if (!ent.length) { pb.innerHTML='<tr><td colspan="6" class="empty">No trades today</td></tr>'; return; }
-      pb.innerHTML = ent.map(([st,sd]) => {
-        const pnl = parseFloat(sd.pnl||0);
-        return `<tr>
-          <td class="wh">${st}</td><td class="num">${sd.trades||0}</td>
-          <td class="num g">${sd.wins||0}</td><td class="num r">${sd.losses||0}</td>
-          <td class="num">${sd.winRate||'—'}</td>
-          <td class="num ${pc(pnl)}">${fmt(pnl)}</td>
-        </tr>`;
-      }).join('');
-    }
-
-    async function loadStratPerf() {
-      const r = await safeFetch(BASE+'/api/dashboard/strategy-performance'); if(!r) return;
-      try {
-        const d = await r.json();
-        renderStratStatus({perStrategyPnl:d.perStrategyPnl, firedToday:Array.from(d.firedToday||[])});
-      } catch(e){}
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // BACKTEST
-    // ══════════════════════════════════════════════════════════════════════
-    async function runBacktest() {
-      const start = document.getElementById('bt-start').value;
-      const end   = document.getElementById('bt-end').value;
-      if (!start || !end) { alert('Select start and end dates'); return; }
-
-      const btn = document.getElementById('bt-btn');
-      btn.disabled = true; btn.textContent = '⏳ Submitting...';
-
-      ['bt-summary','bt-strat-sum','bt-stocks-card','bt-progress-card']
-        .forEach(id => document.getElementById(id).style.display='none');
-
-      const stratSel = document.getElementById('bt-strategies').value;
-      const body = {
-        startDate:  start,
-        endDate:    end,
-        capital:    parseInt(document.getElementById('bt-capital').value),
-        strategies: stratSel==='ALL' ? ['ALL'] : [stratSel]
-      };
-
-      const r = await safeFetch('/api/backtest/strategy', {
-        method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
-      });
-      btn.disabled=false; btn.textContent='▶ RUN';
-      if (!r) return;
-
-      const d = await r.json();
-      if (d.error) { alert('Error: '+d.error); return; }
-
-      btJobId = d.jobId;
-      set('bt-job-id','Job: '+btJobId);
-      document.getElementById('bt-progress-card').style.display = 'block';
-      btResetProgress();
-      btStartPoll(btJobId);
-    }
-
-    function btResetProgress() {
-      set('bt-pct','0%');
-      document.getElementById('bt-prog-fill').style.width = '0%';
-      set('bt-prog-label','Processing stocks...');
-      set('bt-processed','0'); set('bt-total-sym','—');
-      set('bt-elapsed','0s'); set('bt-eta','—'); set('bt-cur-sym','—');
-    }
-
-    function btStartPoll(jobId) {
-      if (btPoll) clearInterval(btPoll);
-      btPollOnce(jobId);
-      btPoll = setInterval(() => btPollOnce(jobId), 5000);
-    }
-
-    async function btPollOnce(jobId) {
-      const r = await safeFetch('/api/backtest/status/'+jobId);
-      if (!r) { btCancelPoll(); return; }
-      const d = await r.json();
-
-      const pct = d.progressPct||0;
-      set('bt-pct', pct+'%');
-      document.getElementById('bt-prog-fill').style.width = pct+'%';
-      set('bt-processed', d.processedCount||0);
-      set('bt-total-sym', d.totalCount||'—');
-      set('bt-cur-sym', d.currentSymbol||'—');
-
-      const el = d.elapsedSec||0;
-      set('bt-elapsed', el<60 ? el+'s' : Math.floor(el/60)+'m '+(el%60)+'s');
-      const eta = d.etaSec;
-      set('bt-eta', eta>0 ? Math.floor(eta/60)+'m '+(eta%60)+'s' : '—');
-
-      if (d.status==='DONE') {
-        btCancelPoll();
-        document.getElementById('bt-prog-fill').style.width='100%';
-        set('bt-pct','100%');
-        set('bt-prog-label','✓ Complete! Loading results...');
-        setTimeout(() => {
-          document.getElementById('bt-progress-card').style.display='none';
-          btFetchResult(jobId);
-        }, 1200);
-      }
-      if (d.status==='FAILED') {
-        btCancelPoll();
-        document.getElementById('bt-progress-card').style.display='none';
-        alert('Backtest failed: '+(d.error||'Unknown error'));
-      }
-    }
-
-    async function btFetchResult(jobId) {
-      const r = await safeFetch('/api/backtest/result/'+jobId); if(!r) return;
-      try { const d=await r.json(); if(d.error){alert(d.error);return;} btRender(d); }
-      catch(e) { alert('Could not parse result. Check server logs.'); }
-    }
-
-    function btCancelPoll() {
-      if (btPoll) { clearInterval(btPoll); btPoll=null; }
-    }
-
-    function btRender(d) {
-      document.getElementById('bt-summary').style.display = 'grid';
-
-      // API returns aggregate data inside perStockAggregate OR portfolioResult
-      // Use portfolioResult first (real compound portfolio), fallback to perStockAggregate
-      const port = d.portfolioResult || {};
-      const agg  = d.perStockAggregate || {};
-
-      const totalTrades = port.totalTrades || agg.totalTrades || 0;
-      const winRate     = port.winRate     || agg.overallWinRate || '—';
-      const netPnl      = port.netPnl      || agg.overallPnl    || '0';
-      const pf          = port.profitFactor|| agg.profitFactor   || '—';
-      const mdd         = port.maxDrawdownPct || '—';
-
-      set('bt-total-trades', totalTrades);
-      const we = document.getElementById('bt-wr');
-      we.textContent = winRate; we.className = 'bt-stat-val g';
-      const pnlNum = parseFloat((netPnl+'').replace(/[^0-9.-]/g,''));
-      const pe = document.getElementById('bt-pnl');
-      pe.textContent = '&#8377;' + fmtN(pnlNum); pe.className = 'bt-stat-val '+(pnlNum>=0?'g':'r');
-      set('bt-pf',  pf);
-      set('bt-mdd', mdd);
-
-      // Portfolio extra stats (if available)
-      if (port.returnPct)       set('bt-total-trades', totalTrades + ' trades · ' + port.returnPct + ' return');
-      if (port.sharpeRatio)     set('bt-pf', (pf+' · Sharpe '+port.sharpeRatio));
-
-      document.getElementById('bt-strat-sum').style.display = 'grid';
-      // API key perStrategySummary has the correct 5 strategy keys
-      const ps = d.perStrategySummary||{};
-      ['AUTO_MODE','ORB_VWAP_SECTOR','VAP_PULLBACK','RANGE_BREAKOUT_3TOUCH','SCANNER_7GATE'].forEach(s => {
-        // VAP_PULLBACK might be stored under VWAP_PULLBACK alias too
-        const sd = ps[s] || ps['VWAP_PULLBACK'] && s==='VAP_PULLBACK' ? (ps[s]||ps['VWAP_PULLBACK']||{}) : (ps[s]||{});
-        set('bts-t-'+s, sd.totalTrades != null ? sd.totalTrades : '—');
-        set('bts-wr-'+s, sd.winRate||'—');
-        const p = parseFloat((sd.totalPnl||'0').replace(/[^0-9.-]/g,''));
-        const el = document.getElementById('bts-pnl-'+s);
-        if (el) { el.textContent='&#8377;'+fmtN(p); el.className=p>=0?'g':'r'; }
-      });
-
-      document.getElementById('bt-stocks-card').style.display = 'block';
-      const stocks = d.stockResults||[];
-      const elapsed = d.elapsedSec||0;
-      set('bt-stock-count', stocks.length+' stocks · '+Math.floor(elapsed/60)+'m '+(elapsed%60)+'s');
-
-      const tb = document.getElementById('bt-stocks-body');
-      if (!stocks.length) { tb.innerHTML='<tr><td colspan="14" class="empty">No results</td></tr>'; return; }
-
-      tb.innerHTML = stocks.slice(0,300).map((s,i) => {
-        const pnl = parseFloat((s.totalPnl||'0').replace(/[^0-9.-]/g,''));
-        const wr  = parseFloat((s.winRate||'0').replace('%',''));
-        const wrc = wr>=58?'g':wr>=45?'':'r';
-        const byS = Object.entries(s.byStrategy||{}).map(([st,sd])=>{
-          const n = st==='AUTO_MODE'?'AM':st==='ORB_VWAP_SECTOR'?'ORB':
-                    st==='VAP_PULLBACK'||st==='VWAP_PULLBACK'?'PB':
-                    st==='RANGE_BREAKOUT_3TOUCH'?'RB':st==='SCANNER_7GATE'?'7G':'?';
-          return `<span style="font-size:9px;color:var(--muted)">${n}:<b style="color:var(--text)">${sd.winRate||'—'}</b></span>`;
-        }).join(' ');
-        return `<tr>
-          <td class="mu">${i+1}</td>
-          <td class="wh">${s.symbol}</td>
-          <td class="mu" style="font-size:10px">${s.sector}</td>
-          <td class="num">${s.totalTrades}</td>
-          <td class="num g">${s.wins}</td>
-          <td class="num r">${s.losses}</td>
-          <td class="num ${wrc}">${s.winRate}</td>
-          <td class="num ${pnl>=0?'g':'r'}">${s.totalPnl}</td>
-          <td class="num g">${s.avgWin}</td>
-          <td class="num r">${s.avgLoss}</td>
-          <td class="num">${s.profitFactor}</td>
-          <td class="num g">${s.bestTrade}</td>
-          <td class="num r">${s.worstTrade}</td>
-          <td style="font-size:10px">${byS}</td>
-        </tr>`;
-      }).join('');
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // CB RESET
-    // ══════════════════════════════════════════════════════════════════════
-    async function resetCB() {
-      if (!confirm('Reset circuit breaker?')) return;
-      const r = await safeFetch(BASE+'/api/dashboard/circuit-breaker/reset',{method:'POST'});
-      if (r) await loadSnapshot();
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // PAPER TRADING
-    // ══════════════════════════════════════════════════════════════════════
-    async function loadPaperSnapshot() {
-      const r = await safeFetch('/api/paper/snapshot');
-      if (!r) return;
-      try { renderPaperSnapshot(await r.json()); }
-      catch(e) { console.warn('paper snapshot error', e); }
-    }
-
-    function renderPaperSnapshot(d) {
-      const banner = document.getElementById('paper-banner');
-      if (banner) {
-        banner.style.display = 'block';
-        const isPaper = d.isPaper;
-        if (isPaper) {
-          banner.style.background = 'var(--green-bg)';
-          banner.style.border     = '1px solid var(--green-border)';
-          banner.style.color      = 'var(--green)';
-          banner.textContent      = '📄 PAPER TRADING ACTIVE — Virtual money only. Real strategy, real tick prices, simulated fills.';
-        } else {
-          banner.style.background = 'var(--warn-bg)';
-          banner.style.border     = '1px solid var(--warn-border)';
-          banner.style.color      = 'var(--warn)';
-          banner.textContent      = '⚠ LIVE MODE — Set TRADING_MODE=PAPER in .env to enable paper trading.';
-        }
-      }
-
-      const acc = d.account || {};
-
-      const cap = parseFloat((acc.currentCapital || '0').toString().replace(/[^0-9.-]/g,''));
-      const capEl = document.getElementById('pt-capital');
-      if (capEl) capEl.textContent = '₹' + cap.toLocaleString('en-IN', {maximumFractionDigits:0});
-      set('pt-total-ret', acc.totalReturnPct || '0.00%');
-
-      const dpnl = parseFloat((acc.dailyPnl || '0').toString().replace(/[^0-9.-]/g,''));
-      const dpEl = document.getElementById('pt-daily-pnl');
-      if (dpEl) { dpEl.textContent = fmt(dpnl); dpEl.className = 'stat-val ' + pc(dpnl); }
-      set('pt-daily-pct', acc.dailyReturnPct || '0.00%');
-      set('pt-daily-trades', acc.dailyTrades || 0);
-      set('pt-daily-wr', (acc.dailyTrades||0) + ' trades · ' + (acc.dailyWinRate || '0%'));
-
-      const tpnl = parseFloat((acc.totalPnl || '0').toString().replace(/[^0-9.-]/g,''));
-      const tpEl = document.getElementById('pt-total-pnl');
-      if (tpEl) { tpEl.textContent = fmt(tpnl); tpEl.className = 'stat-val ' + pc(tpnl); }
-      set('pt-total-wr', acc.totalWinRate || '—');
-      set('pt-pf', acc.totalProfitFactor || '—');
-      set('pt-total-cnt', (acc.totalTrades||0) + ' trades');
-
-      set('pt-mdd', acc.maxDrawdownPct || '0%');
-      const mddRs = parseFloat((acc.maxDrawdownRs || '0').toString().replace(/[^0-9.-]/g,''));
-      set('pt-mdd-rs', fmt(mddRs));
-
-      const openTrades = d.activeTrades || [];
-      document.getElementById('pt-open-count').textContent = openTrades.length;
-      const ob = document.getElementById('pt-open-body');
-      if (!openTrades.length) {
-        ob.innerHTML = '<tr><td colspan="11" class="empty">No active positions</td></tr>';
-      } else {
-        ob.innerHTML = openTrades.map(t => {
-          const pnl = parseFloat((t.unrealizedPnl || '0').toString().replace(/[^0-9.-]/g,''));
-          const phase = t.tradePhase || '—';
-          const phCls = phase.includes('Trail') ? 'trail' : phase.includes('Breakeven') ? 'be' : '';
-          return `<tr>
-            <td class="wh">${t.tradingSymbol}</td>
-            <td><span class="badge ${t.direction}">${t.direction}</span></td>
-            <td class="mu" style="font-size:10px">${t.strategyName||'—'}</td>
-            <td class="num">${fmtN(t.entryPrice)}</td>
-            <td class="num wh">${fmtN(t.ltp)}</td>
-            <td class="num r">${fmtN(t.stopLoss)}</td>
-            <td class="num g">${fmtN(t.target)}</td>
-            <td class="num ${pc(pnl)}">${fmt(pnl)}</td>
-            <td class="num">${t.rMultiple}</td>
-            <td><span class="phase ${phCls}">${phase}</span></td>
-            <td class="num">${t.remainingQty}</td>
-          </tr>`;
-        }).join('');
-      }
-
-      const todayTrades = (d.todayTrades || []).filter(t => t.status === 'CLOSED');
-      const tb = document.getElementById('pt-today-body');
-      if (!todayTrades.length) {
-        tb.innerHTML = '<tr><td colspan="7" class="empty">No closed trades today</td></tr>';
-      } else {
-        tb.innerHTML = todayTrades.map(t => {
-          const pnl = parseFloat((t.netPnl || '0').replace(/[^0-9.-]/g,''));
-          return `<tr>
-            <td class="wh">${t.tradingSymbol}</td>
-            <td><span class="badge ${t.direction}">${t.direction}</span></td>
-            <td class="mu" style="font-size:10px">${t.strategyName||'—'}</td>
-            <td class="num">${fmtN(t.entryPrice)}</td>
-            <td class="num">${t.exitPrice ? fmtN(t.exitPrice) : '—'}</td>
-            <td class="mu" style="font-size:10px">${t.exitReason||'—'}</td>
-            <td class="num ${pc(pnl)}">${t.netPnl ? fmt(pnl) : '—'}</td>
-          </tr>`;
-        }).join('');
-      }
-
-      const sb = document.getElementById('pt-strat-body');
-      const strat = d.strategyBreakdown || {};
-      const stratEntries = Object.entries(strat);
-      if (!stratEntries.length) {
-        sb.innerHTML = '<tr><td colspan="5" class="empty">No trades yet</td></tr>';
-      } else {
-        sb.innerHTML = stratEntries.map(([name, s]) => {
-          const p = parseFloat((s.pnl || '0').replace(/[^0-9.-]/g,''));
-          return `<tr>
-            <td class="wh" style="font-size:10px">${name}</td>
-            <td class="num">${s.trades}</td>
-            <td class="num g">${s.wins}</td>
-            <td class="num">${s.winRate}</td>
-            <td class="num ${pc(p)}">${fmt(p)}</td>
-          </tr>`;
-        }).join('');
-      }
-    }
-
-    async function resetPaperAccount() {
-      if (!confirm('Reset paper trading account? All P&L and trade history will be cleared.')) return;
-      const r = await safeFetch('/api/paper/reset', { method: 'POST' });
-      if (r) {
-        const msg = await r.text();
-        alert(msg);
-        loadPaperSnapshot();
-      }
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // INIT
-    // ══════════════════════════════════════════════════════════════════════
-    window.addEventListener('DOMContentLoaded', () => {
-      const today = new Date();
-      const yr    = new Date(today); yr.setFullYear(today.getFullYear()-1);
-      document.getElementById('bt-end').value   = today.toISOString().split('T')[0];
-      document.getElementById('bt-start').value = yr.toISOString().split('T')[0];
-
-      loadSnapshot();
-      refreshTimer = setInterval(loadSnapshot, 5000);
-    });
-
-    // FIX: Paper auto-refresh — uses toLowerCase() so "📄 Paper" matches "paper"
-    setInterval(() => {
-      const activeTab = document.querySelector('.tab.active');
-      if (activeTab && activeTab.textContent.toLowerCase().includes('paper')) {
-        loadPaperSnapshot();
-      }
-    }, 5000);
-
-    // ════════════════════════════════════════════════════════════════════════
-    // VALIDATION DEBUG — full implementation
-    // Strategy tabs: click tab → table rows=stocks cols=real step labels
-    // ════════════════════════════════════════════════════════════════════════
-    async function loadVd(force) {
-      const activeTab = document.querySelector('.tab.active');
-      const onDbg = activeTab && activeTab.textContent.includes('Debug');
-      if (!force && !onDbg) return;
-      const r = await safeFetch('/api/validation/steps');
-      if (!r) return;
-      try {
-        vdData = await r.json();
-        renderVdSummary();
-        renderVdHeatmap();
-        renderVdTabCounts();
-        renderVdTable(vdActiveSt);
-        set('vd-updated', 'Updated ' + new Date().toLocaleTimeString('en-IN',{hour12:false}));
-      } catch(e) { console.warn('[VD] parse error', e); }
-    }
-
-    function renderVdSummary() {
-      let tracked=0, passing=0, close=0, early=0;
-      Object.values(vdData).forEach(logs => {
-        logs.forEach(log => {
-          tracked++;
-          const n=(log.steps||[]).length;
-          if (log.failedAtStep===0)                           passing++;
-          else if (n>0 && log.failedAtStep>=n-1)             close++;
-          else if (log.failedAtStep>0 && log.failedAtStep<=2) early++;
-        });
-      });
-      set('vd-tracked', tracked||'0');
-      set('vd-passing', passing||'0');
-      set('vd-close',   close||'0');
-      set('vd-early',   early||'0');
-    }
-
-    function renderVdTabCounts() {
-      VD_STRATS.forEach(s => {
-        const el = document.getElementById('vdn-'+s);
-        if (el) el.textContent = (vdData[s]||[]).length;
-      });
-    }
-
-    function renderVdHeatmap() {
-      const freq = {};
-      Object.entries(vdData).forEach(([strat,logs]) => {
-        const dname = VD_NAMES[strat]||strat;
-        logs.forEach(log => {
-          const ff = (log.steps||[]).find(s=>!s.passed);
-          if (ff) {
-            const lbl = (ff.label||ff.stepId.replace(/_/g,' ')).substring(0,30);
-            const k   = dname + ' \u203a ' + lbl;
-            freq[k]   = (freq[k]||0)+1;
-          }
-        });
-      });
-      const hm = document.getElementById('vd-heatmap');
-      const entries = Object.entries(freq).sort((a,b)=>b[1]-a[1]).slice(0,12);
-      if (!entries.length) {
-        hm.innerHTML='<div class="empty" style="grid-column:1/-1">No failure data yet &mdash; strategies are evaluating stocks</div>';
-        return;
-      }
-      const mx = entries[0][1]||1;
-      hm.innerHTML = entries.map(([key,count]) => {
-        const pct = Math.round(count/mx*100);
-        return `<div class="vd-heat-cell">
-          <div class="vd-heat-lbl">${key}</div>
-          <div class="vd-heat-val">${count}<span style="font-size:11px;color:var(--dim)">&times;</span></div>
-          <div class="vd-heat-bar" style="width:${pct}%"></div>
-        </div>`;
-      }).join('');
-    }
-
-    function selectVdStrat(strat, el) {
-      vdActiveSt = strat;
-      document.querySelectorAll('.vd-stab').forEach(t=>t.classList.remove('active'));
-      el.classList.add('active');
-      renderVdTable(strat);
-    }
-
-    function renderVdTable(strat) {
-      const area = document.getElementById('vd-table-area');
-      const logs  = vdData[strat]||[];
-
-      if (!logs.length) {
-        area.innerHTML = `<div class="vd-nodata">
-          No data for <b>${VD_NAMES[strat]||strat}</b> yet<br>
-          <span style="font-size:9px">Waiting for evaluation cycle&hellip;</span>
-        </div>`;
-        return;
-      }
-
-      // ── Collect step IDs in order from first log that has steps ──
-      const stepIds = [], stepLabels = {};
-      for (const log of logs) {
-        if ((log.steps||[]).length > 0) {
-          log.steps.forEach(s => {
-            if (!stepLabels[s.stepId]) {
-              // Use the REAL label from backend (actual validation name, not V1/V2)
-              stepLabels[s.stepId] = s.label || s.stepId.replace(/_/g,' ');
-              stepIds.push(s.stepId);
-            }
-          });
-          break;
-        }
-      }
-
-      if (!stepIds.length) {
-        area.innerHTML = '<div class="vd-nodata">Step data not available yet</div>';
-        return;
-      }
-
-      // ── Sort: all-pass first, then by failedAtStep DESC ──
-      const sorted = [...logs].sort((a,b) => {
-        if (a.failedAtStep===0 && b.failedAtStep!==0) return -1;
-        if (b.failedAtStep===0 && a.failedAtStep!==0) return 1;
-        return (b.failedAtStep||0)-(a.failedAtStep||0);
-      });
-
-      const passCount = sorted.filter(l=>l.failedAtStep===0).length;
-      const closeCount = sorted.filter(l=>{
-        const n=(l.steps||[]).length;
-        return l.failedAtStep>0 && n>0 && l.failedAtStep>=n-1;
-      }).length;
-
-      // ── Table header: Symbol | [real step labels] | Result ──
-      const thCells = stepIds.map(sid => {
-        const fullLbl = stepLabels[sid];
-        const short   = fullLbl.length>18 ? fullLbl.substring(0,17)+'…' : fullLbl;
-        return `<th title="${fullLbl.replace(/"/g,'&quot;')}" style="min-width:50px">
-          <div style="font-size:8px;white-space:normal;max-width:65px;margin:0 auto;line-height:1.4">${short}</div>
-        </th>`;
-      }).join('');
-
-      // ── Table rows ──
-      const rows = sorted.slice(0,300).map(log => {
-        const byId = {};
-        (log.steps||[]).forEach(s => { byId[s.stepId]=s; });
-
-        const cells = stepIds.map(sid => {
-          const s = byId[sid];
-          if (!s) return `<td style="font-size:12px;color:var(--dim)" title="Not evaluated">&mdash;</td>`;
-          const detail = (s.detail||'').replace(/"/g,'&quot;').substring(0,120);
-          if (s.passed) return `<td title="${detail}">&#9989;</td>`;
-          return `<td title="${detail}">&#10060;</td>`;
-        }).join('');
-
-        const allOk   = log.failedAtStep===0;
-        const n       = (log.steps||[]).length;
-        const isClose = !allOk && n>0 && log.failedAtStep>=n-1;
-        const rowCls  = allOk?'vd-pass':isClose?'vd-close':'vd-fail';
-        const dirStr  = log.direction||'BUY';
-        const dirCls  = (dirStr.includes('SELL')||dirStr.includes('SHORT'))?'vd-dir-s':'vd-dir-l';
-
-        const failHint = !allOk && log.firstFailedLabel
-          ? ` title="Failed: ${log.firstFailedLabel.replace(/"/g,'&quot;')}"` : '';
-
-        const resultTd = allOk
-          ? `<td class="vd-res-col vd-pass-txt">&#9989; PASS</td>`
-          : `<td class="vd-res-col vd-fail-txt"${failHint}>&#10060; FAIL S${log.failedAtStep}</td>`;
-
-        return `<tr class="${rowCls}">
-          <td class="vd-sym-col">
-            ${log.symbol}<span class="vd-dir-tag ${dirCls}">${dirStr.substring(0,4)}</span>
-          </td>
-          ${cells}
-          ${resultTd}
-        </tr>`;
-      }).join('');
-
-      const statsBar = `<div class="vd-statbar">
-        <span><b style="color:#fff">${sorted.length}</b> stocks</span>
-        ${passCount>0?`<span><b style="color:var(--green)">${passCount}</b> all pass &#9989;</span>`:''}
-        ${closeCount>0?`<span><b style="color:var(--warn)">${closeCount}</b> almost there &#9889;</span>`:''}
-        ${sorted.length>300?`<span style="color:var(--dim)">Showing 300 of ${sorted.length}</span>`:''}
-        <span style="color:var(--dim);font-size:9px">Hover any cell for exact values</span>
-      </div>`;
-
-      area.innerHTML = statsBar + `<div class="vd-tbl-wrap">
-        <table class="vd-tbl">
-          <thead><tr>
-            <th class="vd-sym-col">Symbol</th>
-            ${thCells}
-            <th class="vd-res-col">Result</th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
+<!-- ═══════════════════════════════ SECTORS ═══════════════════════════════ -->
+<div id="tab-sectors" class="tab-content">
+    <div class="card" style="margin:12px">
+        <div class="card-title">🏭 Sector Strength (Live)</div>
+        <table>
+            <thead><tr><th>Sector</th><th>Status</th><th>Change%</th><th>Green%</th><th>RS</th><th>Stocks</th><th>Aligned</th></tr></thead>
+            <tbody id="sectors-body"></tbody>
         </table>
-      </div>`;
+    </div>
+</div>
+
+<!-- ═══════════════════════════════ RISK ═══════════════════════════════ -->
+<div id="tab-risk" class="tab-content">
+    <div class="grid" style="grid-template-columns: repeat(3,1fr)">
+        <div class="card">
+            <div class="card-title">🛡 Risk Slots (10-2-3)</div>
+            <div class="info-row"><span class="info-label">Phase-1 Count</span><span class="info-val" id="r-p1">—</span></div>
+            <div class="info-row"><span class="info-label">Max Phase-1</span><span class="info-val" id="r-maxp1">—</span></div>
+            <div class="info-row"><span class="info-label">Any at Breakeven</span><span class="info-val" id="r-be">—</span></div>
+            <div style="margin-top:10px;font-size:11px;color:var(--muted)">Sector Exposure</div>
+            <div id="r-sector-exp" style="font-size:12px;margin-top:4px"></div>
+            <div style="margin-top:8px;font-size:11px;color:var(--muted)">Strategy Exposure</div>
+            <div id="r-strat-exp" style="font-size:12px;margin-top:4px"></div>
+        </div>
+        <div class="card">
+            <div class="card-title">📉 P&L Summary</div>
+            <div class="info-row"><span class="info-label">Capital</span><span class="info-val" id="r-capital">—</span></div>
+            <div class="info-row"><span class="info-label">Daily P&L</span><span class="info-val" id="r-daily">—</span></div>
+            <div class="info-row"><span class="info-label">Daily %</span><span class="info-val" id="r-daily-pct">—</span></div>
+            <div class="info-row"><span class="info-label">Weekly P&L</span><span class="info-val" id="r-weekly">—</span></div>
+            <div class="info-row"><span class="info-label">Monthly P&L</span><span class="info-val" id="r-monthly">—</span></div>
+            <div class="info-row"><span class="info-label">CB Active</span><span class="info-val" id="r-cb">—</span></div>
+        </div>
+        <div class="card">
+            <div class="card-title">🌡 VIX & Gate Config</div>
+            <div class="info-row"><span class="info-label">VIX</span><span class="info-val" id="r-vix">—</span></div>
+            <div class="info-row"><span class="info-label">Regime</span><span class="info-val" id="r-vix-reg">—</span></div>
+            <div class="info-row"><span class="info-label">Phase Threshold</span><span class="info-val" id="r-threshold">—</span></div>
+            <div class="info-row"><span class="info-label">IB Force Needed</span><span class="info-val" id="r-ib-force">—</span></div>
+            <div class="info-row"><span class="info-label">ORB Allowed</span><span class="info-val" id="r-orb">—</span></div>
+        </div>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════ VALIDATION ═══════════════════════════════ -->
+<div id="tab-validation" class="tab-content">
+    <div style="padding:12px">
+        <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+            <input id="val-symbol" placeholder="Filter by symbol" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:12px">
+            <select id="val-strategy" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:6px 10px;border-radius:6px;font-size:12px">
+                <option value="">All Strategies</option>
+                <option value="SCANNER_7GATE">7-Gate Scanner</option>
+                <option value="AUTO_MODE">Auto Mode</option>
+                <option value="ORB_VWAP_SECTOR">ORB</option>
+                <option value="VAP_PULLBACK">VAP Pullback</option>
+                <option value="RANGE_BREAKOUT_3TOUCH">Range Breakout</option>
+            </select>
+            <button class="btn" onclick="loadValidation()">Filter</button>
+            <span style="font-size:11px;color:var(--muted)">Symbols tracked: <span id="val-count">—</span></span>
+        </div>
+        <div class="card">
+            <div class="card-title">⚙️ Top Failure Gates</div>
+            <div id="failure-freq" style="font-size:12px"></div>
+        </div>
+        <div class="card" style="margin-top:12px">
+            <div class="card-title">📋 Validation Log</div>
+            <div id="validation-log"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    const API = '/api/dashboard';
+    let data = {};
+    let autoRefresh;
+
+    // ── Tab switching ──────────────────────────────────────────────────────────
+    function switchTab(name) {
+      document.querySelectorAll('.tab').forEach((t,i) => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab').forEach(t => {
+        if (t.textContent.toLowerCase().startsWith(name)) t.classList.add('active');
+      });
+      const el = document.getElementById('tab-' + name);
+      if (el) el.classList.add('active');
     }
 
-    // Background refresh every 30s
-    setInterval(()=>loadVd(false), 30000);
+    // ── Helpers ────────────────────────────────────────────────────────────────
+    function pnlClass(v) {
+      const n = parseFloat(v);
+      return n > 0 ? 'pnl-positive' : n < 0 ? 'pnl-negative' : 'pnl-zero';
+    }
+    function pnlStr(v) {
+      const n = parseFloat(v);
+      return (n >= 0 ? '+' : '') + '₹' + n.toFixed(2);
+    }
+    function safe(v, fb='—') { return (v !== null && v !== undefined && v !== '') ? v : fb; }
+    function q(id) { return document.getElementById(id); }
+    function setText(id, v) { const e = q(id); if(e) e.textContent = v; }
+    function setClass(id, cls) { const e = q(id); if(e) e.className = cls; }
+    function dirPill(d) {
+      return d === 'LONG' ? '<span class="pill pill-green">LONG</span>'
+                          : '<span class="pill pill-red">SHORT</span>';
+    }
+    function phasePill(p) {
+      const map = { 'Phase-1':'pill-yellow','Phase-3/2':'pill-green','Phase-4':'pill-purple' };
+      return `<span class="pill ${map[p]||'pill-grey'}">${p}</span>`;
+    }
 
+    // ── Main data load ─────────────────────────────────────────────────────────
+    async function loadData() {
+      try {
+        const res  = await fetch(API + '/snapshot');
+        data       = await res.json();
+        renderAll(data);
+        q('loading').style.display = 'none';
+        setText('refresh-time', new Date().toLocaleTimeString('en-IN'));
+      } catch(e) {
+        console.error('Load failed', e);
+      }
+    }
+
+    function renderAll(d) {
+      renderHeader(d);
+      renderOverview(d);
+      renderTrades(d);
+      renderScanner(d);
+      renderStrategies(d);
+      renderSectors(d);
+      renderRisk(d);
+    }
+
+    // ── Header ─────────────────────────────────────────────────────────────────
+    function renderHeader(d) {
+      const mode   = d.tradingMode || 'PAPER';
+      const phase  = d.marketPhase || {};
+      const market = d.market || {};
+      const mm     = d.marketMode || {};
+      const lat    = d.latency || {};
+      const sys    = d.system || {};
+
+      setText('h-mode', mode);
+      q('h-mode').className = 'badge ' + (mode === 'LIVE' ? 'badge-red' : 'badge-blue');
+
+      const phaseVal = phase.phase || 'PRE_OPEN';
+      setText('h-phase', phaseVal);
+      q('h-phase').className = 'phase-chip ' + {
+        EARLY:'phase-early', CONFIRMED:'phase-confirmed',
+        PRE_OPEN:'phase-pre', CLOSED:'phase-closed'
+      }[phaseVal] || 'phase-pre';
+
+      const dir = market.direction || 'SIDEWAYS';
+      setText('h-market', dir);
+      q('h-market').className = 'badge ' + (dir==='BULLISH'?'badge-green':dir==='BEARISH'?'badge-red':'badge-yellow');
+
+      setText('h-mode-type', mm.mode || '—');
+
+      const ws = sys.websocketConnected;
+      q('ws-dot').className = 'ws-dot ' + (ws ? 'ws-on' : 'ws-off');
+      setText('ws-label', 'WS: ' + (ws ? 'LIVE' : 'OFF'));
+
+      const lagMs = lat.lagMs || 0;
+      const latEl = q('h-latency');
+      if(latEl) {
+        latEl.textContent = lat.isStale ? '⚠️ STALE' : (lagMs > 0 ? lagMs + 'ms' : '');
+        latEl.className = lat.isStale ? 'latency-bad' : lagMs > 10000 ? 'latency-warn' : 'latency-ok';
+      }
+
+      // Stale banner
+      q('stale-banner').style.display = lat.isStale ? 'block' : 'none';
+    }
+
+    // ── Overview ───────────────────────────────────────────────────────────────
+    function renderOverview(d) {
+      const pnl    = d.pnl || {};
+      const phase  = d.marketPhase || {};
+      const market = d.market || {};
+      const mm     = d.marketMode || {};
+      const bnf    = d.bankNiftyMode || {};
+      const lat    = d.latency || {};
+      const dir    = d.marketDirection || {};
+      const risk   = d.riskSlots || {};
+
+      // Stats row
+      const dp = parseFloat(pnl.dailyPnl || 0);
+      const dpEl = q('daily-pnl');
+      if(dpEl) { dpEl.textContent = pnlStr(dp); dpEl.className = 'stat ' + pnlClass(dp); }
+      setText('daily-pct', (pnl.dailyPct >= 0 ? '+' : '') + (pnl.dailyPct||0).toFixed(2) + '%');
+      setText('trades-today', (pnl.tradesToday||0) + ' / ' + (pnl.maxTradesPerDay||10));
+      setText('cb-reason', pnl.cbActive ? '⚠️ ' + (pnl.cbReason||'CB Active') : 'Circuit breaker OK');
+
+      const vix = market.vix || 0;
+      const vEl = q('vix-val');
+      if(vEl) {
+        vEl.textContent = vix.toFixed(2);
+        vEl.className = 'stat ' + (vix > 28 ? 'stat-red' : vix > 20 ? 'stat-yellow' : 'stat-green');
+      }
+      setText('vix-regime', market.vixRegime || '—');
+
+      const lagMs = lat.lagMs || 0;
+      const lEl = q('latency-stat');
+      if(lEl) {
+        lEl.textContent = lat.isStale ? 'STALE' : (lagMs + 'ms');
+        lEl.className = 'stat ' + (lat.isStale ? 'stat-red' : lagMs > 10000 ? 'stat-yellow' : 'stat-green');
+      }
+      setText('latency-status', lat.status || '—');
+
+      // Phase card
+      const phaseVal = phase.phase || 'PRE_OPEN';
+      const phaseMap = { EARLY:'phase-early', CONFIRMED:'phase-confirmed', PRE_OPEN:'phase-pre', CLOSED:'phase-closed' };
+      const pChip = q('phase-chip-big');
+      if(pChip) { pChip.textContent = phaseVal; pChip.className = 'phase-chip ' + (phaseMap[phaseVal]||'phase-pre'); }
+      setText('phase-desc', phase.description || '—');
+      const orbEl = q('orb-allowed');
+      if(orbEl) { orbEl.textContent = 'ORB: ' + (phase.isOrbAllowed ? 'ALLOWED' : 'BLOCKED'); orbEl.className = 'pill ' + (phase.isOrbAllowed ? 'pill-green' : 'pill-red'); }
+      const threshold = phase.isEarlyPhase ? 58 : (mm.minProbability || 60);
+      setText('threshold-chip', 'Threshold: ' + threshold);
+      // Phase progress bar (approximate current time progress)
+      const now = new Date();
+      const mins = now.getHours() * 60 + now.getMinutes();
+      const open = 9*60+15, close2 = 15*60+30;
+      const progress = Math.max(0, Math.min(100, (mins - open) / (close2 - open) * 100));
+      const pProg = q('phase-progress');
+      if(pProg) { pProg.style.width = progress + '%'; pProg.style.background = phaseVal === 'EARLY' ? 'var(--gold)' : phaseVal === 'CONFIRMED' ? 'var(--blue)' : 'var(--muted)'; }
+
+      // Market Mode card
+      const modeEl = q('mode-chip-big');
+      if(modeEl) { modeEl.textContent = mm.mode || '—'; modeEl.className = 'badge ' + getModeClass(mm.mode); }
+      setText('mode-rationale', mm.rationale || '—');
+      setText('ib-range', mm.ibRangePct ? mm.ibRangePct.toFixed(2) : '—');
+      setText('nifty-rvol', mm.niftyRvol ? mm.niftyRvol.toFixed(1) : '—');
+      setText('ib-hl', mm.ibHigh ? '₹' + mm.ibHigh.toFixed(0) + ' / ₹' + mm.ibLow.toFixed(0) : '—');
+      setText('active-strats', mm.activeStrategies || '—');
+      setText('min-prob', mm.minProbability || '—');
+
+      // Direction card
+      setText('dir-label', market.label || '—');
+      const dirLEl = q('dir-label');
+      if(dirLEl) dirLEl.className = 'stat ' + (market.direction==='BULLISH'?'stat-green':market.direction==='BEARISH'?'stat-red':'stat-yellow');
+      setText('ema20', dir.niftyEma20 || '—');
+      setText('ema50', dir.niftyEma50 || '—');
+      setText('ema200', dir.niftyEma200 || '—');
+      setText('dir-fail', dir.failReason || '');
+
+      // BankNifty card
+      setText('bnf-mode', bnf.mode || '—');
+      setText('bnf-ib', bnf.ibHigh ? bnf.ibHigh.toFixed(0) + '/' + bnf.ibLow.toFixed(0) : '—');
+      setText('bnf-prob', bnf.minProbability || '—');
+      setText('bnf-strats', bnf.activeStrategies || '—');
+
+      // Circuit Breaker card
+      const cbEl = q('cb-status');
+      if(cbEl) { cbEl.textContent = pnl.cbActive ? 'BLOCKED' : 'OK'; cbEl.className = 'stat ' + (pnl.cbActive ? 'stat-red' : 'stat-green'); }
+      setText('cb-daily-pct', (pnl.dailyPct||0).toFixed(2) + '%');
+      setText('weekly-pnl', pnlStr(pnl.weeklyPnl||0));
+      setText('monthly-pnl', pnlStr(pnl.monthlyPnl||0));
+
+      // Risk Slots
+      const p1 = risk.phase1Count || 0;
+      const maxP1 = risk.maxPhase1 || 3;
+      const dotsEl = q('phase1-dots');
+      if(dotsEl) {
+        dotsEl.innerHTML = Array.from({length: maxP1}, (_,i) =>
+          `<div style="width:16px;height:16px;border-radius:50%;background:${i<p1?'var(--blue)':'#21262d'};border:1px solid var(--border)"></div>`
+        ).join('');
+      }
+      setText('p1-count', p1 + ' / ' + maxP1);
+      setText('any-be', risk.anyAtBreakeven ? '✅ Yes' : '—');
+      const sExp = risk.sectorExposure || {};
+      setText('sector-exp', 'Sectors: ' + Object.entries(sExp).filter(([,v])=>v>0).map(([k,v])=>k+':'+v).join(', ') || 'None');
+    }
+
+    function getModeClass(mode) {
+      const map = { TREND_DAY:'badge-green', NON_TREND_DAY:'badge-red', NEUTRAL_DAY:'badge-yellow', NORMAL_DAY:'badge-blue', NORMAL_VARIATION:'badge-purple', DOUBLE_DISTRIBUTION:'badge-gold' };
+      return map[mode] || 'badge-blue';
+    }
+
+    // ── Trades ─────────────────────────────────────────────────────────────────
+    function renderTrades(d) {
+      const paper  = d.paperTrades || [];
+      const closed = d.todayTrades || [];
+
+      // Paper trades
+      const ptEl = q('paper-trades-body');
+      if(ptEl) {
+        if(paper.length === 0) { q('paper-trades-empty').style.display='block'; q('paper-trades-table').style.display='none'; }
+        else {
+          q('paper-trades-empty').style.display='none'; q('paper-trades-table').style.display='table';
+          ptEl.innerHTML = paper.map(t => {
+            const pnl = parseFloat(t.unrealPnl || 0);
+            return `<tr>
+              <td><b>${t.tradingSymbol}</b></td>
+              <td>${dirPill(t.direction)}</td>
+              <td>${t.remainingQty}/${t.quantity}</td>
+              <td>₹${parseFloat(t.entryPrice||0).toFixed(2)}</td>
+              <td>₹${parseFloat(t.ltp||0).toFixed(2)}</td>
+              <td>₹${parseFloat(t.stopLoss||0).toFixed(2)}</td>
+              <td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
+              <td>${t.rMultiple||'—'}</td>
+              <td>${phasePill(t.phase||'Phase-1')}</td>
+            </tr>`;
+          }).join('');
+        }
+      }
+
+      // Closed trades
+      const ctEl = q('closed-trades-body');
+      if(ctEl) {
+        const todayClosed = (d.todayTrades||[]).filter(t => t.status === 'CLOSED');
+        if(todayClosed.length === 0) { q('closed-trades-empty').style.display='block'; q('closed-trades-table').style.display='none'; }
+        else {
+          q('closed-trades-empty').style.display='none'; q('closed-trades-table').style.display='table';
+          ctEl.innerHTML = todayClosed.map(t => {
+            const pnl = parseFloat(t.netPnl || 0);
+            return `<tr>
+              <td><b>${t.tradingSymbol}</b></td>
+              <td>${dirPill(t.direction)}</td>
+              <td style="font-size:10px">${t.strategyName||'—'}</td>
+              <td>₹${parseFloat(t.entryPrice||0).toFixed(2)}</td>
+              <td>₹${parseFloat(t.exitPrice||0).toFixed(2)}</td>
+              <td class="${pnlClass(pnl)}">${pnlStr(pnl)}</td>
+              <td style="font-size:10px">${t.exitReason||'—'}</td>
+            </tr>`;
+          }).join('');
+        }
+      }
+    }
+
+    // ── Scanner ────────────────────────────────────────────────────────────────
+    function renderScanner(d) {
+      const armed    = d.armedStocks || {};
+      const gates    = d.gateRejections || {};
+      const rankings = d.stockRankings || [];
+      const lat      = d.latency || {};
+      const sys      = d.system || {};
+
+      // Armed count
+      setText('armed-count', Object.keys(armed).length);
+      const aBody = q('armed-body');
+      if(aBody) {
+        const entries = Object.values(armed);
+        if(entries.length === 0) { q('armed-empty').style.display='block'; q('armed-table').style.display='none'; }
+        else {
+          q('armed-empty').style.display='none'; q('armed-table').style.display='table';
+          aBody.innerHTML = entries.map(a => `<tr>
+            <td><b>${a.symbol}</b></td>
+            <td>${dirPill(a.direction)}</td>
+            <td style="font-size:10px">${a.sector||'—'}</td>
+            <td>₹${parseFloat(a.compressionHigh||0).toFixed(2)}</td>
+            <td>₹${parseFloat(a.compressionLow||0).toFixed(2)}</td>
+            <td>₹${parseFloat(a.stopLoss||0).toFixed(2)}</td>
+            <td>₹${parseFloat(a.target||0).toFixed(2)}</td>
+            <td>${(a.minRR||0).toFixed(2)}R</td>
+            <td><span class="pill pill-grey">${a.gapType||'—'}</span></td>
+          </tr>`).join('');
+        }
+      }
+
+      // Gate rejections
+      const rEl = q('rejections-body');
+      if(rEl) {
+        const sortedGates = Object.entries(gates).sort(([,a],[,b]) => b-a);
+        rEl.innerHTML = sortedGates.length === 0
+          ? '<span style="color:var(--muted)">No rejections</span>'
+          : sortedGates.map(([k,v]) => `<div class="info-row"><span class="info-label">${k}</span><span class="info-val stat-red">${v}</span></div>`).join('');
+      }
+
+      // Rankings
+      const rkEl = q('rankings-body');
+      if(rkEl) {
+        if(rankings.length === 0) { q('rankings-empty').style.display='block'; rkEl.style.display='none'; }
+        else {
+          q('rankings-empty').style.display='none'; rkEl.style.display='block';
+          rkEl.innerHTML = rankings.map(r => {
+            const rankClass = r.rank === 1 ? 'rank-1' : r.rank === 2 ? 'rank-2' : r.rank === 3 ? 'rank-3' : 'rank-n';
+            return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
+              <div class="rank-badge ${rankClass}">${r.rank}</div>
+              <div style="flex:1">
+                <div style="font-weight:700">${r.symbol} <span style="font-size:10px;color:var(--muted)">${r.sector||''}</span></div>
+                <div style="font-size:11px;color:var(--muted)">Score: ${r.finalScore}</div>
+              </div>
+              ${r.inTop3 ? '<span class="pill pill-gold">TOP-3</span>' : ''}
+            </div>`;
+          }).join('');
+        }
+      }
+
+      // System health
+      setText('sys-ws', sys.websocketConnected ? '✅ Connected' : '❌ Disconnected');
+      setText('sys-reconnects', sys.reconnectCount || 0);
+      setText('sys-lag', lat.lagMs > 0 ? lat.lagMs + 'ms' : '—');
+      setText('sys-last-candle', lat.lastCandleTime || '—');
+      setText('sys-candles', lat.candlesProcessed || '—');
+      setText('sys-status', lat.status || '—');
+      setText('sys-mode', d.tradingMode || '—');
+      setText('sys-entry', sys.entryAllowed ? '✅ Yes' : '❌ No (' + (sys.currentWindow||'—') + ')');
+      setText('sys-window', sys.currentWindow || '—');
+    }
+
+    // ── Strategies ─────────────────────────────────────────────────────────────
+    function renderStrategies(d) {
+      const strat  = d.strategyStatus || {};
+      const counts = strat.signalCounters || {};
+      const pnlMap = strat.perStrategyPnl || {};
+      const fired  = Array.from(strat.firedToday || []);
+
+      const cEl = q('strategy-counts');
+      if(cEl) {
+        const names = ['SCANNER_7GATE','AUTO_MODE','ORB_VWAP_SECTOR','VAP_PULLBACK','RANGE_BREAKOUT_3TOUCH'];
+        cEl.innerHTML = names.map(n => {
+          const cnt = counts[n] || 0;
+          return `<div class="info-row"><span class="info-label">${n}</span><span class="info-val ${cnt>0?'stat-green':'stat-muted'}">${cnt} signals</span></div>`;
+        }).join('');
+      }
+
+      const pEl = q('strategy-pnl');
+      if(pEl) {
+        const entries = Object.entries(pnlMap);
+        pEl.innerHTML = entries.length === 0
+          ? '<span style="color:var(--muted)">No trades yet</span>'
+          : entries.map(([k,v]) => {
+              const pnl = parseFloat(v.pnl || 0);
+              return `<div class="info-row">
+                <span class="info-label">${k}</span>
+                <span class="info-val ${pnlClass(pnl)}">${pnlStr(pnl)} (${v.wins||0}W/${v.losses||0}L)</span>
+              </div>`;
+            }).join('');
+      }
+
+      const ftEl = q('fired-today');
+      if(ftEl) {
+        ftEl.textContent = fired.length === 0 ? 'None' : fired.join(', ');
+        ftEl.style.fontSize = fired.length > 5 ? '10px' : '11px';
+      }
+    }
+
+    // ── Sectors ────────────────────────────────────────────────────────────────
+    function renderSectors(d) {
+      const sectors = (d.sectors || []).sort((a,b) => b.changePercent - a.changePercent);
+      const el = q('sectors-body');
+      if(!el) return;
+      el.innerHTML = sectors.map(s => {
+        const chg = parseFloat(s.changePercent || 0);
+        const chgClass = chg > 0.3 ? 'pnl-positive' : chg < -0.3 ? 'pnl-negative' : '';
+        const status = s.isTopSector ? '<span class="pill pill-green">TOP</span>'
+                     : s.isBottomSector ? '<span class="pill pill-red">BOTTOM</span>'
+                     : s.alignedBullish ? '<span class="pill pill-green">BULL</span>'
+                     : s.alignedBearish ? '<span class="pill pill-red">BEAR</span>'
+                     : '<span class="pill pill-grey">NEUTRAL</span>';
+        const barColor = chg > 0 ? 'var(--green)' : 'var(--red)';
+        const barW = Math.min(100, Math.abs(chg) * 20);
+        return `<tr>
+          <td><b>${s.name}</b></td>
+          <td>${status}</td>
+          <td class="${chgClass}">${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%</td>
+          <td>
+            <div style="font-size:11px">${parseFloat(s.greenPct||0).toFixed(0)}% (${s.greenStocks||0}G/${s.redStocks||0}R)</div>
+            <div class="sector-bar"><div class="sector-fill" style="width:${parseFloat(s.greenPct||0)}%;background:var(--green)"></div></div>
+          </td>
+          <td>${parseFloat(s.relativeStrength||0).toFixed(2)}</td>
+          <td>${s.totalStocks||0}</td>
+          <td>${s.alignedBullish ? '✅ Bull' : s.alignedBearish ? '❌ Bear' : '—'}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // ── Risk tab ───────────────────────────────────────────────────────────────
+    function renderRisk(d) {
+      const risk  = d.riskSlots || {};
+      const pnl   = d.pnl || {};
+      const phase = d.marketPhase || {};
+      const mm    = d.marketMode || {};
+      const mar   = d.market || {};
+
+      setText('r-p1', (risk.phase1Count||0) + ' / ' + (risk.maxPhase1||3));
+      setText('r-maxp1', risk.maxPhase1||3);
+      setText('r-be', risk.anyAtBreakeven ? '✅ Yes — 4th trade unlockable' : 'No');
+      setText('r-capital', '₹' + parseFloat(pnl.capital||0).toLocaleString());
+      setText('r-daily', pnlStr(pnl.dailyPnl||0));
+      setText('r-daily-pct', (pnl.dailyPct||0).toFixed(2) + '%');
+      setText('r-weekly', pnlStr(pnl.weeklyPnl||0));
+      setText('r-monthly', pnlStr(pnl.monthlyPnl||0));
+      setText('r-cb', pnl.cbActive ? '⚠️ ACTIVE — ' + (pnl.cbReason||'') : '✅ OK');
+      setText('r-vix', (mar.vix||0).toFixed(2));
+      setText('r-vix-reg', mar.vixRegime||'—');
+      setText('r-threshold', phase.isEarlyPhase ? '58 (EARLY)' : (mm.minProbability||'—') + ' (CONFIRMED)');
+      setText('r-ib-force', phase.ibForceNeeded ? '⚠️ YES' : '✅ No');
+      setText('r-orb', phase.isOrbAllowed ? '✅ Yes' : '❌ No');
+
+      const sExp = risk.sectorExposure || {};
+      const seEl = q('r-sector-exp');
+      if(seEl) seEl.innerHTML = Object.entries(sExp).filter(([,v])=>v>0).map(([k,v])=>`<span class="pill pill-blue" style="margin:2px">${k}:${v}</span>`).join('') || '<span style="color:var(--muted)">None</span>';
+
+      const stExp = risk.strategyExposure || {};
+      const steEl = q('r-strat-exp');
+      if(steEl) steEl.innerHTML = Object.entries(stExp).filter(([,v])=>v>0).map(([k,v])=>`<span class="pill pill-purple" style="margin:2px">${k}:${v}</span>`).join('') || '<span style="color:var(--muted)">None</span>';
+    }
+
+    // ── Validation tab ─────────────────────────────────────────────────────────
+    async function loadValidation() {
+      const sym  = q('val-symbol').value.trim();
+      const strat = q('val-strategy').value;
+      let url = API + '/validation';
+      if(sym)  url += '?symbol=' + encodeURIComponent(sym);
+      else if(strat) url += '?strategy=' + encodeURIComponent(strat);
+
+      try {
+        const res = await fetch(url);
+        const val = await res.json();
+        renderValidation(val);
+      } catch(e) { console.error(e); }
+    }
+
+    function renderValidation(val) {
+      setText('val-count', val.symbolsTracked || '—');
+
+      const freq = val.failureFrequency || {};
+      const fEl = q('failure-freq');
+      if(fEl) {
+        const sorted = Object.entries(freq).sort(([,a],[,b]) => b-a).slice(0,10);
+        fEl.innerHTML = sorted.length === 0
+          ? '<span style="color:var(--muted)">No failures recorded yet</span>'
+          : sorted.map(([k,v]) => `<div class="info-row"><span class="info-label">${k}</span><span class="info-val stat-red">${v} fails</span></div>`).join('');
+      }
+
+      const logs = val.results || [];
+      const all  = val.allLogs || {};
+      const logEl = q('validation-log');
+      if(logEl) {
+        const combined = logs.length > 0 ? logs : Object.values(all).flat().slice(0, 30);
+        if(combined.length === 0) { logEl.innerHTML = '<span style="color:var(--muted)">No validation data</span>'; return; }
+        logEl.innerHTML = combined.map(l => {
+          if(!l) return '';
+          const passed = l.failedAtStep === 0;
+          const steps  = l.steps || [];
+          return `<div style="margin-bottom:10px;padding:8px;background:#1c2129;border-radius:6px;border-left:3px solid ${passed?'var(--green)':'var(--red)'}">
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+              <b>${l.symbol||'—'}</b>
+              <span class="pill pill-grey">${l.strategy||'—'}</span>
+              <span class="pill pill-grey">${l.direction||'—'}</span>
+              <span class="pill ${passed?'pill-green':'pill-red'}">${passed?'ALL PASS':'FAIL @ Step '+l.failedAtStep}</span>
+              <span style="font-size:10px;color:var(--muted);margin-left:auto">${l.evaluationTime||''}</span>
+            </div>
+            ${steps.map(s => `<div class="gate-row">
+              <div class="gate-num ${s.passed?'gate-pass':'gate-fail'}">${s.stepNum}</div>
+              <div style="flex:1">${s.label||''}</div>
+              <div style="font-size:10px;color:var(--muted);max-width:200px;text-align:right;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${s.detail||''}</div>
+            </div>`).join('')}
+          </div>`;
+        }).join('');
+      }
+    }
+
+    // ── Auto refresh ───────────────────────────────────────────────────────────
+    function startAutoRefresh() {
+      clearInterval(autoRefresh);
+      autoRefresh = setInterval(loadData, 5000); // refresh every 5s
+    }
+
+    // ── Init ───────────────────────────────────────────────────────────────────
+    window.addEventListener('DOMContentLoaded', () => {
+      loadData();
+      startAutoRefresh();
+      // Load validation on tab click
+      document.querySelectorAll('.tab').forEach(t => {
+        t.addEventListener('click', () => {
+          if(t.textContent.toLowerCase().includes('valid')) loadValidation();
+        });
+      });
+    });
 </script>
 </body>
 </html>

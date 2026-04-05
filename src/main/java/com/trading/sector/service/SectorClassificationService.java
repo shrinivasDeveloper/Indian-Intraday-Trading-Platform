@@ -2,6 +2,7 @@ package com.trading.sector.service;
 
 import com.zerodhatech.models.Instrument;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -10,6 +11,13 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Dynamic sector classification — NO hardcoding anywhere.
  * Built from NSE instrument list at startup via keyword matching on symbol names.
+ *
+ * BUG FIX (Gate 2 disabled):
+ *   buildFromInstruments() was NOT calling sectorStrength.registerSymbol().
+ *   This left SectorStrengthService.symbolSector empty, causing isSectorAligned()
+ *   to always return true (allow) for every symbol — Gate 2 was silently disabled.
+ *   Fix: inject SectorStrengthService (@Lazy to avoid circular dependency) and
+ *   call registerSymbol(symbol, sector) for every equity instrument classified.
  */
 @Service
 @Slf4j
@@ -17,6 +25,15 @@ public class SectorClassificationService {
 
     // symbol → sector
     private final Map<String, String> symbolToSector = new ConcurrentHashMap<>();
+
+    // @Lazy breaks the potential circular dependency:
+    //   SectorClassificationService → SectorStrengthService → (nothing that needs SectorClassify)
+    // This is safe — registerSymbol() is only called at startup, not during construction.
+    private final SectorStrengthService sectorStrength;
+
+    public SectorClassificationService(@Lazy SectorStrengthService sectorStrength) {
+        this.sectorStrength = sectorStrength;
+    }
 
     public static final String BANKING    = "Banking & Finance";
     public static final String IT         = "IT";
@@ -31,7 +48,7 @@ public class SectorClassificationService {
     public static final String CHEMICALS  = "Chemicals";
     public static final String OTHERS     = "Others";
 
-    // ── Keyword maps ──────────────────────────────────────────────────
+    // ── Keyword maps ──────────────────────────────────────────────────────────
 
     private static final Map<String, List<String>> SECTOR_KEYWORDS = new LinkedHashMap<>();
 
@@ -105,12 +122,13 @@ public class SectorClassificationService {
         ));
     }
 
-    // ── Build from instrument list ────────────────────────────────────
+    // ── Build from instrument list ──────────────────────────────────────────────
 
     public void buildFromInstruments(List<Instrument> instruments) {
         symbolToSector.clear();
         int classified = 0;
-        int others = 0;
+        int others     = 0;
+        int registered = 0;
 
         for (Instrument inst : instruments) {
             if (inst.getTradingsymbol() == null) continue;
@@ -123,12 +141,18 @@ public class SectorClassificationService {
             String sector = classify(symbol, name);
             symbolToSector.put(symbol, sector);
 
+            // ── BUG FIX: register into SectorStrengthService so Gate 2 works ──
+            // Without this, SectorStrengthService.symbolSector is always empty,
+            // isSectorAligned() returns true for every stock, and Gate 2 is disabled.
+            sectorStrength.registerSymbol(symbol, sector);
+            registered++;
+
             if (OTHERS.equals(sector)) others++;
             else classified++;
         }
 
-        log.info("Sector classification built: {} classified, {} others, {} total",
-                classified, others, symbolToSector.size());
+        log.info("Sector classification built: {} classified, {} others, {} total, {} registered to SectorStrength",
+                classified, others, symbolToSector.size(), registered);
     }
 
     public String getSector(String symbol) {
@@ -153,7 +177,7 @@ public class SectorClassificationService {
                 FMCG, INFRA, TELECOM, REALESTATE, CHEMICALS, OTHERS);
     }
 
-    // ── Private classification logic ──────────────────────────────────
+    // ── Private classification logic ────────────────────────────────────────────
 
     private String classify(String symbol, String name) {
         // Check each sector in priority order
