@@ -278,7 +278,7 @@ public class PaperTradeManagementService {
     // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
-    @Async("tradingExecutor")
+    @Async("tickExecutor")             // ← FIXED: was tradingExecutor; tickExecutor for latency-critical SL monitoring
     public void onTick(TickReceivedEvent tick) {
         if (!"PAPER".equalsIgnoreCase(tradingMode)) return;
 

@@ -157,7 +157,7 @@ public class TradeManagementService {
     // ══════════════════════════════════════════════════════════════════════
 
     @EventListener
-    @Async("tradingExecutor")
+    @Async("tickExecutor")             // ← FIXED: was tradingExecutor; tickExecutor for latency-critical SL monitoring
     public void onTick(TickReceivedEvent tick) {
         String sym = tick.getTradingSymbol();
         lastPrices.put(sym, tick.getLastTradedPrice());

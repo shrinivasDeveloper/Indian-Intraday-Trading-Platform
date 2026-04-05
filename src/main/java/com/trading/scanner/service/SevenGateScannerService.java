@@ -308,7 +308,7 @@ public class SevenGateScannerService {
     // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
-    @Async("tradingExecutor")
+    @Async("tickExecutor")             // ← FIXED: was tradingExecutor; tickExecutor for real-time breakout detection
     public void onTick(TickReceivedEvent tick) {
         String sym = tick.getTradingSymbol();
         ArmedStock armed = armedStocks.get(sym);
