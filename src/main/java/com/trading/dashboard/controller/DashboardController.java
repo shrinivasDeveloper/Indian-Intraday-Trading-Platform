@@ -467,7 +467,7 @@ public class DashboardController {
         m.put("isStale",          s.isStale());
         m.put("isCritical",       s.isCritical());
         m.put("lagMs",            s.lagMs());
-        m.put("lastCandleTime",   s.lastCandleTime());
+        m.put("lastCandleTime",   s.lastTickTime());
         m.put("status",           s.status());
         m.put("candlesProcessed", s.candlesProcessed());
         return m;
