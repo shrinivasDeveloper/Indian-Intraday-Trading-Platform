@@ -288,17 +288,23 @@ app:
 
 logging:
   level:
-    com.trading: INFO
-    com.zerodhatech: WARN
-    org.springframework: WARN
+    root: INFO                  # base level
+
+    com.trading: TRACE          # 🔥 FULL logs (your core system)
+    com.zerodhatech: DEBUG      # API + WebSocket
+
+    org.springframework: WARN   # reduce noise
     org.hibernate: WARN
-    com.zaxxer: WARN
+    com.zaxxer.hikari: WARN
+
   pattern:
-    console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{50} - %msg%n"
+
   file:
     name: logs/trading-platform.log
+
   logback:
     rollingpolicy:
       max-file-size: 50MB
       max-history: 7
-      file-name-pattern: logs/trading-platform.%d{yyyy-MM-dd}.%i.log`Z
+      file-name-pattern: logs/trading-platform.%d{yyyy-MM-dd}.%i.log
