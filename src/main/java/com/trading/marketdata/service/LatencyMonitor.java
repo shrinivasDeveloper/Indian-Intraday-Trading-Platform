@@ -1,7 +1,6 @@
 package com.trading.marketdata.service;
 
 import com.trading.events.CandleCompleteEvent;
-import com.trading.events.TickReceivedEvent;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
@@ -15,108 +14,63 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * LatencyMonitor — Measures time since last TICK (not last candle close).
+ * LatencyMonitor — System health guardian for live candle processing.
  *
- * ═══════════════════════════════════════════════════════════════════════════
- * ROOT CAUSE FIX — Design bug causing false STALE every 4-5 minutes:
- * ═══════════════════════════════════════════════════════════════════════════
+ * BUG FIXED (WARNING → now zero-warning):
+ *   Lombok @Getter on a class generates isStale() for boolean field "stale".
+ *   But we also have an explicit public method isStale() which conflicts.
+ *   COMPILER WARNING: "Not generating isStale(): A method with that name already exists"
  *
- * BROKEN DESIGN (previous version):
- *   lastDataTime updated ONLY on CandleCompleteEvent (every 5 minutes).
- *   STALE_THRESHOLD_MS = 60 seconds.
- *   Result: 60 seconds after every candle closes, lag exceeds threshold.
- *   The monitor trips STALE for the remaining ~4 minutes of every bar.
- *   → "DATA STALE — All trades BLOCKED" fires correctly but for wrong trigger.
- *   → Screenshot at 9:45 showing STALE (61s lag) = this bug, not dead WebSocket.
+ *   FIX: Remove @Getter from class level. Add explicit @Getter only on non-boolean
+ *   fields that need getters. For the boolean "stale" field, our explicit
+ *   isStale() method is the getter — no duplicate generated.
  *
- * CORRECT DESIGN (this version):
- *   lastDataTime updated on every TICK via onTick().
- *   During market hours, Zerodha sends 1-3 ticks per second per subscribed token.
- *   With 405 tokens subscribed, ticks arrive every millisecond.
- *   Lag will be < 2 seconds during a live session.
- *   STALE only fires when WebSocket actually disconnects or Zerodha goes down.
- *
- * THRESHOLD VALUES (corrected):
- *   STALE_THRESHOLD_MS   = 10,000ms (10s)  — no tick for 10s = real outage
- *   CRITICAL_THRESHOLD_MS = 30,000ms (30s)  — no tick for 30s = full disconnect
- *
- *   Previous values (60s/120s) were calibrated for candle-based monitoring.
- *   With tick-based monitoring, 10s of silence in live market = confirmed outage.
- *
- * CANDLE LISTENER RETAINED:
- *   onCandle() still counts completed candles for the "candlesProcessed" dashboard
- *   metric. It does NOT update lastDataTime (that's tick-only now).
- *
- * EXECUTOR ASSIGNMENT:
- *   onTick()   → @Async("tickExecutor")    — latency-critical, must not queue
- *   onCandle() → @Async("tradingExecutor") — counter only, low priority
- *
- * LOMBOK WARNING FIX (retained from previous version):
- *   No class-level @Getter. Explicit isStale(), isCritical() etc.
- *   Prevents: "Not generating isStale(): A method with that name already exists"
+ * HOW IT WORKS:
+ *   Every completed 5m candle → recordCandleReceived() → update lastCandleTime.
+ *   Every 5 seconds → checkLatency() compares now vs lastCandleTime.
+ *   If gap > STALE_THRESHOLD_MS (60s) → stale = true → trades blocked.
+ *   Auto-recovers when data resumes.
  *
  * INTEGRATION:
- *   StrategyEvaluatorService: if (latencyMonitor.isStale()) return; // skip signal
- *   DashboardController:      latencyMonitor.getSummary()
+ *   StrategyEvaluatorService: if (latencyMonitor.isStale()) return;
+ *   PaperTradeManagementService: passes through (SL monitoring continues even when stale)
  */
 @Service
 @Slf4j
 public class LatencyMonitor {
 
-    private static final ZoneId IST                   = ZoneId.of("Asia/Kolkata");
+    private static final ZoneId IST                    = ZoneId.of("Asia/Kolkata");
+    private static final long   STALE_THRESHOLD_MS     = 60_000L;
+    private static final long   CRITICAL_THRESHOLD_MS  = 120_000L;
 
-    // ── CORRECTED thresholds — calibrated for tick-based (not candle-based) monitoring ──
-    // 10 seconds of tick silence during market hours = real WebSocket outage
-    private static final long STALE_THRESHOLD_MS    = 10_000L;   // 10s  (was 60s)
-    private static final long CRITICAL_THRESHOLD_MS = 30_000L;   // 30s  (was 120s)
-
-    /**
-     * Updated on every incoming TICK — not just candle close.
-     * Null until first tick arrives after market open.
-     */
-    private final AtomicReference<Instant> lastDataTime     = new AtomicReference<>(null);
-    private final AtomicLong               ticksReceived    = new AtomicLong(0);
+    private final AtomicReference<Instant> lastCandleTime   = new AtomicReference<>(null);
     private final AtomicLong               candlesProcessed = new AtomicLong(0);
 
-    // No Lombok @Getter on class — avoids isStale() duplicate warning
+    // BUG FIX: No class-level @Getter. Explicit methods below prevent
+    // Lombok duplicate-method warning ("Not generating isStale()")
     private volatile boolean stale    = false;
     private volatile boolean critical = false;
     private volatile long    lagMs    = 0;
     private volatile String  status   = "WAITING";
 
-    // ════════════════════════════════════════════════════════════════════════
-    // ROOT CAUSE FIX: Update on every TICK, not every candle close
-    // Uses tickExecutor so this check is never delayed by strategy tasks
-    // ════════════════════════════════════════════════════════════════════════
-
-    @EventListener
-    @Async("tickExecutor")
-    public void onTick(TickReceivedEvent tick) {
-        lastDataTime.set(Instant.now());
-        ticksReceived.incrementAndGet();
-    }
-
-    // ── Candle counter (for dashboard display only — does NOT affect staleness) ──
+    // ── Event listener — update on every complete 5m candle ──────────────
 
     @EventListener
     @Async("tradingExecutor")
     public void onCandle(CandleCompleteEvent event) {
         if (!"5minute".equals(event.getCandle().getTimeframe())) return;
         if (!event.getCandle().isComplete()) return;
+        lastCandleTime.set(Instant.now());
         candlesProcessed.incrementAndGet();
-        // NOTE: do NOT update lastDataTime here — that's tick-only now
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // Health check — runs every 2 seconds
-    // (was 5s — faster polling needed for 10s threshold)
-    // ════════════════════════════════════════════════════════════════════════
+    // ── Health check — runs every 5 seconds ──────────────────────────────
 
-    @Scheduled(fixedDelay = 2000)
+    @Scheduled(fixedDelay = 5000)
     public void checkLatency() {
         LocalTime now = LocalTime.now(IST);
 
-        // Outside market hours → always healthy
+        // Outside market hours → not stale
         if (now.isBefore(LocalTime.of(9, 15)) || now.isAfter(LocalTime.of(15, 35))) {
             stale    = false;
             critical = false;
@@ -125,17 +79,13 @@ public class LatencyMonitor {
             return;
         }
 
-        Instant last = lastDataTime.get();
-
-        // No tick yet — only flag as problem after 9:30 (first 15min = normal warm-up)
+        Instant last = lastCandleTime.get();
         if (last == null) {
-            if (now.isAfter(LocalTime.of(9, 30))) {
+            if (now.isAfter(LocalTime.of(9, 40))) {
                 stale  = true;
                 lagMs  = -1;
-                status = "NO_TICK_RECEIVED";
-                log.warn("[LATENCY] No tick received by 9:30 AM — WebSocket may not be connected");
-            } else {
-                status = "WARMING_UP";
+                status = "NO_DATA_RECEIVED";
+                log.warn("[LATENCY] No candle received after 9:40 AM — marking STALE");
             }
             return;
         }
@@ -147,52 +97,46 @@ public class LatencyMonitor {
         if (gapMs > CRITICAL_THRESHOLD_MS) {
             stale    = true;
             critical = true;
-            status   = String.format("CRITICAL — no tick for %.0fs", gapMs / 1000.0);
-            log.error("[LATENCY] CRITICAL: {}s since last tick — WebSocket disconnected. ALL TRADES BLOCKED.",
-                    gapMs / 1000);
-
+            status   = String.format("CRITICAL (%.0fs lag)", gapMs / 1000.0);
+            log.error("[LATENCY] CRITICAL LAG {}s — ALL TRADES BLOCKED. Check WebSocket.", gapMs / 1000);
         } else if (gapMs > STALE_THRESHOLD_MS) {
             stale    = true;
             critical = false;
-            status   = String.format("STALE — no tick for %.1fs", gapMs / 1000.0);
+            status   = String.format("STALE (%.0fs lag)", gapMs / 1000.0);
             if (!wasStale) {
-                log.warn("[LATENCY] STALE: {}s since last tick — trades blocked", gapMs / 1000.0);
+                log.warn("[LATENCY] System STALE: {}s since last candle — trades blocked", gapMs / 1000);
             }
-
         } else {
             stale    = false;
             critical = false;
-            status   = String.format("LIVE (%.0fms lag)", (double) gapMs);
+            status   = String.format("LIVE (%.1fs)", gapMs / 1000.0);
             if (wasStale) {
-                log.info("[LATENCY] Recovered — tick lag now {}ms. Trades re-enabled.", gapMs);
+                log.info("[LATENCY] System recovered from STALE — trades re-enabled (lag={}ms)", gapMs);
             }
         }
     }
 
-    // ════════════════════════════════════════════════════════════════════════
-    // Public API — no Lombok @Getter to avoid isStale() duplicate warning
-    // ════════════════════════════════════════════════════════════════════════
+    // ── Explicit public getters (NO Lombok @Getter — avoids duplicate warning) ──
 
-    /** Returns true when no tick has been received for > 10 seconds during market hours. */
+    /**
+     * Returns true when candle data is delayed > 60 seconds.
+     * StrategyEvaluatorService checks this before executing any trade.
+     */
     public boolean isStale()    { return stale; }
 
     public boolean isCritical() { return critical; }
     public long    getLagMs()   { return lagMs; }
     public String  getStatus()  { return status; }
+    public long    getCandlesProcessed() { return candlesProcessed.get(); }
 
-    public long getTicksReceived()    { return ticksReceived.get(); }
-    public long getCandlesProcessed() { return candlesProcessed.get(); }
-
+    /** Summary record for dashboard display */
     public LatencySummary getSummary() {
-        Instant last = lastDataTime.get();
+        Instant last = lastCandleTime.get();
         return new LatencySummary(
-                stale,
-                critical,
-                lagMs,
+                stale, critical, lagMs,
                 last != null ? last.atZone(IST).toLocalTime().toString() : "None",
                 status,
-                candlesProcessed.get(),
-                ticksReceived.get()
+                candlesProcessed.get()
         );
     }
 
@@ -200,9 +144,8 @@ public class LatencyMonitor {
             boolean isStale,
             boolean isCritical,
             long    lagMs,
-            String  lastTickTime,
+            String  lastCandleTime,
             String  status,
-            long    candlesProcessed,
-            long    ticksReceived
+            long    candlesProcessed
     ) {}
 }
