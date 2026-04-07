@@ -12,7 +12,6 @@ import org.springframework.stereotype.Component;
 import java.math.BigDecimal;
 import java.math.MathContext;
 import java.math.RoundingMode;
-import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
@@ -27,84 +26,93 @@ import java.util.stream.Collectors;
  * Runs INDEPENDENTLY — does NOT need 7-gate scanner.
  *
  * ═══════════════════════════════════════════════════════════════════
- * FIXES APPLIED (v7.1):
+ * FIXES APPLIED (v7.2 — builds on v7.1):
  * ═══════════════════════════════════════════════════════════════════
+ *
+ * FIX A (v7.2) — BUG #8: Do NOT record TIME_WINDOW failure to tracker.
+ *
+ *   ROOT CAUSE (confirmed from dashboard screenshot + log analysis):
+ *     After 13:00 IST, StrategyEvaluatorService still calls generateSignal()
+ *     for modes that include ORB_VWAP_SECTOR (e.g. DOUBLE_DISTRIBUTION).
+ *     withinTime() returns false → the old code recorded a FAIL@1 TIME_WINDOW
+ *     entry to StrategyValidationTracker every 5 minutes for every stock.
+ *     StrategyValidationTracker.record() previously used unconditional Map.put()
+ *     → each FAIL@1 overwrote the morning's meaningful evaluation (FAIL@2–9).
+ *     By 6:43 PM, ALL stocks showed "FAIL@1 at 15:25" — no morning data visible.
+ *
+ *   FIX:
+ *     Remove tracker.record() from the TIME_WINDOW early-return block entirely.
+ *     TIME_WINDOW is a schedule gate, not a trading condition — it carries zero
+ *     diagnostic value. The StrategyValidationTracker (also fixed in v7.2) now
+ *     preserves the deepest attempt, but this defence-in-depth ensures ORB
+ *     never writes shallow entries that compete with meaningful ones.
+ *
+ *   RESULT:
+ *     The tracker now only receives ORB records when the strategy actually
+ *     attempted condition evaluation (conditions 2–9). The morning's FAIL@5
+ *     (Sector not aligned) survives intact until 9:15 AM next day when the
+ *     tracker resets.
+ *
+ * ───────────────────────────────────────────────────────────────────
+ * FIXES APPLIED (v7.1):
+ * ───────────────────────────────────────────────────────────────────
  *
  * FIX 1 — BUG #1: orbPeriod now timestamp-filtered to today's 9:15–9:30 candles.
  *   OLD: candles5m.subList(size-orbCandles, size) = oldest 3 entries in buffer.
  *        After WarmupService pre-loads 300 historical candles, oldest 3 = YESTERDAY.
  *        orbH/orbL were computed from yesterday's afternoon data → every C5 failed.
- *   NEW: filter candles by candleTime.atZone(IST): date=today, time ∈ [09:15, 09:30].
+ *   NEW: filter candles by candleTime.atZone(IST): date=today, time ∈ [09:15, 09:30).
  *        If no candles found in that window → return empty (IB not yet formed).
  *        If orbH or orbL is zero after filtering → return empty (bad data guard).
  *
  * FIX 2 — BUG #2: SL changed from orbL to current candle low.
- *   OLD: sl = orbL × 0.999  → SL is 0.5–2% below entry → always fails Gate 7.5
- *        (Gate 7.5 requires RR ≥ 2.5 after slippage; wide SL makes RR ≈ 1.6R).
+ *   OLD: sl = orbL × 0.999  → SL is 0.5–2% below entry → always fails Gate 7.5.
  *   NEW: sl = cur.getLow() × 0.9995 → SL is 0.05–0.3% below entry (breakout candle low).
- *        Same approach as RangeBreakoutStrategy. adjustedRR comfortably exceeds 2.5.
  *        For SELL: sl = cur.getHigh() × 1.0005 (mirror).
  *
  * FIX 3 — BUG #3: C8 structure check now excludes the signal candle itself.
- *   OLD: hasHHHL(candles5m.subList(0, 4)) — index 0 is the breakout candle.
- *        Since it just broke orbH, its high is always > prev candles → C8 always true.
- *        This was tautological and added no filtering.
- *   NEW: hasHHHL(candles5m.subList(1, 5)) — checks the 3 candles BEFORE the signal.
- *        Now C8 genuinely tests momentum structure leading into the breakout.
+ *   OLD: hasHHHL(candles5m.subList(0, 4)) — tautological (breakout candle always HH).
+ *   NEW: hasHHHL(candles5m.subList(1, 5)) — checks 3 candles BEFORE the signal.
  *
  * FIX 4 — volumeMultiplier default changed from 1.5 to 1.2.
  *   Configurable via: strategy.orb.volume-min-multiplier (default now 1.2).
- *   Rationale: 1.5× was too strict at 9:30-10:00 on moderate momentum days.
- *   1.2× still filters low-conviction candles but admits the majority of valid setups.
  *
  * FIX 5 — C4 sector filter: removed sectorIsTop() requirement.
- *   OLD: ctx.sectorIsTop() AND sectorChangePct ≥ 0.5% AND sectorAlignedBull.
- *        isTop = sector ranked #1 or #2 by change% → blocked the other 10 sectors entirely.
- *   NEW: sectorChangePct ≥ 0.4% AND sectorAlignedBull (greenPct≥60%, RS>1.0).
- *        isTop is recorded in the validation step detail for information but not required.
- *        sectorMinChangePct default lowered from 0.5 → 0.4 to match the relaxed condition.
- *        Sell side mirror: sectorChangePct ≤ -0.4% AND sectorAlignedBear.
+ *   NEW: sectorChangePct ≥ 0.4% AND sectorAlignedBull. isTop is informational only.
  *
  * FIX 6 — retestTolPct default changed from 0.3 to 0.4.
  *   Configurable via: strategy.orb.retest-tolerance-pct (default now 0.4).
- *   Rationale: 0.3% tolerance on a ₹2000 stock = ₹6 window. Too narrow.
- *   0.4% gives ₹8 window — catches normal pullback wicks without being sloppy.
  *
- * FIX 7 — BUG #6: SELL block now uses s9 instead of c9_vol for clarity and consistency.
+ * FIX 7 — BUG #6: SELL block now uses s9 instead of c9_vol for clarity.
  *
- * FIX 8 — BUG #7: tracker injected via constructor (@RequiredArgsConstructor)
- *   instead of @Autowired field injection. Prevents potential null at test time.
+ * FIX 8 — BUG #7: tracker injected via constructor (@RequiredArgsConstructor).
  *
- * UNCHANGED:
- *   C1  time window (9:30–13:00 — already aligned with MarketPhaseEngine.isOrbAllowed)
+ * UNCHANGED from original:
+ *   C1  time window (9:30–13:00)
  *   C2  Nifty bullish + HH/HL in 15m
  *   C3  price > VWAP
  *   C6  retest ± retestTolPct
  *   C7  strong bull candle (body ≥ 55%, wick ≤ 35%)
- *   All SELL mirror conditions follow the same fixes.
- *   All tracker.record() calls preserved — dashboard validation tab unaffected.
+ *   All SELL mirror conditions follow same fixes.
+ *   All tracker.record() calls preserved for conditions 2–9.
  * ═══════════════════════════════════════════════════════════════════
  */
 @Component
 @Slf4j
-@RequiredArgsConstructor   // FIX 8: constructor injection
+@RequiredArgsConstructor
 public class ORBStrategy implements TradingStrategy {
 
-    // FIX 8: final field, injected via constructor — no @Autowired needed
     private final StrategyValidationTracker tracker;
 
     @Value("${strategy.orb.nifty-min-change-pct:0.3}")
     private double niftyMinChangePct;
 
-    // FIX 5: default lowered from 0.5 → 0.4 to match relaxed sector condition
     @Value("${strategy.orb.sector-min-change-pct:0.4}")
     private double sectorMinChangePct;
 
-    // FIX 4: default lowered from 1.5 → 1.2
     @Value("${strategy.orb.volume-min-multiplier:1.2}")
     private double volumeMultiplier;
 
-    // FIX 6: default raised from 0.3 → 0.4
     @Value("${strategy.orb.retest-tolerance-pct:0.4}")
     private double retestTolPct;
 
@@ -120,18 +128,16 @@ public class ORBStrategy implements TradingStrategy {
     @Value("${strategy.orb.entry-start:09:30}")
     private String entryStart;
 
-    // FIX 1 companion: entry-end aligned to 13:00 to match MarketPhaseEngine.isOrbAllowed()
     @Value("${strategy.orb.entry-end:13:00}")
     private String entryEnd;
 
-    // orbCandles kept for backward-compat @Value wiring; no longer used in orbPeriod computation
     @Value("${strategy.orb.orb-candles:3}")
     private int orbCandles;
 
-    // ORB observation window: 9:15–9:30 IST (fixed — not configurable)
+    // ORB observation window: 9:15–9:30 IST (fixed constants, not configurable)
     private static final ZoneId    IST       = ZoneId.of("Asia/Kolkata");
     private static final LocalTime ORB_START = LocalTime.of(9, 15);
-    private static final LocalTime ORB_END   = LocalTime.of(9, 30);
+    private static final LocalTime ORB_END   = LocalTime.of(9, 30);   // exclusive
 
     @Override
     public String name() { return "ORB_VWAP_SECTOR"; }
@@ -143,18 +149,21 @@ public class ORBStrategy implements TradingStrategy {
                                                 TradingStrategy.MarketContext ctx) {
 
         // ── CONDITION 1: Time filter ─────────────────────────────────────────
-        boolean c1_time = withinTime();
-        if (!c1_time) {
-            tracker.record(name(), symbol, "BUY", List.of(
-                    step(1, "TIME_WINDOW",
-                            "Time Window (" + entryStart + "–" + entryEnd + ")",
-                            false,
-                            "Now=" + LocalTime.now(IST) + " — outside window")
-            ));
-            return Optional.empty();
+        //
+        // FIX A (v7.2): Do NOT record to tracker when outside time window.
+        //
+        // OLD code wrote FAIL@1 to StrategyValidationTracker here, which
+        // overwrote meaningful morning evaluations (FAIL@2–9) every 5 minutes
+        // after 13:00. By end-of-day ALL stocks showed FAIL@1 at 15:25 PM.
+        //
+        // NEW: simply return empty. TIME_WINDOW is a schedule gate, not a
+        // trading condition. The tracker should only contain records where the
+        // strategy actually attempted to evaluate conditions 2–9.
+        if (!withinTime()) {
+            return Optional.empty();   // ← no tracker.record() here (FIX A)
         }
 
-        // Data sufficiency — cannot evaluate without candles
+        // Data sufficiency — cannot evaluate without enough candles
         if (candles5m.size() < 6)  return Optional.empty();
         if (candles15m.size() < 6) return Optional.empty();
 
@@ -168,9 +177,9 @@ public class ORBStrategy implements TradingStrategy {
         // candles, the tail of the list contains YESTERDAY's data. Using subList
         // from the end would give wrong orbH/orbL (yesterday's afternoon prices).
         //
-        // Instead: filter by (date=today AND time ∈ [09:15, 09:30]).
-        // If the IB window hasn't formed yet (server started after 9:30 with no
-        // historical data for today) this returns empty — correct behaviour.
+        // Instead: filter by (date=today AND time ∈ [09:15, 09:30)).
+        // exclusive end: a candle whose period starts at exactly 09:30 is NOT in
+        // the ORB window — it is the first SIGNAL candle.
         LocalDate today = LocalDate.now(IST);
         List<Candle> orbPeriod = candles5m.stream()
                 .filter(c -> {
@@ -180,12 +189,12 @@ public class ORBStrategy implements TradingStrategy {
                     LocalTime ct = zdt.toLocalTime();
                     return cd.equals(today)
                             && !ct.isBefore(ORB_START)
-                            && ct.isBefore(ORB_END);  // exclusive end: 09:15 ≤ t < 09:30
+                            && ct.isBefore(ORB_END);
                 })
                 .collect(Collectors.toList());
 
         if (orbPeriod.isEmpty()) {
-            log.debug("[ORB] {} no today 9:15-9:30 candles in buffer — skipping", symbol);
+            log.debug("[ORB] {} no today 9:15–9:30 candles in buffer — skipping", symbol);
             return Optional.empty();
         }
 
@@ -225,14 +234,17 @@ public class ORBStrategy implements TradingStrategy {
         boolean c7_candle = isStrongBullCandle(cur);
 
         // FIX 3: subList starts at index 1 (skip signal candle) to avoid tautology.
-        // OLD: candles5m.subList(0, Math.min(4, ...)) always passed when C5 passed.
-        // NEW: checks the 3 candles BEFORE the breakout for genuine HH/HL structure.
+        // Index 0 is the breakout candle — its high is always > prev highs when C5 passed.
+        // Checking candles[1..4] genuinely tests momentum leading into the breakout.
         boolean c8_struct = hasHHHL(candles5m.subList(1, Math.min(5, candles5m.size())));
 
         // FIX 4: volumeMultiplier default is now 1.2 (was 1.5)
         boolean c9_vol   = cur.getVolume() >= avgVol * volumeMultiplier;
 
         // ══ BUY: Build and record validation steps ════════════════════════════
+        //
+        // tracker.record() IS called here — these are meaningful evaluations.
+        // The strategy passed the time window check and is actively evaluating.
         List<ValidationStepResult> buySteps = new ArrayList<>();
         buySteps.add(step(1, "TIME_WINDOW",
                 "Time Window (" + entryStart + "–" + entryEnd + ")", true,
@@ -245,10 +257,9 @@ public class ORBStrategy implements TradingStrategy {
         buySteps.add(step(3, "PRICE_VS_VWAP",
                 "Price > VWAP", c3_vwap,
                 "price=" + r2(cur.getClose()) + " vwap=" + r2(vwap)));
-        // FIX 5: label updated to reflect relaxed condition (no longer requires Top-2)
         buySteps.add(step(4, "SECTOR_ALIGNED",
                 "Sector Aligned Bull + change≥+" + sectorMinChangePct + "%", c4_sector,
-                "isTop=" + ctx.sectorIsTop()              // informational only
+                "isTop=" + ctx.sectorIsTop()        // informational only — not required
                         + " chg=" + fmt(ctx.sectorChangePct()) + "%"
                         + " need≥+" + sectorMinChangePct + "%"
                         + " aligned=" + ctx.sectorAlignedBull()));
@@ -267,7 +278,6 @@ public class ORBStrategy implements TradingStrategy {
                 "bullish=" + cur.isBullish()
                         + " close=" + r2(cur.getClose())
                         + " open=" + r2(cur.getOpen())));
-        // FIX 3: description updated to reflect "prev 3 candles" not "last 3 inc. signal"
         buySteps.add(step(8, "HHHL_STRUCTURE",
                 "HH/HL in 3 Candles Before Breakout", c8_struct,
                 "need ≥2 consecutive HH/HL pairs in candles[1..4] (excl. signal candle)"));
@@ -287,7 +297,7 @@ public class ORBStrategy implements TradingStrategy {
         if (c2_nifty && c3_vwap && c4_sector && c5_orb && c6_retest && c7_candle && c8_struct && c9_vol) {
 
             // FIX 2: SL = current candle low × 0.9995 (not orbL × 0.999).
-            // orbL-based SL was 0.5–2% from entry → Gate 7.5 rejected it as RR ≈ 1.6.
+            // orbL-based SL was 0.5–2% from entry → RR ≈ 1.6 → Gate 7.5 rejection.
             // Breakout-candle-low SL is 0.05–0.3% from entry → RR comfortably ≥ 2.5.
             BigDecimal sl   = cur.getLow().multiply(new BigDecimal("0.9995"));
             BigDecimal risk = cur.getClose().subtract(sl);
@@ -347,10 +357,9 @@ public class ORBStrategy implements TradingStrategy {
         sellSteps.add(step(3, "PRICE_VS_VWAP",
                 "Price < VWAP", s3,
                 "price=" + r2(cur.getClose()) + " vwap=" + r2(vwap)));
-        // FIX 5 mirror label
         sellSteps.add(step(4, "SECTOR_ALIGNED",
                 "Sector Aligned Bear + change≤-" + sectorMinChangePct + "%", s4,
-                "isBottom=" + ctx.sectorIsBottom()       // informational only
+                "isBottom=" + ctx.sectorIsBottom()     // informational only
                         + " chg=" + fmt(ctx.sectorChangePct()) + "%"
                         + " need≤-" + sectorMinChangePct + "%"
                         + " aligned=" + ctx.sectorAlignedBear()));
@@ -367,11 +376,9 @@ public class ORBStrategy implements TradingStrategy {
                 "bearish=" + cur.isBearish()
                         + " close=" + r2(cur.getClose())
                         + " open=" + r2(cur.getOpen())));
-        // FIX 3 mirror label
         sellSteps.add(step(8, "LHLL_STRUCTURE",
                 "LH/LL in 3 Candles Before Breakdown", s8,
                 "need ≥2 consecutive LH/LL pairs in candles[1..4] (excl. signal candle)"));
-        // FIX 7: uses s9 not c9_vol
         sellSteps.add(step(9, "VOLUME",
                 "Volume ≥ " + volumeMultiplier + "× Average", s9,
                 "vol=" + cur.getVolume() + " avg=" + Math.round(avgVol)
@@ -382,7 +389,7 @@ public class ORBStrategy implements TradingStrategy {
 
         if (s2 && s3 && s4 && s5 && s6 && s7 && s8 && s9) {
 
-            // FIX 2 mirror: SL = current candle high × 1.0005 (not orbH × 1.001)
+            // FIX 2 mirror: SL = current candle high × 1.0005
             BigDecimal sl   = cur.getHigh().multiply(new BigDecimal("1.0005"));
             BigDecimal risk = sl.subtract(cur.getClose());
             if (risk.compareTo(BigDecimal.ZERO) <= 0) {
@@ -422,7 +429,7 @@ public class ORBStrategy implements TradingStrategy {
     private String fmt(double v)    { return String.format("%.2f", v); }
     private int    pct(double ratio){ return (int) Math.round(ratio * 100); }
 
-    // ── Private: condition helpers ────────────────────────────────────────────
+    // ── Private: condition helpers ─────────────────────────────────────────────
 
     /**
      * Retest check: did price touch orbLevel or VWAP (±retestTolPct%) in prev candles?
@@ -430,7 +437,6 @@ public class ORBStrategy implements TradingStrategy {
      */
     private boolean retestOccurred(List<Candle> prev,
                                    BigDecimal level, BigDecimal vwap) {
-        // FIX 6: retestTolPct default is now 0.4 (was 0.3) — controlled by @Value
         BigDecimal tol  = level.multiply(BigDecimal.valueOf(retestTolPct / 100.0));
         BigDecimal vtol = vwap.compareTo(BigDecimal.ZERO) > 0
                 ? vwap.multiply(BigDecimal.valueOf(retestTolPct / 100.0))
@@ -475,9 +481,10 @@ public class ORBStrategy implements TradingStrategy {
     }
 
     /**
-     * HH/HL structure: list is newest-first.
-     * c.get(i) is NEWER than c.get(i+1).
-     * Passes if ≥ 2 consecutive pairs have newer.high > older.high AND newer.low > older.low.
+     * HH/HL structure: list is newest-first (c.get(0) = most recent).
+     * Returns true if ≥ 2 consecutive pairs satisfy newer.high > older.high
+     * AND newer.low > older.low.
+     * Requires ≥ 3 candles.
      */
     private boolean hasHHHL(List<Candle> c) {
         if (c.size() < 3) return false;
@@ -490,7 +497,9 @@ public class ORBStrategy implements TradingStrategy {
 
     /**
      * LH/LL structure: list is newest-first.
-     * Passes if ≥ 2 consecutive pairs have newer.high < older.high AND newer.low < older.low.
+     * Returns true if ≥ 2 consecutive pairs satisfy newer.high < older.high
+     * AND newer.low < older.low.
+     * Requires ≥ 3 candles.
      */
     private boolean hasLHLL(List<Candle> c) {
         if (c.size() < 3) return false;
@@ -502,7 +511,8 @@ public class ORBStrategy implements TradingStrategy {
     }
 
     /**
-     * Returns true when current IST time is within the configured entry window.
+     * Time window check: returns true when current IST time is within the
+     * configured entry window [entryStart, entryEnd].
      */
     private boolean withinTime() {
         LocalTime now = LocalTime.now(IST);

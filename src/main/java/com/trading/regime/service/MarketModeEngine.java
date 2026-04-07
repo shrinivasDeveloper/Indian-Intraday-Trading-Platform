@@ -1,12 +1,13 @@
+// ========== C:\algo-frontend\Indian-Intraday-Trading-Platform\src\main\java\com\trading\regime\service\MarketModeEngine.java ==========
 // ============================================================
 // REPLACE FILE (full replacement)
 // Path: src/main/java/com/trading/regime/service/MarketModeEngine.java
 // CHANGES vs original:
-//   1. Added preload5mCandles() — called by WarmupService on restart
-//   2. Added forceComputeIbIfMissing() — CRITICAL FIX for scanner delay (ISSUE 5)
+//   1. Added preload5mCandles() â€” called by WarmupService on restart
+//   2. Added forceComputeIbIfMissing() â€” CRITICAL FIX for scanner delay (ISSUE 5)
 //      If time > 10:30 and IB not computed, force-compute from buffer immediately
 //   3. Added getBankNiftyToken() support in updateIbTracking (BankNifty now separate)
-//   4. All original logic preserved — purely additive changes
+//   4. All original logic preserved â€” purely additive changes
 // ============================================================
 package com.trading.regime.service;
 
@@ -28,9 +29,9 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * MarketModeEngine — Classifies each trading day into one of 6 Market Day Types.
+ * MarketModeEngine â€” Classifies each trading day into one of 6 Market Day Types.
  *
- * ═══════════════════════════════════════════════════════════════════════════════
+ * â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
  * CLASSIFICATION LOGIC (evaluated after 10:15 AM baseline):
  *
  *   TREND_DAY:
@@ -48,6 +49,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *     - Risk: 0.5%  MinProb: 60
  *
  *   NORMAL_VARIATION:
+ *     - ORB_VWAP_SECTOR added (FIX v7.2): one-sided IB break = directional setup ideal for ORB
  *     - One-sided IB break and hold
  *     - Risk: 0.75%  MinProb: 65
  *
@@ -56,8 +58,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *     - Risk: 0.5%  MinProb: 70
  *
  *   NON_TREND_DAY:
- *     - IB range < 0.4% — NO TRADES
- * ═══════════════════════════════════════════════════════════════════════════════
+ *     - IB range < 0.4% â€” NO TRADES
+ * â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
  */
 @Service
 @Slf4j
@@ -144,7 +146,7 @@ public class MarketModeEngine {
         }
     }
 
-    // ── State ─────────────────────────────────────────────────────────────────
+    // â”€â”€ State â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private final Deque<Candle> niftyBuffer5m  = new ArrayDeque<>();
     private final Deque<Candle> niftyBuffer15m = new ArrayDeque<>();
@@ -164,11 +166,11 @@ public class MarketModeEngine {
         return new MarketModeResult(
                 MarketMode.NORMAL_DAY, 0, 0, 0, 0, false, false, false, false, 1.0,
                 60, 0.5, "VAP_PULLBACK,RANGE_BREAKOUT_3TOUCH",
-                "Waiting for Initial Balance (9:15–10:15 IST)"
+                "Waiting for Initial Balance (9:15â€“10:15 IST)"
         );
     }
 
-    // ── Warmup methods (called by WarmupService) ──────────────────────────────
+    // â”€â”€ Warmup methods (called by WarmupService) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     /**
      * Pre-load 5-min Nifty candles from history.
@@ -230,11 +232,11 @@ public class MarketModeEngine {
             }
             recalculateMode();
         } else {
-            log.warn("[MODE] Could not force-compute IB — no candles in 9:15-10:15 window found");
+            log.warn("[MODE] Could not force-compute IB â€” no candles in 9:15-10:15 window found");
         }
     }
 
-    // ── Event listeners ───────────────────────────────────────────────────────
+    // â”€â”€ Event listeners â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @EventListener
     @Async("tradingExecutor")
@@ -259,7 +261,7 @@ public class MarketModeEngine {
         recalculateMode();
     }
 
-    // ── IB tracking ───────────────────────────────────────────────────────────
+    // â”€â”€ IB tracking â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private void updateIbTracking(Candle c) {
         LocalTime t = c.getCandleTime() != null
@@ -300,7 +302,7 @@ public class MarketModeEngine {
         }
     }
 
-    // ── Core mode classification ──────────────────────────────────────────────
+    // â”€â”€ Core mode classification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private void recalculateMode() {
         List<Candle> c15m;
@@ -331,12 +333,12 @@ public class MarketModeEngine {
 
         if (ibRangePct < 0.4) {
             mode = MarketMode.NON_TREND_DAY;
-            rationale    = String.format("IB range %.2f%% < 0.4%% — no institutional participation. NO TRADES.", ibRangePct);
+            rationale    = String.format("IB range %.2f%% < 0.4%% â€” no institutional participation. NO TRADES.", ibRangePct);
             minProb      = 999; riskPct = 0; activeStrats = "NONE";
         } else if (ibRangePct > 0.8 && (brokeIbHigh || brokeIbLow) && niftyRvol >= 2.0 && (fullBullStack || fullBearStack)) {
             mode = MarketMode.TREND_DAY;
             String dir   = brokeIbHigh ? "BULLISH" : "BEARISH";
-            rationale    = String.format("TREND DAY (%s): IB %.2f%% + IB break + RVOL %.1f× + EMA stack aligned", dir, ibRangePct, niftyRvol);
+            rationale    = String.format("TREND DAY (%s): IB %.2f%% + IB break + RVOL %.1fÃ— + EMA stack aligned", dir, ibRangePct, niftyRvol);
             minProb      = 65; riskPct = 1.0;
             activeStrats = "AUTO_MODE,ORB_VWAP_SECTOR,SCANNER_7GATE,VAP_PULLBACK,RANGE_BREAKOUT_3TOUCH";
         } else if (ibRangePct >= 0.5 && brokeIbHigh && isAfternoon && afternoonBreak) {
@@ -346,21 +348,21 @@ public class MarketModeEngine {
             activeStrats = "AUTO_MODE,ORB_VWAP_SECTOR,VAP_PULLBACK,RANGE_BREAKOUT_3TOUCH";
         } else if (brokeIbHigh && brokeIbLow) {
             mode = MarketMode.NEUTRAL_DAY;
-            rationale    = String.format("NEUTRAL DAY: Both IB sides broken — choppy. VAH/VAL reversals only. IB %.2f%%", ibRangePct);
+            rationale    = String.format("NEUTRAL DAY: Both IB sides broken â€” choppy. VAH/VAL reversals only. IB %.2f%%", ibRangePct);
             minProb      = 70; riskPct = 0.5; activeStrats = "VAP_PULLBACK";
         } else if (ibRangePct >= 1.0 && !brokeIbHigh && !brokeIbLow) {
             mode = MarketMode.NORMAL_DAY;
-            rationale    = String.format("NORMAL DAY: Wide IB %.2f%% but price inside — trade range edges only", ibRangePct);
+            rationale    = String.format("NORMAL DAY: Wide IB %.2f%% but price inside â€” trade range edges only", ibRangePct);
             minProb      = 60; riskPct = 0.5; activeStrats = "VAP_PULLBACK,RANGE_BREAKOUT_3TOUCH";
         } else if ((brokeIbHigh || brokeIbLow) && !(brokeIbHigh && brokeIbLow)) {
             mode = MarketMode.NORMAL_VARIATION;
             String side  = brokeIbHigh ? "BULL side" : "BEAR side";
             rationale    = String.format("NORMAL VARIATION: IB %.2f%%, broke %s and holding. Pullback + Breakout", ibRangePct, side);
             minProb      = 65; riskPct = 0.75;
-            activeStrats = "AUTO_MODE,VAP_PULLBACK,RANGE_BREAKOUT_3TOUCH";
+            activeStrats = "AUTO_MODE,ORB_VWAP_SECTOR,VAP_PULLBACK,RANGE_BREAKOUT_3TOUCH";
         } else {
             mode = MarketMode.NORMAL_DAY;
-            rationale    = String.format("IB %.2f%% — awaiting clear break. Range strategies active.", ibRangePct);
+            rationale    = String.format("IB %.2f%% â€” awaiting clear break. Range strategies active.", ibRangePct);
             minProb      = 60; riskPct = 0.5; activeStrats = "VAP_PULLBACK,RANGE_BREAKOUT_3TOUCH";
         }
 
@@ -372,11 +374,11 @@ public class MarketModeEngine {
                 isAfternoon, niftyRvol, minProb, riskPct, activeStrats, rationale
         );
         if (prev.mode() != mode) {
-            log.info("[MODE] Changed: {} → {} | {}", prev.mode(), mode, rationale);
+            log.info("[MODE] Changed: {} â†’ {} | {}", prev.mode(), mode, rationale);
         }
     }
 
-    // ── Daily reset ───────────────────────────────────────────────────────────
+    // â”€â”€ Daily reset â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
@@ -385,10 +387,10 @@ public class MarketModeEngine {
         afternoonBreak = false; afternoonHigh = 0;
         currentMode = initialMode();
         synchronized (niftyBuffer5m) { niftyBuffer5m.clear(); }
-        log.info("[MODE] Daily reset complete — IB tracking cleared");
+        log.info("[MODE] Daily reset complete â€” IB tracking cleared");
     }
 
-    // ── EMA helper ────────────────────────────────────────────────────────────
+    // â”€â”€ EMA helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     private double ema(List<Candle> candles, int p) {
         if (candles.size() < p) return 0.0;
