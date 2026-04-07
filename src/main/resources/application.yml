@@ -152,11 +152,11 @@ circuit-breaker:
 # MARKET FILTERS
 # ================================
 scanner:
-  min-volume: 300000
-  min-price: 50
+  min-volume: 250000
+  min-price: 100
   bb-width-max: 3.0
   max-sl-pct: 2.5
-  cooldown-seconds: 1800
+  cooldown-seconds: 2400
   retest-tolerance: 0.005
   min-gap-pct: 0.3
   entry-mode: ${ENTRY_MODE:AGGRESSIVE}
