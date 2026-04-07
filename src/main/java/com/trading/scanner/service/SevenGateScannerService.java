@@ -91,7 +91,7 @@ public class SevenGateScannerService {
     @Value("${scanner.bb-width-max:2.0}")        private double bbWidthMax;
     @Value("${scanner.max-sl-pct:2.0}")          private double maxSlPct;
     @Value("${scanner.min-price:50}")             private double minPrice;
-    @Value("${scanner.min-volume:500000}")        private long   minVolume;
+    @Value("${scanner.min-volume:250000}")        private long   minVolume;
     @Value("${scanner.cooldown-seconds:1800}")    private long   cooldownSeconds;
     @Value("${scanner.retest-tolerance:0.003}")   private double retestTolerance;
     @Value("${scanner.min-gap-pct:0.5}")          private double minGapPct;
