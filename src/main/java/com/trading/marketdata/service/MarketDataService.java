@@ -27,25 +27,36 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * MarketDataService — Zerodha KiteTicker WebSocket connection manager.
  *
- * COMPILE ERRORS FIXED:
+ * JAR-VERIFIED FIXES (from javap on kiteconnect.jar):
  *
- *   ERROR 1: setMaximumRetries(int) throws KiteException
- *            setMaximumRetryInterval(int) throws KiteException
- *            → Both calls now wrapped in try-catch(KiteException)
+ *   FIX 1 — Tick field types (all verified via javap):
+ *     getLastTradedQuantity()  → double  (cast to long safely)
+ *     getTotalBuyQuantity()    → double  (cast to long safely)
+ *     getTotalSellQuantity()   → double  (cast to long safely)
+ *     getVolumeTradedToday()   → long    (no cast needed)
+ *     getOi()                  → double  (not getOpenInterest — doesn't exist)
+ *     getLastTradedTime()      → java.util.Date (not Instant)
+ *     getTickTimestamp()       → java.util.Date (not Instant)
  *
- *   ERROR 2: subscribe(ArrayList<Long>) — SDK requires ArrayList, not List
- *            setMode(ArrayList<Long>, String) — same
- *            → All calls now use new ArrayList<>() wrappers.
- *              The `batch` variable is explicitly declared as ArrayList<Long>.
+ *   FIX 2 — KiteTicker method signatures (verified):
+ *     subscribe(ArrayList<Long>)              must be ArrayList, not List
+ *     setMode(ArrayList<Long>, String)        must be ArrayList, not List
+ *     setMaximumRetries(int)   throws KiteException
+ *     setMaximumRetryInterval(int) throws KiteException
  *
- *   ERROR 3: tick.getOpenInterest() does not exist
- *            → Correct method is tick.getOi() (confirmed from jar bytecode)
+ *   FIX 3 — OnError interface (verified):
+ *     Must implement all 3 overloads:
+ *       onError(Exception)
+ *       onError(KiteException)
+ *       onError(String)
  *
- * ADDITIONAL FIXES:
- *   - OnError interface requires 3 overloads: onError(Exception), onError(KiteException), onError(String)
- *   - getLastPricesSimple() added for DashboardController
- *   - Exponential backoff on reconnect: 1s → 2s → 4s → 8s → 16s → 30s max
- *   - TickReceivedEvent now carries all fields (totalBuyQty, totalSellQty, etc.)
+ *   FIX 4 — Date → Instant conversion:
+ *     tick.getLastTradedTime() returns java.util.Date
+ *     Must call .toInstant() to get Instant for TickReceivedEvent
+ *
+ *   FIX 5 — ENABLE_LOGGING:
+ *     KiteConnect has: public static boolean ENABLE_LOGGING;
+ *     Can be set as KiteConnect.ENABLE_LOGGING = false (no method call needed)
  */
 @Service
 @Slf4j
@@ -67,17 +78,12 @@ public class MarketDataService {
     private final AtomicBoolean  connected      = new AtomicBoolean(false);
     private final AtomicInteger  reconnectCount = new AtomicInteger(0);
 
-    // SDK limits
     private static final int MAX_BACKOFF_SEC = 30;
-    private static final int BATCH_SIZE      = 200;   // Zerodha max per subscribe call
-    private static final int BATCH_DELAY_MS  = 100;   // prevent 429 rate limit
+    private static final int BATCH_SIZE      = 200;
+    private static final int BATCH_DELAY_MS  = 100;
 
     // ── Public API ────────────────────────────────────────────────────────
 
-    /**
-     * Start WebSocket streaming.
-     * Called by MarketDataStartupService after WarmupService completes.
-     */
     public void startStreaming(String accessToken, List<Long> fullTokens,
                                List<Long> quoteTokens) {
         this.accessToken           = accessToken;
@@ -91,7 +97,6 @@ public class MarketDataService {
         initTicker();
     }
 
-    /** Reconnect with a new access token (called by DailyLoginScheduler). */
     public void reconnect(String newAccessToken) {
         log.info("[WS] Reconnecting with new token...");
         if (ticker != null) {
@@ -105,10 +110,6 @@ public class MarketDataService {
     public boolean isConnected()       { return connected.get(); }
     public int     getReconnectCount() { return reconnectCount.get(); }
 
-    /**
-     * Returns last traded price for all tracked symbols.
-     * Used by DashboardController (/api/dashboard/snapshot and /api/dashboard/prices).
-     */
     public Map<String, BigDecimal> getLastPricesSimple() {
         return Collections.unmodifiableMap(lastPrices);
     }
@@ -139,7 +140,7 @@ public class MarketDataService {
                 }
             });
 
-            // COMPILE FIX 1: OnError interface requires all 3 overloads
+            // JAR-VERIFIED: OnError requires exactly these 3 overloads
             ticker.setOnErrorListener(new OnError() {
                 @Override
                 public void onError(Exception e) {
@@ -148,7 +149,7 @@ public class MarketDataService {
 
                 @Override
                 public void onError(KiteException e) {
-                    // COMPILE FIX 1: KiteException overload was missing
+                    // KiteException.message and .code are public fields (verified)
                     log.error("[WS] KiteException: code={} message={}", e.code, e.message);
                     if (e.code == 429) {
                         log.warn("[WS] Rate limited (429). Reconnect will back off.");
@@ -164,13 +165,14 @@ public class MarketDataService {
             ticker.setOnTickerArrivalListener(new OnTicks() {
                 @Override
                 public void onTicks(ArrayList<Tick> ticks) {
+                    // Real-time tick processing — minimum overhead here
                     for (Tick tick : ticks) {
                         publishTick(tick);
                     }
                 }
             });
 
-            // COMPILE FIX 1: setMaximumRetries and setMaximumRetryInterval throw KiteException
+            // JAR-VERIFIED: both throw KiteException — must be wrapped
             try {
                 ticker.setMaximumRetries(20);
                 ticker.setMaximumRetryInterval(30);
@@ -190,49 +192,64 @@ public class MarketDataService {
 
     /**
      * Build and publish TickReceivedEvent from Zerodha Tick.
-     * COMPILE FIX 3: tick.getOi() — not tick.getOpenInterest() (doesn't exist in SDK).
+     *
+     * JAR-VERIFIED field types:
+     *   getLastTradedQuantity() → double  → cast to long (always whole number from exchange)
+     *   getVolumeTradedToday()  → long    → use directly
+     *   getTotalBuyQuantity()   → double  → cast to long
+     *   getTotalSellQuantity()  → double  → cast to long
+     *   getOi()                 → double  → cast to long
+     *   getLastTradedTime()     → java.util.Date → .toInstant() for Instant
+     *   getTickTimestamp()      → java.util.Date → .toInstant() for Instant
      */
     private void publishTick(Tick tick) {
         try {
-            String symbol = instrumentCache.getSymbol(tick.getInstrumentToken());
-            double ltpDouble = tick.getLastTradedPrice();
-            if (ltpDouble <= 0) return;
+            String symbol  = instrumentCache.getSymbol(tick.getInstrumentToken());
+            double ltpDbl  = tick.getLastTradedPrice();
+            if (ltpDbl <= 0) return;
 
-            BigDecimal ltp = BigDecimal.valueOf(ltpDouble);
+            BigDecimal ltp = BigDecimal.valueOf(ltpDbl);
             lastPrices.put(symbol, ltp);
 
-            Instant tickTime = tick.getLastTradedTime() != null
-                    ? tick.getLastTradedTime().toInstant()
-                    : Instant.now();
+            // JAR-VERIFIED: getLastTradedTime() returns java.util.Date, not Instant
+            // Must call .toInstant() to convert
+            Instant tickTime;
+            if (tick.getLastTradedTime() != null) {
+                tickTime = tick.getLastTradedTime().toInstant();
+            } else if (tick.getTickTimestamp() != null) {
+                tickTime = tick.getTickTimestamp().toInstant();
+            } else {
+                tickTime = Instant.now();
+            }
 
             TickReceivedEvent event = new TickReceivedEvent(
                     this,
-                    tick.getInstrumentToken(),
-                    symbol,
-                    ltp,
-                    (long) tick.getLastTradedQuantity(),
-                    (long) tick.getVolumeTradedToday(),
-                    (long) tick.getTotalBuyQuantity(),
-                    (long) tick.getTotalSellQuantity(),
-                    (long) tick.getOi(),              // COMPILE FIX 3: getOi() not getOpenInterest()
-                    tickTime
+                    tick.getInstrumentToken(),                      // long   ✓
+                    symbol,                                          // String ✓
+                    ltp,                                             // BigDecimal ✓
+                    (long) tick.getLastTradedQuantity(),             // double → long cast ✓
+                    tick.getVolumeTradedToday(),                     // long directly ✓
+                    (long) tick.getTotalBuyQuantity(),               // double → long cast ✓
+                    (long) tick.getTotalSellQuantity(),              // double → long cast ✓
+                    (long) tick.getOi(),                             // double → long cast ✓ (NOT getOpenInterest)
+                    tickTime                                         // Instant from Date.toInstant() ✓
             );
 
             publisher.publishEvent(event);
 
         } catch (Exception e) {
-            log.debug("[WS] Tick publish error token {}: {}", tick.getInstrumentToken(), e.getMessage());
+            log.debug("[WS] Tick publish error token {}: {}",
+                    tick.getInstrumentToken(), e.getMessage());
         }
     }
 
     // ── Batched subscription ──────────────────────────────────────────────
 
     /**
-     * COMPILE FIX 2:
-     *   ticker.subscribe(ArrayList<Long>) — SDK requires ArrayList, not List.
-     *   ticker.setMode(ArrayList<Long>, String) — same.
-     *   → batch declared as ArrayList<Long> explicitly.
-     *   → quote tokens wrapped with new ArrayList<>().
+     * JAR-VERIFIED: subscribe and setMode require ArrayList<Long>, not List<Long>.
+     * Method signatures:
+     *   subscribe(ArrayList<Long>)
+     *   setMode(ArrayList<Long>, String)
      */
     private void subscribeInBatches() {
         int total   = subscribedFullTokens.size();
@@ -242,17 +259,17 @@ public class MarketDataService {
             int from = b * BATCH_SIZE;
             int to   = Math.min(from + BATCH_SIZE, total);
 
-            // COMPILE FIX 2: must be ArrayList<Long>, not List<Long>
+            // Must be ArrayList<Long> — JAR signature verified
             ArrayList<Long> batch = new ArrayList<>(subscribedFullTokens.subList(from, to));
 
             try {
-                ticker.subscribe(batch);                          // ArrayList<Long> ✓
-                ticker.setMode(batch, KiteTicker.modeFull);       // ArrayList<Long> ✓
+                ticker.subscribe(batch);
+                ticker.setMode(batch, KiteTicker.modeFull);
                 log.info("[WS] Subscribed batch {}/{}: {} tokens (FULL)",
                         b + 1, batches, batch.size());
 
                 if (b < batches - 1) {
-                    Thread.sleep(BATCH_DELAY_MS); // prevent 429
+                    Thread.sleep(BATCH_DELAY_MS);
                 }
             } catch (Exception e) {
                 log.error("[WS] Batch {} subscription failed: {}", b + 1, e.getMessage());
@@ -261,7 +278,6 @@ public class MarketDataService {
 
         if (!subscribedQuoteTokens.isEmpty()) {
             try {
-                // COMPILE FIX 2: new ArrayList<>() wrapper required
                 ArrayList<Long> quoteList = new ArrayList<>(subscribedQuoteTokens);
                 ticker.subscribe(quoteList);
                 ticker.setMode(quoteList, KiteTicker.modeQuote);

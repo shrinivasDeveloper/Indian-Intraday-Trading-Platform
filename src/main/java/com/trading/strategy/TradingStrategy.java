@@ -1,6 +1,5 @@
 package com.trading.strategy;
 
-import com.trading.analysis.service.PatternDetectionService;
 import com.trading.analysis.service.TechnicalAnalysisService;
 import com.trading.domain.Candle;
 import com.trading.domain.enums.TradeDirection;
@@ -10,30 +9,28 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * TradingStrategy — base interface for all strategies.
+ * TradingStrategy — base interface for all strategy implementations.
  *
- * UPGRADES (Institutional Risk Migration):
+ * CURRENT STATE:
+ *   No active strategy implementations exist. All previous strategies
+ *   (ORBStrategy, RangeBreakoutStrategy, PullbackDetectionService,
+ *   AutoModeStrategy) have been deleted. This interface is retained
+ *   as the contract for the next strategy engine.
  *
- * TradeSignal now carries trailing and time-stop metadata so
- * TradeManagementService / PaperTradeManagementService can implement
- * strategy-specific risk migration without hard-coding it:
+ * TO ADD A NEW STRATEGY:
+ *   1. Implement this interface
+ *   2. Annotate with @Service
+ *   3. In generateSignal(), return Optional.of(TradeSignal) when conditions met
+ *   4. Publish ProbabilityScoreEvent via ApplicationEventPublisher
+ *   5. RiskManagementService gates the event and publishes TradeApprovedEvent
+ *   6. PaperTradeExecutionService executes the approved trade
  *
- *   trailingTriggerPrice  → price at which trailing SL activates
- *   trailingType          → HOW to trail (candle low, VWAP, none)
- *   timeStopMinutes       → exit if trade not ≥ 0.5R after N minutes
- *   isSpring              → Spring/Upthrust flag (score 95 high conviction)
- *
- * TrailingType per strategy:
- *   RANGE_BREAKOUT  → CANDLE_LOW_5M  (trail prev 5m candle low, trigger at 1.5R)
- *   AUTO_MODE TREND → VWAP_MINUS_01  (trail at VWAP−0.1%, trigger at 2R)
- *   AUTO_MODE REV   → NONE           (fixed target = POC, exit 100% there)
+ * TrailingType per strategy convention:
+ *   Range breakout  → CANDLE_LOW_5M  (trail prev 5m candle low, trigger at 1.5R)
+ *   Trend           → VWAP_MINUS_01  (trail at VWAP−0.1%, trigger at 2R)
+ *   Reversal        → NONE           (fixed target = POC, exit 100% there)
  *   ORB             → CANDLE_LOW_5M  (trigger at 2R)
- *   PULLBACK        → BREAKEVEN_ONLY (SL → breakeven once prev high cleared)
- *
- * NOTE TO TradeManagementService: read TrailingType from the trade's
- *   strategyName + trailingTriggerPrice to implement dynamic trailing.
- *   The existing config (trail-start-r, trail-atr-multiplier etc.) is the
- *   FALLBACK for strategies that don't specify a trailing type.
+ *   Pullback        → BREAKEVEN_ONLY (SL → breakeven once prev high cleared)
  */
 public interface TradingStrategy {
 
@@ -44,26 +41,26 @@ public interface TradingStrategy {
                                          List<Candle> candles15m,
                                          MarketContext ctx);
 
-    // ── TrailingType enum ──────────────────────────────────────────────────────
+    // ── TrailingType enum ────────────────────────────────────────────────────
 
     enum TrailingType {
-        /** Trail SL behind the LOW of the previous completed 5-minute candle */
+        /** Trail SL behind the low of the previous completed 5-minute candle */
         CANDLE_LOW_5M,
 
-        /** Trail SL at VWAP − 0.1% (for trend trades — lets price breathe) */
+        /** Trail SL at VWAP − 0.1% (for trend trades) */
         VWAP_MINUS_01,
 
         /**
-         * Move SL to BREAKEVEN only — no continuous trailing.
-         * Used for reversals: target = POC, take 100% profit there.
+         * Move SL to breakeven only — no continuous trailing.
+         * Used for reversals where target = POC.
          */
         BREAKEVEN_ONLY,
 
-        /** No trailing — use existing TradeManagementService logic */
+        /** No trailing — use TradeManagementService default logic */
         NONE
     }
 
-    // ── TradeSignal record ─────────────────────────────────────────────────────
+    // ── TradeSignal record ───────────────────────────────────────────────────
 
     record TradeSignal(
             TradeDirection direction,
@@ -73,8 +70,7 @@ public interface TradingStrategy {
             double         score,
             String         strategyName,
 
-            // ── Institutional trailing metadata (NEW) ─────────────────────────
-            /** Price at which trailing SL activates (e.g. Entry + 1.5R). ZERO = use config default */
+            /** Price at which trailing SL activates. ZERO = use config default */
             BigDecimal   trailingTriggerPrice,
 
             /** How to trail after trigger. NONE = use TradeManagementService defaults */
@@ -82,21 +78,19 @@ public interface TradingStrategy {
 
             /**
              * Auto-exit if trade has not reached 0.5R profit within this many minutes.
-             * 0 = no time stop (use 15:00 IST force-close only).
-             * Pro rule: if big money isn't pushing immediately, context has changed.
+             * 0 = no strategy time stop (fall back to StrategyConfig.global.globalTimeStop).
              */
             int timeStopMinutes,
 
             /**
-             * True if this is a Spring (below support stop-hunt then breaks resistance)
-             * or Upthrust (above resistance bull trap then breaks support) pattern.
-             * These are highest-conviction setups — score = 95.
+             * True if this is a Spring (stop-hunt below support then breaks resistance)
+             * or Upthrust (stop-hunt above resistance then breaks support) pattern.
              */
             boolean isSpring
     ) {
         /**
-         * Backward-compatible 6-param constructor (used by existing code that doesn't
-         * yet pass trailing metadata). Defaults to NONE trailing and no time stop.
+         * Backward-compatible 6-param constructor.
+         * Defaults to NONE trailing, no time stop, not a spring.
          */
         public TradeSignal(TradeDirection direction, BigDecimal entryPrice,
                            BigDecimal stopLoss, BigDecimal target,
@@ -105,13 +99,13 @@ public interface TradingStrategy {
                     BigDecimal.ZERO, TrailingType.NONE, 0, false);
         }
 
-        /** Convenience: compute 1R distance in rupees */
+        /** Compute 1R distance in rupees */
         public BigDecimal oneR() {
             if (entryPrice == null || stopLoss == null) return BigDecimal.ZERO;
             return entryPrice.subtract(stopLoss).abs();
         }
 
-        /** Convenience: compute N-R target price */
+        /** Compute N-R target price */
         public BigDecimal targetAtR(double rMultiple) {
             BigDecimal r = oneR();
             if (r.compareTo(BigDecimal.ZERO) == 0) return target;
@@ -121,14 +115,14 @@ public interface TradingStrategy {
                     : entryPrice.subtract(rDist);
         }
 
-        /** Convenience: did the signal specify trailing behaviour? */
+        /** Did the signal specify trailing behaviour? */
         public boolean hasTrailing() { return trailingType != TrailingType.NONE; }
 
-        /** Convenience: was a time-stop specified? */
+        /** Was a time-stop specified? */
         public boolean hasTimeStop() { return timeStopMinutes > 0; }
     }
 
-    // ── MarketContext ──────────────────────────────────────────────────────────
+    // ── MarketContext record ─────────────────────────────────────────────────
 
     record MarketContext(
             boolean    niftyBullish,
@@ -147,7 +141,6 @@ public interface TradingStrategy {
             BigDecimal vwap,
             boolean    vwapConfluence,
 
-            PatternDetectionService.PatternResult  pattern,
             TechnicalAnalysisService.TechnicalStructure structure
     ) {}
 }

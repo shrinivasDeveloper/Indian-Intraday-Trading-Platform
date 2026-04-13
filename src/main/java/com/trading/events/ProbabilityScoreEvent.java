@@ -8,24 +8,31 @@ import java.math.BigDecimal;
 import java.time.Instant;
 
 /**
- * ProbabilityScoreEvent — fired by StrategyEvaluatorService when a signal passes
- * validation. Consumed by RiskManagementService.
+ * ProbabilityScoreEvent — carries a fully-scored trade signal through the pipeline.
  *
- * ═══════════════════════════════════════════════════════════════════════
- * FLAW 3 FIX — Stale Signal Guard:
- *   Added signalTimestamp (Instant) field set at the moment the signal fires.
- *   RiskManagementService Gate-0 rejects the event if
- *   (now - signalTimestamp) > max-signal-age-seconds (default 30s).
+ * STATUS: Stub event — currently no strategy engine publishes this event.
+ * The former StrategyEvaluatorService that fired this event has been removed.
+ * This class is retained so that PaperTradeExecutionService and
+ * RiskManagementService compile without modification, and will be activated
+ * automatically once a new strategy engine is wired in.
  *
- *   Why: With @Async("tradingExecutor"), the event queue can back up during
- *   a market spike. A signal that was valid at 09:45:00 may be executed at
- *   09:45:35 when the price has already moved 0.8% — entering a stale breakout.
+ * When a new strategy engine is added, it should:
+ *   1. Compute a probability score (0–100) for a candidate signal.
+ *   2. Construct a ProbabilityScoreEvent using the full constructor below.
+ *   3. Call applicationEventPublisher.publishEvent(event).
+ *   RiskManagementService will gate-check the event and publish TradeApprovedEvent
+ *   if all slots and circuit breaker conditions pass.
  *
- * BACKWARD COMPATIBILITY:
- *   Original 18-param constructor preserved — defaults timeStopMinutes=0
- *   and signalTimestamp=Instant.now() (safe default, gate will not reject
- *   events constructed without explicit timestamp).
- * ═══════════════════════════════════════════════════════════════════════
+ * STALE SIGNAL GUARD (Flaw 3 fix — still active):
+ *   signalTimestamp is set at signal-fire time.
+ *   Any consumer should reject events where (now - signalTimestamp) > threshold.
+ *   Default threshold: 30 seconds (configurable in the consumer).
+ *
+ * IMPACT SLIPPAGE:
+ *   impactSlipPct carries the dynamic entry slippage computed by
+ *   PositionSizerService.ImpactCostCalculator at signal time.
+ *   0.0 means "not computed" — PaperTradeExecutionService falls back to its
+ *   static ENTRY_SLIP constant when this is zero.
  */
 @Getter
 public class ProbabilityScoreEvent extends ApplicationEvent {
@@ -52,8 +59,8 @@ public class ProbabilityScoreEvent extends ApplicationEvent {
     private final int timeStopMinutes;
 
     /**
-     * FLAW 3 FIX: Timestamp set at signal-fire time.
-     * RiskManagementService uses this to reject signals older than 30s.
+     * Timestamp set at signal-fire time.
+     * Consumers use this to reject stale signals (default: reject if > 30s old).
      */
     private final Instant signalTimestamp;
 
@@ -64,7 +71,7 @@ public class ProbabilityScoreEvent extends ApplicationEvent {
      */
     private final double impactSlipPct;
 
-    // ── Original 18-param constructor — backward compatible ───────────────────
+    // ── Original 18-param constructor — backward compatible ──────────────────
     public ProbabilityScoreEvent(Object src, String sym, long token,
                                  BigDecimal score, String decision,
                                  TradeDirection dir, BigDecimal entry,
@@ -76,7 +83,7 @@ public class ProbabilityScoreEvent extends ApplicationEvent {
                 r, s, st, p, v, vw, vo, l, 0, Instant.now(), 0.0);
     }
 
-    // ── 19-param constructor — carries timeStopMinutes ────────────────────────
+    // ── 19-param constructor — carries timeStopMinutes ───────────────────────
     public ProbabilityScoreEvent(Object src, String sym, long token,
                                  BigDecimal score, String decision,
                                  TradeDirection dir, BigDecimal entry,
@@ -89,7 +96,7 @@ public class ProbabilityScoreEvent extends ApplicationEvent {
                 r, s, st, p, v, vw, vo, l, timeStopMinutes, Instant.now(), 0.0);
     }
 
-    // ── Full constructor — carries all fields including timestamp + impactSlip ─
+    // ── Full constructor — carries all fields including timestamp + impactSlip
     public ProbabilityScoreEvent(Object src, String sym, long token,
                                  BigDecimal score, String decision,
                                  TradeDirection dir, BigDecimal entry,

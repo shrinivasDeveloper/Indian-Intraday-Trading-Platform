@@ -6,31 +6,31 @@ import org.springframework.context.ApplicationEvent;
 import java.math.BigDecimal;
 
 /**
- * TradeApprovedEvent — fired by RiskManagementService when all gates pass.
+ * TradeApprovedEvent — fired when all risk gates pass for a trade signal.
  *
- * FIX: Added timeStopMinutes field.
+ * STATUS: Stub event — currently no service publishes this event.
+ * The former StrategyEvaluatorService and onProbabilityScore() pipeline
+ * that ultimately fired this event have been removed.
+ * This class is retained so that PaperTradeExecutionService and
+ * TradeExecutionService compile without modification.
  *
- * PROBLEM — the old pipeline broke timeStopMinutes silently:
+ * When a new strategy engine is wired in, the publishing flow is:
+ *   NewStrategyEngine → ProbabilityScoreEvent
+ *     → RiskManagementService (gates: slot count, circuit breaker, sector)
+ *     → TradeApprovedEvent
+ *     → PaperTradeExecutionService.onTradeApproved() (PAPER mode)
+ *     → TradeExecutionService.onTradeApproved()      (LIVE mode)
  *
- *   TradeSignal (has timeStopMinutes=30 for VAP)
- *     ↓ StrategyEvaluatorService.fireProbabilityEvent()
- *   ProbabilityScoreEvent  ← timeStopMinutes dropped here
- *     ↓ RiskManagementService.onProbabilityScore()
- *   TradeApprovedEvent     ← not present here either
- *     ↓ PaperTradeExecutionService.onTradeApproved()
- *   paperManagement.register(..., 0)  ← always 0, time stop never enforced
+ * timeStopMinutes pipeline (previously broken, now correct):
+ *   The timeStopMinutes field flows from ProbabilityScoreEvent → TradeApprovedEvent
+ *   → PaperTradeExecutionService → PaperTradeManagementService.register()
+ *   → enforced on every tick in manageTrade().
+ *   Strategies that don't specify a time stop pass 0, which falls back to
+ *   StrategyConfig.global.globalTimeStop (default 30 minutes).
  *
- * FIX — the field now flows all the way through:
- *   ProbabilityScoreEvent  carries timeStopMinutes (see ProbabilityScoreEvent.java)
- *   RiskManagementService  reads it and passes it here
- *   PaperTradeExecutionService reads event.getTimeStopMinutes() → register()
- *   PaperTradeManagementService enforces it on every tick
- *
- * Backward compatibility: old 11-param constructor kept unchanged.
- * New 12-param constructor adds timeStopMinutes as the last parameter.
- * All existing callers of the 11-param constructor continue to compile — they
- * will produce trades with timeStopMinutes=0 (no time stop), which is correct
- * for strategies that don't specify one.
+ * Backward compatibility:
+ *   The original 11-param constructor defaults timeStopMinutes to 0.
+ *   All existing callers continue to compile unchanged.
  */
 @Getter
 public class TradeApprovedEvent extends ApplicationEvent {
@@ -46,12 +46,11 @@ public class TradeApprovedEvent extends ApplicationEvent {
     private final BigDecimal     probabilityScore;
     private final String         strategyName;
 
-    /** FIX: strategy-specific time stop in minutes (0 = none, use 15:00 IST only) */
+    /** Strategy-specific time stop in minutes (0 = none, use 15:00 IST only) */
     private final int timeStopMinutes;
 
     // ── Original 11-param constructor — backward compatible ──────────────────
-    // All existing callers (live TradeExecutionService, tests, etc.) continue
-    // to compile unchanged. timeStopMinutes defaults to 0.
+    // All existing callers continue to compile unchanged. timeStopMinutes = 0.
     public TradeApprovedEvent(Object src, String sym, long token,
                               TradeDirection dir, BigDecimal entry,
                               BigDecimal sl, BigDecimal tgt,
@@ -60,9 +59,9 @@ public class TradeApprovedEvent extends ApplicationEvent {
         this(src, sym, token, dir, entry, sl, tgt, qty, risk, score, strategy, 0);
     }
 
-    // ── New 12-param constructor — carries timeStopMinutes ────────────────────
-    // Called by RiskManagementService.onProbabilityScore() after reading
-    // timeStopMinutes from ProbabilityScoreEvent.
+    // ── Full 12-param constructor — carries timeStopMinutes ──────────────────
+    // To be called by RiskManagementService after reading timeStopMinutes
+    // from ProbabilityScoreEvent, once a new strategy engine is active.
     public TradeApprovedEvent(Object src, String sym, long token,
                               TradeDirection dir, BigDecimal entry,
                               BigDecimal sl, BigDecimal tgt,
