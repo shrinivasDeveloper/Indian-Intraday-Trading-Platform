@@ -13,6 +13,41 @@ import java.io.IOException;
 import java.util.*;
 import java.util.stream.Collectors;
 
+/**
+ * ZerodhaMarketDataClient — JAR-verified market data retrieval.
+ *
+ * JAR-VERIFIED METHOD SIGNATURES:
+ *
+ *   getHistoricalData(Date, Date, String, String, boolean, boolean) → HistoricalData
+ *     params: fromDate, toDate, instrumentToken(String), interval, continuous, oi
+ *     NOTE: instrumentToken must be String.valueOf(long)
+ *
+ *   getInstruments(String) → List<Instrument>
+ *   getQuote(String[])     → Map<String, Quote>
+ *   getOHLC(String[])      → Map<String, OHLCQuote>
+ *   getLTP(String[])       → Map<String, LTPQuote>
+ *
+ * JAR-VERIFIED INSTRUMENT FIELDS:
+ *   instrument_token → long  (getter: getInstrument_token())
+ *   tradingsymbol    → String (getter: getTradingsymbol())
+ *   name             → String (getter: getName())
+ *   instrument_type  → String (getter: getInstrument_type())
+ *   exchange         → String (getter: getExchange())
+ *   expiry           → Date   (getter: getExpiry())
+ *   lot_size         → int    (getter: getLot_size())
+ *   last_price       → double (getter: getLast_price())
+ *   tick_size        → double (getter: getTick_size())
+ *
+ * JAR-VERIFIED HISTORICALDATA FIELDS:
+ *   timeStamp        → String
+ *   open             → double
+ *   high             → double
+ *   low              → double
+ *   close            → double
+ *   volume           → long
+ *   oi               → long
+ *   dataArrayList    → List<HistoricalData>
+ */
 @Component
 @Slf4j
 @RequiredArgsConstructor
@@ -24,19 +59,34 @@ public class ZerodhaMarketDataClient {
     public List<Instrument> getInstruments(String exchange) {
         try {
             List<Instrument> list = kiteConnect.getInstruments(exchange);
-            log.info("Fetched {} instruments from {}", list.size(), exchange);
+            log.info("[MDC] Fetched {} instruments from {}", list.size(), exchange);
             return list;
-        } catch (KiteException | IOException e) {
-            throw new RuntimeException("Instruments[" + exchange + "]: " + e.getMessage(), e);
+        } catch (KiteException e) {
+            throw new RuntimeException("Instruments[" + exchange + "] [" + e.code + "]: " + e.message, e);
+        } catch (IOException e) {
+            throw new RuntimeException("Instruments[" + exchange + "] network: " + e.getMessage(), e);
         }
     }
 
+    /**
+     * JAR-VERIFIED signature:
+     *   getHistoricalData(Date from, Date to, String instrumentToken,
+     *                     String interval, boolean continuous, boolean oi)
+     *
+     * NOTE: instrumentToken is String (not long) — must use String.valueOf(token).
+     * NOTE: oi=false for equity instruments.
+     */
     @Retryable(maxAttempts = 3, backoff = @Backoff(delay = 1000, multiplier = 2))
     public HistoricalData getHistoricalData(long token, String interval,
                                             Date from, Date to, boolean continuous) {
         try {
+            // JAR-VERIFIED: token param is String in getHistoricalData
             return kiteConnect.getHistoricalData(
-                    from, to, String.valueOf(token), interval, continuous, false);
+                    from, to,
+                    String.valueOf(token),  // long → String ✓
+                    interval,
+                    continuous,
+                    false);                 // oi = false for equity
         } catch (KiteException e) {
             throw new RuntimeException("Historical [" + e.code + "]: " + e.message, e);
         } catch (Exception e) {
@@ -48,7 +98,9 @@ public class ZerodhaMarketDataClient {
     public Map<String, Quote> getQuotes(String[] instruments) {
         try {
             return kiteConnect.getQuote(instruments);
-        } catch (KiteException | IOException e) {
+        } catch (KiteException e) {
+            throw new RuntimeException("[" + e.code + "]: " + e.message, e);
+        } catch (IOException e) {
             throw new RuntimeException(e.getMessage(), e);
         }
     }
@@ -57,7 +109,9 @@ public class ZerodhaMarketDataClient {
     public Map<String, OHLCQuote> getOHLC(String[] instruments) {
         try {
             return kiteConnect.getOHLC(instruments);
-        } catch (KiteException | IOException e) {
+        } catch (KiteException e) {
+            throw new RuntimeException("[" + e.code + "]: " + e.message, e);
+        } catch (IOException e) {
             throw new RuntimeException(e.getMessage(), e);
         }
     }
@@ -66,17 +120,27 @@ public class ZerodhaMarketDataClient {
     public Map<String, LTPQuote> getLTP(String[] instruments) {
         try {
             return kiteConnect.getLTP(instruments);
-        } catch (KiteException | IOException e) {
+        } catch (KiteException e) {
+            throw new RuntimeException("[" + e.code + "]: " + e.message, e);
+        } catch (IOException e) {
             throw new RuntimeException(e.getMessage(), e);
         }
     }
 
     /**
-     * Resolve only equity tokens for Nifty500 dynamically.
-     * Returns map of symbol -> token for subscription.
+     * Resolve equity tokens for Nifty500.
+     *
+     * JAR-VERIFIED Instrument getters:
+     *   getInstrument_type()  → String  ("EQ", "BE", etc.)
+     *   getTradingsymbol()    → String
+     *   getInstrument_token() → long
+     *   getName()             → String
      */
-    public Map<String, Long> resolveNifty500Tokens(List<String> niftySymbols, List<Instrument> instrumentList) {
+    public Map<String, Long> resolveNifty500Tokens(List<String> niftySymbols,
+                                                   List<Instrument> instrumentList) {
         Map<String, Long> resolved = new HashMap<>();
+
+        // JAR-VERIFIED: getInstrument_type() getter name
         Set<String> instrumentSymbols = instrumentList.stream()
                 .filter(i -> "EQ".equalsIgnoreCase(i.getInstrument_type()))
                 .map(Instrument::getTradingsymbol)
@@ -84,18 +148,18 @@ public class ZerodhaMarketDataClient {
 
         for (String symbol : niftySymbols) {
             if (instrumentSymbols.contains(symbol)) {
-                Instrument inst = instrumentList.stream()
+                // JAR-VERIFIED: getTradingsymbol() and getInstrument_token() getters
+                instrumentList.stream()
                         .filter(i -> symbol.equals(i.getTradingsymbol()))
-                        .findFirst().orElse(null);
-                if (inst != null) {
-                    resolved.put(symbol, inst.getInstrument_token());
-                }
+                        .findFirst()
+                        .ifPresent(inst -> resolved.put(symbol, inst.getInstrument_token()));
             } else {
-                log.warn("Nifty500 symbol missing in instrument list: {}", symbol);
+                log.debug("[MDC] Nifty500 symbol missing in instrument list: {}", symbol);
             }
         }
 
-        log.info("Nifty500 resolved tokens: {} / {} total", resolved.size(), niftySymbols.size());
+        log.info("[MDC] Nifty500 resolved tokens: {} / {} total",
+                resolved.size(), niftySymbols.size());
         return resolved;
     }
 }

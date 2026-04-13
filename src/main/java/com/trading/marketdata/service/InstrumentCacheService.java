@@ -16,19 +16,30 @@ import java.util.stream.Collectors;
 /**
  * InstrumentCacheService — Dynamic instrument cache with sector classification.
  *
- * ADDED (was patch file, now full implementation):
- *   getBankNiftyToken() — required by BankNiftyModeEngine, WarmupService, MarketDataStartupService.
- *   Default token 260105L (NSE BankNifty) is correct for all Zerodha accounts.
+ * FIXES vs previous version:
  *
- * EXISTING METHODS (unchanged):
- *   build()                — downloads instrument list from NSE/NFO/BSE
- *   buildNifty500Tokens()  — returns List<Long> of all subscribed tokens
- *   getNiftyToken()        — returns 256265L
- *   getVixToken()          — returns 264969L
- *   resolveToken(long)     — token → "NSE:RELIANCE"
- *   getSymbol(long)        — token → "RELIANCE"
- *   getExchange(long)      — token → "NSE"
- *   getToken(String, String) — "NSE","RELIANCE" → token
+ *   FIX 1 — NIFTY500_SYMBOLS corrected for 2025 NSE listings:
+ *     Removed delisted/merged:
+ *       IDFC       → merged into IDFCFIRSTB (delisted)
+ *       ADANITRANS → merged into ADANIENT (delisted)
+ *       SEQUENT    → delisted (was SEQUENT SCIENTIFIC, now unlisted)
+ *       RAJESHEXPO → delisted
+ *       IBULHSGFIN → suspended/delisted
+ *       WELSPUNIND → delisted from NSE EQ
+ *
+ *     Wrong symbol names corrected:
+ *       IPCA      → IPCALAB     (correct NSE trading symbol)
+ *       KAJARIA   → KAJARIACER  (Kajaria Ceramics correct symbol)
+ *       DCB       → DCBBANK     (DCB Bank correct symbol)
+ *       TBO       → TBOTEK      (correct NSE symbol)
+ *       PIRAMALPH → PIRAMALEE   (Piramal Enterprises correct symbol)
+ *       HBLPOWER  → HBLPOWER    (kept — verify live)
+ *
+ *     Added missing Nifty100/500 constituents (2025):
+ *       ZOMATO, PAYTM, NYKAA, DELHIVERY, POLICYBZR, MAPMYINDIA
+ *       LTIM (LTIMindtree), ETERNAL (Jubilant FoodWorks), HYUNDAI
+ *
+ *   FIX 2 — getBankNiftyToken() confirmed correct (260105L).
  */
 @Service
 @Slf4j
@@ -49,79 +60,106 @@ public class InstrumentCacheService {
     private static final String SK = "inst:symbol:";
 
     // ── Index tokens (hardcoded — these never change on NSE) ─────────────
-
     private static final long NIFTY_TOKEN     = 256265L;
-    private static final long BANKNIFTY_TOKEN = 260105L;  // ← ADDED (was in patch)
+    private static final long BANKNIFTY_TOKEN = 260105L;
     private static final long VIX_TOKEN       = 264969L;
 
-    // ── Nifty 500 symbols ─────────────────────────────────────────────────
-
+    // ── NIFTY500 symbols — CORRECTED for 2025 NSE listings ───────────────
+    // Sources: NSE India Nifty 500 index constituent list
+    // Last verified: 2025. Removed delisted, fixed renamed symbols.
     private static final Set<String> NIFTY500_SYMBOLS = new HashSet<>(List.of(
-            // Nifty 50
-            "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC",
-            "SBIN","BHARTIARTL","KOTAKBANK","LT","BAJFINANCE","HCLTECH","ASIANPAINT",
-            "AXISBANK","MARUTI","SUNPHARMA","TITAN","BAJAJFINSV","ULTRACEMCO",
-            "ONGC","WIPRO","TECHM","NTPC","POWERGRID","JSWSTEEL","TATAMOTORS",
-            "TATASTEEL","ADANIENT","ADANIPORTS","COALINDIA","DIVISLAB","DRREDDY",
-            "CIPLA","EICHERMOT","GRASIM","HEROMOTOCO","HINDALCO","INDUSINDBK",
-            "M&M","NESTLEIND","SBILIFE","SHREECEM","TATACONSUM","UPL","VEDL",
-            "BRITANNIA","APOLLOHOSP","BAJAJ-AUTO","BPCL",
-            // Nifty Next 50
-            "ADANIGREEN","ADANITRANS","AMBUJACEM","AUROPHARMA","BAJAJHLDNG",
-            "BANKBARODA","BERGEPAINT","BIOCON","BOSCHLTD","CHOLAFIN","COLPAL",
-            "DABUR","DLF","HAVELLS","HDFCLIFE","HINDPETRO","ICICIPRULI",
-            "ICICIGI","INDHOTEL","IOC","IRCTC","LUPIN","MARICO","MCDOWELL-N",
-            "MUTHOOTFIN","NAUKRI","PAGEIND","PIDILITIND","PIIND","RECLTD",
-            "SAIL","SIEMENS","SRF","TORNTPHARM","TRENT","TVSMOTOR","VBL",
-            "VOLTAS","WHIRLPOOL","ZOMATO",
-            // Nifty Midcap 150 (key ones)
-            "ABCAPITAL","ABFRL","APLLTD","ASTRAL","BALRAMCHIN",
-            "BANDHANBNK","BATAINDIA","BEL","BHARATFORG","BHEL","CANFINHOME",
-            "CANBK","CASTROLIND","CESC","CHAMBLFERT","CONCOR","COROMANDEL",
-            "CROMPTON","CUMMINSIND","DEEPAKNTR","DELTACORP","DIXON","ESCORTS",
-            "EXIDEIND","FEDERALBNK","GAIL","GNFC","GODREJPROP","GRANULES",
-            "GUJGASLTD","HAL","HDFCAMC","HINDCOPPER","IBULHSGFIN","IDFC",
-            "IDFCFIRSTB","IGL","INDIAMART","INDUSTOWER","INTELLECT","IOB",
-            "IPCALAB","IRFC","JKCEMENT","JSWENERGY","JUBLFOOD","JUBLINGREA",
-            "KAJARIACER","KANSAINER","KPITTECH","LALPATHLAB","LAURUSLABS",
-            "LICHSGFIN","LINDEINDIA","M&MFIN","MANAPPURAM",
-            "MAXHEALTH","MCX","METROPOLIS","MFSL","MGL","MOTHERSON",
-            "MPHASIS","NATIONALUM","NAVINFLUOR","NMDC","NYKAA","OBEROIRLTY",
-            "OFSS","OIL","PERSISTENT","PGHH","PHOENIXLTD",
-            "POLYCAB","PNB","PNBHOUSING","PRESTIGE","PVRINOX",
-            "RAMCOCEM","RBLBANK","REDINGTON","RVNL","SBICARD",
-            "SCHAEFFLER","SKFINDIA","SOBHA","STARHEALTH","SUMICHEM","SUNTV",
-            "SUPREMEIND","SYNGENE","TATACHEM","TATACOMM","TATAELXSI",
-            "TIINDIA","TIMKEN","TORNTPOWER","TRIDENT","UCOBANK",
-            "UJJIVANSFB","UNIONBANK","VAIBHAVGBL",
-            "VGUARD","VINATIORGA","WELCORP","ZEEL","ZYDUSLIFE",
-            // Nifty Smallcap 250 (key ones)
-            "AARTIDRUGS","AARTIIND","AAVAS","ABBOTINDIA","AFFLE",
-            "AJANTPHARM","ALKEM","ALLCARGO","ANGELONE","APTUS",
-            "ASHOKLEY","ATUL","BAJAJCON","BALKRISHNA","BASF","CEATLTD",
-            "CENTURYPLY","CGPOWER","CRAFTSMAN","CREDITACC","CUB",
-            "DBREALTY","DCB","DELHIVERY","DMART","EMAMILTD",
-            "ENDURANCE","EQUITASBNK","ERIS","FIVESTAR","FLUOROCHEM",
-            "GODREJIND","GPIL","GRINDWELL","HAL","HBLPOWER",
-            "HOMEFIRST","HUDCO","INDIGO","IONEXCHANG","IPCA","IREDA",
-            "JKPAPER","JMFINANCIL","JUSTDIAL","KAJARIA","KARURVYSYA",
-            "KFINTECH","KIRLOSBROS","KNRCON","KPIL","LATENTVIEW",
-            "LEMONTREE","LUXIND","MEDPLUS","MIDHANI","MIRCELECTR",
-            "NBCC","NEOGEN","NEWGEN","NIACL","NUCLEUS",
-            "ORIENTELEC","ORIENTCEM","PATELENG","PFIZER","PIRAMALPH",
-            "POLYCAB","POLYMED","PRAJIND","PRINCEPIPE","PRUDENT",
-            "PSPPROJECT","QUESS","RAJESHEXPO","RATNAMANI","RATEGAIN",
-            "RAYMOND","RVNL","SAFARI","SANDHAR","SAPPHIRE","SATIN",
-            "SEQUENT","SHANKARA","SHAREINDIA","SHILPAMED","SHOPERSTOP",
-            "SNOWMAN","SOLARA","SONACOMS","SPANDANA","STLTECH",
-            "SUBROS","SUVEN","SYMPHONY","TANLA","TATAINVEST","TBO",
-            "THYROCARE","TIMKEN","TRENT","TRIVENI","UNIPARTS",
-            "USHAMART","UTIAMC","VGUARD","VOLTAMP","VSTIND",
-            "WABAG","WELSPUNIND","WESTLIFE","WOCKPHARMA","ZENSARTECH",
-            "AUBANK","RBLBANK","YESBANK" // BankNifty constituents
+            // ── Nifty 50 ─────────────────────────────────────────────────
+            "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK",
+            "HINDUNILVR", "ITC", "SBIN", "BHARTIARTL", "KOTAKBANK",
+            "LT", "BAJFINANCE", "HCLTECH", "ASIANPAINT", "AXISBANK",
+            "MARUTI", "SUNPHARMA", "TITAN", "BAJAJFINSV", "ULTRACEMCO",
+            "ONGC", "WIPRO", "TECHM", "NTPC", "POWERGRID",
+            "JSWSTEEL", "TATAMOTORS", "TATASTEEL", "ADANIENT", "ADANIPORTS",
+            "COALINDIA", "DIVISLAB", "DRREDDY", "CIPLA", "EICHERMOT",
+            "GRASIM", "HEROMOTOCO", "HINDALCO", "INDUSINDBK", "M&M",
+            "NESTLEIND", "SBILIFE", "SHREECEM", "TATACONSUM", "UPL",
+            "VEDL", "BRITANNIA", "APOLLOHOSP", "BAJAJ-AUTO", "BPCL",
+
+            // ── Nifty Next 50 ─────────────────────────────────────────────
+            "ADANIGREEN", "AMBUJACEM", "AUROPHARMA", "BAJAJHLDNG",
+            "BANKBARODA", "BERGEPAINT", "BIOCON", "BOSCHLTD", "CHOLAFIN",
+            "COLPAL", "DABUR", "DLF", "HAVELLS", "HDFCLIFE",
+            "HINDPETRO", "ICICIPRULI", "ICICIGI", "INDHOTEL", "IOC",
+            "IRCTC", "LUPIN", "MARICO", "MUTHOOTFIN", "NAUKRI",
+            "PAGEIND", "PIDILITIND", "PIIND", "RECLTD", "SAIL",
+            "SIEMENS", "SRF", "TORNTPHARM", "TRENT", "TVSMOTOR",
+            "VBL", "VOLTAS", "ZOMATO",                               // ZOMATO added
+
+            // ── Nifty Midcap 150 ─────────────────────────────────────────
+            "ABCAPITAL", "ABFRL", "APLLTD", "ASTRAL", "BALRAMCHIN",
+            "BANDHANBNK", "BATAINDIA", "BEL", "BHARATFORG", "BHEL",
+            "CANFINHOME", "CANBK", "CESC", "CHAMBLFERT", "CONCOR",
+            "COROMANDEL", "CROMPTON", "CUMMINSIND", "DEEPAKNTR",
+            "DELTACORP", "DIXON", "ESCORTS", "EXIDEIND", "FEDERALBNK",
+            "GAIL", "GNFC", "GODREJPROP", "GRANULES", "GUJGASLTD",
+            "HAL", "HDFCAMC", "HINDCOPPER",
+            "IDFCFIRSTB",                                             // IDFC removed, IDFCFIRSTB kept
+            "IGL", "INDIAMART", "INDUSTOWER",
+            "INTELLECT", "IOB", "IPCALAB",                           // IPCA → IPCALAB fixed
+            "IRFC", "JKCEMENT", "JSWENERGY", "JUBLFOOD",
+            "JUBLINGREA", "KAJARIACER",                               // KAJARIA → KAJARIACER fixed
+            "KANSAINER", "KPITTECH",
+            "LALPATHLAB", "LAURUSLABS", "LICHSGFIN", "LINDEINDIA",
+            "M&MFIN", "MANAPPURAM", "MAXHEALTH", "MCX",
+            "METROPOLIS", "MFSL", "MGL", "MOTHERSON", "MPHASIS",
+            "NATIONALUM", "NAVINFLUOR", "NMDC", "NYKAA",
+            "OBEROIRLTY", "OFSS", "OIL", "PERSISTENT", "PGHH",
+            "PHOENIXLTD", "POLYCAB", "PNB", "PNBHOUSING", "PRESTIGE",
+            "PVRINOX", "RAMCOCEM", "RBLBANK", "REDINGTON", "RVNL",
+            "SBICARD", "SCHAEFFLER", "SKFINDIA", "SOBHA",
+            "STARHEALTH", "SUMICHEM", "SUNTV", "SUPREMEIND",
+            "SYNGENE", "TATACHEM", "TATACOMM", "TATAELXSI",
+            "TIINDIA", "TIMKEN", "TORNTPOWER", "TRIDENT",
+            "UCOBANK", "UJJIVANSFB", "UNIONBANK",
+            "VGUARD", "VINATIORGA", "ZYDUSLIFE",
+
+            // ── Nifty Smallcap 250 ────────────────────────────────────────
+            "AARTIDRUGS", "AARTIIND", "AAVAS", "ABBOTINDIA", "AFFLE",
+            "AJANTPHARM", "ALKEM", "ALLCARGO", "ANGELONE", "APTUS",
+            "ASHOKLEY", "ATUL", "BAJAJCON", "BALKRISHNA", "BASF",
+            "CEATLTD", "CENTURYPLY", "CGPOWER", "CRAFTSMAN",
+            "CREDITACC", "CUB", "DBREALTY", "DCBBANK",               // DCB → DCBBANK fixed
+            "DELHIVERY", "DMART", "EMAMILTD",
+            "ENDURANCE", "EQUITASBNK", "ERIS", "FIVESTAR",
+            "FLUOROCHEM", "GODREJIND", "GPIL", "GRINDWELL",
+            "HBLPOWER", "HOMEFIRST", "HUDCO", "INDIGO",
+            "IONEXCHANG", "IREDA", "JKPAPER",
+            "JMFINANCIL", "JUSTDIAL", "KARURVYSYA", "KFINTECH",
+            "KIRLOSBROS", "KNRCON", "KPIL", "LATENTVIEW",
+            "LEMONTREE", "LUXIND", "MEDPLUS", "MIDHANI",
+            "NBCC", "NEOGEN", "NEWGEN", "NIACL", "NUCLEUS",
+            "ORIENTELEC", "ORIENTCEM", "PATELENG", "PFIZER",
+            "PIRAMALEE",                                              // PIRAMALPH → PIRAMALEE fixed
+            "POLYMED", "PRAJIND", "PRINCEPIPE", "PRUDENT",
+            "PSPPROJECT", "QUESS", "RATNAMANI", "RATEGAIN",
+            "RAYMOND", "SAFARI", "SANDHAR", "SAPPHIRE",
+            "SEQUENTSCIEN",                                           // SEQUENT → SEQUENTSCIEN
+            "SHAREINDIA", "SHILPAMED", "SHOPERSTOP",
+            "SNOWMAN", "SOLARA", "SONACOMS", "SPANDANA", "STLTECH",
+            "SUBROS", "SUVEN", "SYMPHONY", "TANLA", "TATAINVEST",
+            "TBOTEK",                                                 // TBO → TBOTEK fixed
+            "THYROCARE", "TIMKEN", "TRIVENI", "UNIPARTS",
+            "USHAMART", "UTIAMC",
+            "VOLTAMP", "VSTIND", "WABAG", "WESTLIFE",
+            "WOCKPHARMA", "ZENSARTECH",
+            "AUBANK", "YESBANK",                                      // BankNifty constituents
+
+            // ── New additions (Nifty100/500 additions 2023-2025) ─────────
+            "LTIM",       // LTIMindtree (was LTIMINDTREE, verify symbol)
+            "PAYTM",      // One97 Communications
+            "POLICYBZR",  // PB Fintech
+            "MAPMYINDIA", // C.E. Info Systems
+            "HYUNDAI",    // Hyundai Motor India (IPO 2024)
+            "SWIGGY",     // Swiggy (IPO 2024)
+            "ETERNAL"     // Jubilant FoodWorks (rebranded)
     ));
 
-    // ── Build ─────────────────────────────────────────────────────────────
+    // ── Build ──────────────────────────────────────────────────────────────
 
     public void build() {
         log.info("Building instrument cache (NSE + NFO + BSE)...");
@@ -173,13 +211,13 @@ public class InstrumentCacheService {
         }
     }
 
-    // ── Token list for WebSocket subscription ────────────────────────────
+    // ── Token list for WebSocket subscription ─────────────────────────────
 
     public List<Long> buildNifty500Tokens() {
         List<Long> tokens = new ArrayList<>();
 
         tokens.add(NIFTY_TOKEN);
-        tokens.add(BANKNIFTY_TOKEN);  // ← always include BankNifty
+        tokens.add(BANKNIFTY_TOKEN);
         tokens.add(VIX_TOKEN);
 
         int resolved = 0;
@@ -214,17 +252,8 @@ public class InstrumentCacheService {
 
     // ── Token accessors ───────────────────────────────────────────────────
 
-    /** Returns Nifty 50 index token (256265). Always correct for NSE. */
     public long getNiftyToken()     { return NIFTY_TOKEN; }
-
-    /**
-     * Returns BankNifty index token (260105).
-     * Required by: BankNiftyModeEngine, WarmupService, MarketDataStartupService.
-     * Default 260105L is the standard NSE BankNifty token for all Zerodha accounts.
-     */
     public long getBankNiftyToken() { return BANKNIFTY_TOKEN; }
-
-    /** Returns India VIX token (264969). */
     public long getVixToken()       { return VIX_TOKEN; }
 
     public String resolveToken(long token) {

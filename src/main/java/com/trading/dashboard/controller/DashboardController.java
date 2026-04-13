@@ -15,10 +15,11 @@ import com.trading.regime.service.MarketModeEngine;
 import com.trading.regime.service.MarketPhaseEngine;
 import com.trading.risk.service.CircuitBreakerService;
 import com.trading.risk.service.RiskManagementService;
-import com.trading.scanner.service.SevenGateScannerService;
 import com.trading.sector.service.SectorClassificationService;
 import com.trading.sector.service.SectorStrengthService;
-import com.trading.strategy.StrategyEvaluatorService;
+import com.trading.strategy.channel.ChannelDetectionService;
+import com.trading.strategy.channel.SmartChannelPullbackStrategy;
+import com.trading.strategy.channel.SmartChannelSignalHandler;
 import com.trading.validation.StrategyValidationTracker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -33,34 +34,12 @@ import java.time.LocalDate;
 import java.util.*;
 
 /**
- * DashboardController — v7.0 Complete Dashboard API.
+ * DashboardController — v9.0
  *
- * ALL 4 COMPILE ERRORS FIXED:
- *
- *   ERROR 1: getCurrentBankNiftyMode() — DOES NOT EXIST on BankNiftyModeEngine.
- *            FIX: BankNiftyModeEngine has @Getter on field `currentMode`, so
- *                 Lombok generates getCurrentMode() — that is what to call.
- *
- *   ERROR 2: getForSymbol(String) — DOES NOT EXIST on StrategyValidationTracker.
- *            FIX: Use getAllLogs() which returns Map<strategy, List<SymbolValidationLog>>,
- *                 then filter by symbol manually.
- *
- *   ERROR 3: getForStrategy(String) — DOES NOT EXIST.
- *            FIX: Use getByStrategy(String strategy) — this method DOES exist.
- *
- *   ERROR 4: getRecent(int) — DOES NOT EXIST.
- *            FIX: Use getAllLogs() and flatten/limit in code.
- *
- * VERIFIED API against source:
- *   BankNiftyModeEngine:         getCurrentMode(), getModeForSymbol(), isBankNiftyStock()
- *   StrategyValidationTracker:   record(), getAllLogs(), getByStrategy(), getFailureFrequency(), getTotalSymbolsTracked()
- *   MarketPhaseEngine:           getCurrentPhase(), isEarlyPhase(), isConfirmedPhase(), isTradeAllowed(), isOrbAllowed(), isIbForceNeeded()
- *   StockRankingEngine:          getTopCandidates(int), getAllRankings(), getRank(String)
- *   LatencyMonitor:              getSummary(), isStale(), isCritical(), getLagMs(), getStatus()
- *   RiskManagementService:       getPhase1Count(), getMaxPhase1(), getSectorExposure(), getStrategyExposure()
- *   PaperTradeManagementService: getActiveTrades(), isAnyTradeAtBreakevenOrBeyond()
- *   PaperTradeExecutionService:  getAllTrades(), getTodayTrades(LocalDate)
- *   StrategyEvaluatorService:    getFiredToday(), getSignalCounters()
+ * ADDED vs v8.0:
+ *   - smartChannelPullback section in strategyStatus
+ *   - channelDetection section (valid channels count, tracked symbols)
+ *   - GET /api/dashboard/strategy/smart-channel-pullback (dedicated endpoint)
  */
 @RestController
 @RequestMapping("/api/dashboard")
@@ -76,17 +55,15 @@ public class DashboardController {
     private final MarketTimingService         timingService;
     private final MarketDirectionService      marketDir;
     private final CircuitBreakerService       circuitBreaker;
-    private final SevenGateScannerService     scanner;
     private final SectorStrengthService       sectorStrength;
     private final SectorClassificationService sectorClassify;
-    private final StrategyEvaluatorService    strategyEvaluator;
 
     // ── Mode engines ──────────────────────────────────────────────────────
     private final MarketModeEngine            marketModeEngine;
     private final MarketPhaseEngine           marketPhaseEngine;
     private final BankNiftyModeEngine         bankNiftyModeEngine;
 
-    // ── v7.0 services ─────────────────────────────────────────────────────
+    // ── v7+ services ──────────────────────────────────────────────────────
     private final StockRankingEngine          rankingEngine;
     private final LatencyMonitor              latencyMonitor;
     private final PaperTradeExecutionService  paperExecution;
@@ -94,12 +71,17 @@ public class DashboardController {
     private final RiskManagementService       riskManagement;
     private final StrategyValidationTracker   validationTracker;
 
+    // ── SmartChannelPullback strategy (NEW) ───────────────────────────────
+    private final SmartChannelPullbackStrategy smartChannelPullbackStrategy;
+    private final SmartChannelSignalHandler    smartChannelSignalHandler;
+    private final ChannelDetectionService      channelDetectionService;
+
     @Value("${trading.capital:100000}") private BigDecimal capital;
     @Value("${trading.mode:PAPER}")     private String     tradingMode;
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // GET /api/dashboard/snapshot — full system state
-    // ═══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════
+    // GET /api/dashboard/snapshot
+    // ══════════════════════════════════════════════════════════════════════
 
     @GetMapping("/snapshot")
     public ResponseEntity<Map<String, Object>> snapshot() {
@@ -203,62 +185,32 @@ public class DashboardController {
         // 8. today's closed trades
         data.put("todayTrades", tradeExecution.getTodayTrades(LocalDate.now()));
 
-        // 9. strategy status
+        // 9. strategy status — includes SmartChannelPullback
         Map<String, Object> strategyStatus = new LinkedHashMap<>();
-        strategyStatus.put("firedToday",      strategyEvaluator.getFiredToday());
+        strategyStatus.put("firedToday",      smartChannelPullbackStrategy.getActiveSignals());
         strategyStatus.put("perStrategyPnl",  buildStrategyPnl());
         strategyStatus.put("strategySummary", buildStrategySummary());
-        strategyStatus.put("signalCounters",  strategyEvaluator.getSignalCounters());
+        // NEW: SmartChannelPullback specific data
+        strategyStatus.put("smartChannelPullback", buildSmartChannelStatus());
         data.put("strategyStatus", strategyStatus);
 
-        // 10. armed stocks
-        Map<String, Object> armedMap = new LinkedHashMap<>();
-        scanner.getArmedStocks().forEach((sym, armed) -> {
-            Map<String, Object> a = new LinkedHashMap<>();
-            a.put("symbol",          sym);
-            a.put("sector",          sectorClassify.getSector(sym));
-            a.put("direction",       armed.direction().name());
-            a.put("compressionHigh", armed.compressionHigh());
-            a.put("compressionLow",  armed.compressionLow());
-            a.put("stopLoss",        armed.stopLoss());
-            a.put("target",          armed.target());
-            a.put("gapType",         armed.gapType().name());
-            a.put("armedAt",         armed.armedAt().toString());
-            a.put("minRR",           armed.minRR());
-            a.put("isReentry",       armed.isReentry());
-            armedMap.put(sym, a);
-        });
-        data.put("armedStocks",    armedMap);
-        data.put("armedCount",     scanner.getArmedCount());
-        data.put("gateRejections", scanner.getGateRejections());
-
-        // 11. gate status
-        Map<Integer, String> gateStatus = new LinkedHashMap<>();
-        String gate1 = dir.direction() == MarketDirectionService.Direction.SIDEWAYS
-                ? "SIDE" : dir.isTradeable() ? "PASS" : "FAIL";
-        gateStatus.put(1, gate1);
-        for (int i = 2; i <= 7; i++) gateStatus.put(i, "WAIT");
-        data.put("gateStatus", gateStatus);
-
-        // 12. marketMode (Nifty)
+        // 10. marketMode (Nifty)
         data.put("marketMode", buildMarketModeMap(marketModeEngine.getCurrentMode()));
 
-        // 13. v7.0: marketPhase (EARLY / CONFIRMED)
+        // 11. marketPhase
         data.put("marketPhase", buildPhaseMap());
 
-        // 14. v7.0: bankNiftyMode
-        // FIX: BankNiftyModeEngine has @Getter on `currentMode` field.
-        // Lombok generates getCurrentMode() — NOT getCurrentBankNiftyMode().
+        // 12. bankNiftyMode
         data.put("bankNiftyMode", buildMarketModeMap(bankNiftyModeEngine.getCurrentMode()));
 
-        // 15. v7.0: latency
+        // 13. latency
         data.put("latency", buildLatencyMap());
 
-        // 16. v7.0: stockRankings
+        // 14. stockRankings
         data.put("stockRankings", buildRankingList(10));
         data.put("allRankings",   rankingEngine.getAllRankings());
 
-        // 17. v7.0: risk slot counters
+        // 15. risk slot counters
         Map<String, Object> riskSlots = new LinkedHashMap<>();
         riskSlots.put("phase1Count",      riskManagement.getPhase1Count());
         riskSlots.put("maxPhase1",        riskManagement.getMaxPhase1());
@@ -267,29 +219,54 @@ public class DashboardController {
         riskSlots.put("anyAtBreakeven",   paperManagement.isAnyTradeAtBreakevenOrBeyond());
         data.put("riskSlots", riskSlots);
 
-        // 18. paper trades
+        // 16. paper trades
         data.put("paperTrades",        buildPaperTrades(prices));
         data.put("paperTradesHistory", paperExecution.getAllTrades());
 
-        // 19. validation summary
+        // 17. validation summary
         data.put("validationFailureFrequency", validationTracker.getFailureFrequency());
         data.put("validationSymbolsTracked",   validationTracker.getTotalSymbolsTracked());
+
+        // 18. channel detection summary (NEW)
+        data.put("channelDetection", buildChannelDetectionSummary());
 
         return ResponseEntity.ok(data);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // GET /api/dashboard/prices
-    // ═══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════
+    // NEW: GET /api/dashboard/strategy/smart-channel-pullback
+    // ══════════════════════════════════════════════════════════════════════
+
+    @GetMapping("/strategy/smart-channel-pullback")
+    public ResponseEntity<Map<String, Object>> smartChannelStatus() {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("timestamp",       Instant.now().toString());
+        data.putAll(buildSmartChannelStatus());
+
+        // Valid channels
+        Map<String, Object> channels = new LinkedHashMap<>();
+        channelDetectionService.getAllValidChannels().forEach((sym, ch) -> {
+            Map<String, Object> c = new LinkedHashMap<>();
+            c.put("type",              ch.type().name());
+            c.put("validity",          ch.validity().name());
+            c.put("supportPrice",      round2(ch.supportPrice()));
+            c.put("resistancePrice",   round2(ch.resistancePrice()));
+            c.put("channelWidthPct",   round2(ch.channelWidthPct()));
+            c.put("pullbackZoneTop",   round2(ch.pullbackZoneTop()));
+            c.put("pullbackZoneBottom",round2(ch.pullbackZoneBottom()));
+            c.put("supportTouches",    ch.supportLine() != null ? ch.supportLine().touches() : 0);
+            c.put("resistanceTouches", ch.resistanceLine() != null ? ch.resistanceLine().touches() : 0);
+            channels.put(sym, c);
+        });
+        data.put("validChannels", channels);
+
+        return ResponseEntity.ok(data);
+    }
 
     @GetMapping("/prices")
     public ResponseEntity<Map<String, BigDecimal>> prices() {
         return ResponseEntity.ok(marketDataService.getLastPricesSimple());
     }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // GET /api/dashboard/phase
-    // ═══════════════════════════════════════════════════════════════════════
 
     @GetMapping("/phase")
     public ResponseEntity<Map<String, Object>> phase() {
@@ -297,10 +274,6 @@ public class DashboardController {
         m.put("timestamp", Instant.now().toString());
         return ResponseEntity.ok(m);
     }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // GET /api/dashboard/ranking
-    // ═══════════════════════════════════════════════════════════════════════
 
     @GetMapping("/ranking")
     public ResponseEntity<Map<String, Object>> ranking() {
@@ -311,10 +284,6 @@ public class DashboardController {
         return ResponseEntity.ok(m);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // GET /api/dashboard/latency
-    // ═══════════════════════════════════════════════════════════════════════
-
     @GetMapping("/latency")
     public ResponseEntity<Map<String, Object>> latency() {
         Map<String, Object> m = buildLatencyMap();
@@ -323,10 +292,6 @@ public class DashboardController {
         m.put("timestamp",    Instant.now().toString());
         return ResponseEntity.ok(m);
     }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // GET /api/dashboard/paper-trades
-    // ═══════════════════════════════════════════════════════════════════════
 
     @GetMapping("/paper-trades")
     public ResponseEntity<Map<String, Object>> paperTrades() {
@@ -340,63 +305,35 @@ public class DashboardController {
         return ResponseEntity.ok(m);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // GET /api/dashboard/strategy-performance
-    // ═══════════════════════════════════════════════════════════════════════
-
     @GetMapping("/strategy-performance")
     public ResponseEntity<Map<String, Object>> strategyPerformance() {
         Map<String, Object> resp = new LinkedHashMap<>();
-        resp.put("perStrategyPnl",  buildStrategyPnl());
-        resp.put("firedToday",      strategyEvaluator.getFiredToday());
-        resp.put("strategySummary", buildStrategySummary());
-        resp.put("signalCounters",  strategyEvaluator.getSignalCounters());
-        resp.put("timestamp",       Instant.now().toString());
+        resp.put("perStrategyPnl",       buildStrategyPnl());
+        resp.put("firedToday",           smartChannelPullbackStrategy.getActiveSignals());
+        resp.put("strategySummary",      buildStrategySummary());
+        resp.put("smartChannelPullback", buildSmartChannelStatus());
+        resp.put("timestamp",            Instant.now().toString());
         return ResponseEntity.ok(resp);
     }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // GET /api/dashboard/validation
-    //   ?symbol=RELIANCE      → all logs for that symbol (filtered from getAllLogs)
-    //   ?strategy=SCANNER_7GATE → all logs for that strategy (getByStrategy)
-    //   (no params)           → full log map + failure frequency
-    //
-    // FIX: Only methods that ACTUALLY EXIST on StrategyValidationTracker:
-    //   - getAllLogs()              → Map<String, List<SymbolValidationLog>>
-    //   - getByStrategy(String)    → List<SymbolValidationLog>
-    //   - getFailureFrequency()    → Map<String, Integer>
-    //   - getTotalSymbolsTracked() → int
-    // ═══════════════════════════════════════════════════════════════════════
 
     @GetMapping("/validation")
     public ResponseEntity<Map<String, Object>> validation(
             @RequestParam(required = false) String symbol,
             @RequestParam(required = false) String strategy) {
-
         Map<String, Object> resp = new LinkedHashMap<>();
-
         if (symbol != null && !symbol.isBlank()) {
-            // FIX ERROR 2: getForSymbol() doesn't exist.
-            // Use getAllLogs() and filter by symbol across all strategies.
             String sym = symbol.toUpperCase();
             List<Object> symbolLogs = new ArrayList<>();
             validationTracker.getAllLogs().forEach((strat, logs) ->
                     logs.stream()
                             .filter(l -> sym.equals(l.symbol().toUpperCase()))
-                            .forEach(symbolLogs::add)
-            );
+                            .forEach(symbolLogs::add));
             resp.put("symbol",  symbol);
             resp.put("results", symbolLogs);
-
         } else if (strategy != null && !strategy.isBlank()) {
-            // FIX ERROR 3: getForStrategy() doesn't exist.
-            // Use getByStrategy(String) — this method DOES exist.
             resp.put("strategy", strategy);
             resp.put("results",  validationTracker.getByStrategy(strategy));
-
         } else {
-            // FIX ERROR 4: getRecent(int) doesn't exist.
-            // Use getAllLogs() and flatten manually.
             Map<String, List<com.trading.validation.SymbolValidationLog>> all =
                     validationTracker.getAllLogs();
             List<Object> recent = new ArrayList<>();
@@ -409,14 +346,9 @@ public class DashboardController {
             resp.put("failureFrequency", validationTracker.getFailureFrequency());
             resp.put("symbolsTracked",   validationTracker.getTotalSymbolsTracked());
         }
-
         resp.put("timestamp", Instant.now().toString());
         return ResponseEntity.ok(resp);
     }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // POST /api/dashboard/circuit-breaker/reset
-    // ═══════════════════════════════════════════════════════════════════════
 
     @PostMapping("/circuit-breaker/reset")
     public ResponseEntity<String> resetCb() {
@@ -424,9 +356,52 @@ public class DashboardController {
         return ResponseEntity.ok("Circuit breaker reset acknowledged");
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Private builders — all use only verified existing methods
-    // ═══════════════════════════════════════════════════════════════════════
+    // ── Private builders ───────────────────────────────────────────────────
+
+    private Map<String, Object> buildSmartChannelStatus() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("enabled",            smartChannelPullbackStrategy.isEnabled());
+        m.put("sessionSignalCount", smartChannelPullbackStrategy.getSessionSignalCount());
+        m.put("activeSignals",      smartChannelPullbackStrategy.getActiveSignals());
+        m.put("activeSignalCount",  smartChannelPullbackStrategy.getActiveSignalCount());
+        m.put("openTradesCount",    smartChannelSignalHandler.getOpenTradeCount());
+        m.put("validChannels",      channelDetectionService.getValidChannelCount());
+        m.put("trackedSymbols",     channelDetectionService.getTrackedSymbolCount());
+        return m;
+    }
+
+    private Map<String, Object> buildChannelDetectionSummary() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("trackedSymbols", channelDetectionService.getTrackedSymbolCount());
+        m.put("validChannels",  channelDetectionService.getValidChannelCount());
+
+        List<Map<String, Object>> topChannels = new ArrayList<>();
+        channelDetectionService.getAllValidChannels().entrySet().stream()
+                .limit(5)
+                .forEach(e -> {
+                    Map<String, Object> c = new LinkedHashMap<>();
+                    c.put("symbol",          e.getKey());
+                    c.put("type",            e.getValue().type().name());
+                    c.put("validity",        e.getValue().validity().name());
+                    c.put("supportPrice",    round2(e.getValue().supportPrice()));
+                    c.put("resistancePrice", round2(e.getValue().resistancePrice()));
+                    c.put("widthPct",        round2(e.getValue().channelWidthPct()));
+                    topChannels.add(c);
+                });
+        m.put("topChannels", topChannels);
+        return m;
+    }
+
+    private List<Map<String, Object>> buildStrategySummary() {
+        List<Map<String, Object>> list = new ArrayList<>();
+        Map<String, Object> scps = new LinkedHashMap<>();
+        scps.put("name",    "SMART_CHANNEL_PULLBACK_V2");
+        scps.put("enabled", smartChannelPullbackStrategy.isEnabled());
+        scps.put("signals", smartChannelPullbackStrategy.getSessionSignalCount());
+        scps.put("active",  smartChannelPullbackStrategy.getActiveSignalCount());
+        list.add(scps);
+        return list;
+    }
 
     private Map<String, Object> buildMarketModeMap(MarketModeEngine.MarketModeResult mm) {
         Map<String, Object> m = new LinkedHashMap<>();
@@ -493,15 +468,18 @@ public class DashboardController {
             var t = mt.trade();
             BigDecimal ltp = prices.getOrDefault(t.getTradingSymbol(), t.getEntryPrice());
             BigDecimal unrealPnl = t.getDirection().name().equals("LONG")
-                    ? ltp.subtract(t.getEntryPrice()).multiply(BigDecimal.valueOf(mt.remainingQty()))
-                    : t.getEntryPrice().subtract(ltp).multiply(BigDecimal.valueOf(mt.remainingQty()));
+                    ? ltp.subtract(t.getEntryPrice())
+                    .multiply(BigDecimal.valueOf(mt.remainingQty()))
+                    : t.getEntryPrice().subtract(ltp)
+                    .multiply(BigDecimal.valueOf(mt.remainingQty()));
             double rDist = mt.rDistance().doubleValue();
-            double rMult = rDist > 0 ? unrealPnl.doubleValue() / rDist / mt.remainingQty() : 0;
+            double rMult = rDist > 0
+                    ? unrealPnl.doubleValue() / rDist / mt.remainingQty() : 0;
             String phase = rMult >= 4.0 ? "Trail 0.5ATR (4R+)"
                     : rMult >= 3.0 ? "Trailing (3R+)"
-                    : rMult >= 1.0 ? "Breakeven" : "Survival";
+                    : rMult >= 1.0 ? "Breakeven"
+                    : "Survival";
             Integer rank = rankingEngine.getRank(t.getTradingSymbol());
-
             Map<String, Object> tr = new LinkedHashMap<>();
             tr.put("tradingSymbol",  t.getTradingSymbol());
             tr.put("direction",      t.getDirection().name());
@@ -530,11 +508,13 @@ public class DashboardController {
             var t = mt.trade();
             BigDecimal ltp = prices.getOrDefault(t.getTradingSymbol(), t.getEntryPrice());
             BigDecimal unrealPnl = t.getDirection().name().equals("LONG")
-                    ? ltp.subtract(t.getEntryPrice()).multiply(BigDecimal.valueOf(mt.remainingQty()))
-                    : t.getEntryPrice().subtract(ltp).multiply(BigDecimal.valueOf(mt.remainingQty()));
+                    ? ltp.subtract(t.getEntryPrice())
+                    .multiply(BigDecimal.valueOf(mt.remainingQty()))
+                    : t.getEntryPrice().subtract(ltp)
+                    .multiply(BigDecimal.valueOf(mt.remainingQty()));
             double rDist = mt.rDistance().doubleValue();
-            double rMult = rDist > 0 ? unrealPnl.doubleValue() / rDist / mt.remainingQty() : 0;
-
+            double rMult = rDist > 0
+                    ? unrealPnl.doubleValue() / rDist / mt.remainingQty() : 0;
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("tradingSymbol", t.getTradingSymbol());
             m.put("direction",     t.getDirection().name());
@@ -550,7 +530,8 @@ public class DashboardController {
             m.put("slAtBreakeven", mt.slAtBreakeven());
             m.put("trailActive",   mt.trailActive());
             m.put("halfExited",    mt.halfExited());
-            m.put("timeStop",      mt.timeStopMinutes() > 0 ? mt.timeStopMinutes() + "min" : "global");
+            m.put("timeStop",      mt.timeStopMinutes() > 0
+                    ? mt.timeStopMinutes() + "min" : "global");
             m.put("phase",         mt.slAtBreakeven()
                     ? (mt.halfExited() ? "Phase-4" : "Phase-3/2") : "Phase-1");
             list.add(m);
@@ -563,10 +544,11 @@ public class DashboardController {
         Map<String, Double>  pnlMap   = new LinkedHashMap<>();
         Map<String, Integer> countMap = new LinkedHashMap<>();
         Map<String, Integer> winsMap  = new LinkedHashMap<>();
-
         for (var trade : tradeExecution.getTodayTrades(LocalDate.now())) {
-            String strat = trade.getStrategyName() != null ? trade.getStrategyName() : "UNKNOWN";
-            double pnl   = trade.getNetPnl() != null ? trade.getNetPnl().doubleValue() : 0;
+            String strat = trade.getStrategyName() != null
+                    ? trade.getStrategyName() : "UNKNOWN";
+            double pnl = trade.getNetPnl() != null
+                    ? trade.getNetPnl().doubleValue() : 0;
             pnlMap.merge(strat, pnl, Double::sum);
             countMap.merge(strat, 1, Integer::sum);
             if (pnl > 0) winsMap.merge(strat, 1, Integer::sum);
@@ -579,36 +561,21 @@ public class DashboardController {
             s.put("trades",  cnt);
             s.put("wins",    wins);
             s.put("losses",  cnt - wins);
-            s.put("winRate", cnt > 0 ? String.format("%.1f%%", (double) wins / cnt * 100) : "0%");
+            s.put("winRate", cnt > 0
+                    ? String.format("%.1f%%", (double) wins / cnt * 100) : "0%");
             result.put(strat, s);
         });
         return result;
     }
 
-    private List<Map<String, Object>> buildStrategySummary() {
-        Set<String> fired = strategyEvaluator.getFiredToday();
-        List<Map<String, Object>> list = new ArrayList<>();
-        for (String name : List.of("SCANNER_7GATE", "AUTO_MODE", "ORB_VWAP_SECTOR",
-                "VAP_PULLBACK", "RANGE_BREAKOUT_3TOUCH")) {
-            long count = fired.stream().filter(k -> k.endsWith(":" + name)).count();
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("strategy",     name);
-            m.put("signalsFired", count);
-            list.add(m);
-        }
-        return list;
-    }
-
     private String phaseDescription() {
         return switch (marketPhaseEngine.getCurrentPhase()) {
             case PRE_OPEN  -> "Pre-open. No trades.";
-            case EARLY     -> "Early (9:15-10:15). ORB active. Threshold=58. Early boost if RVOL>1.2.";
-            case CONFIRMED -> "Confirmed (10:15+). IB locked. Full strategies active.";
+            case EARLY     -> "Early (9:15-10:15). Threshold=58.";
+            case CONFIRMED -> "Confirmed (10:15+). IB locked.";
             case CLOSED    -> "Market closed.";
         };
     }
-
-    // ── Helpers ───────────────────────────────────────────────────────────
 
     private double pct(BigDecimal pnl, BigDecimal cap) {
         if (cap == null || cap.compareTo(BigDecimal.ZERO) == 0) return 0;

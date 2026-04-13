@@ -1,12 +1,9 @@
 package com.trading.marketdata.service;
 
 import com.trading.domain.Candle;
-import com.trading.events.CandleCompleteEvent;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.event.EventListener;
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.stereotype.Service;
+import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.math.MathContext;
@@ -15,72 +12,87 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Observes and stores opening gap data during 9:15-9:40 observation period.
- * Used by Gate 3 (compression) for gap-and-go / gap-filled classification.
+ * GapDataService — tracks opening gap data for each symbol.
+ *
+ * STATUS: Dormant utility component (@Component, not @Service).
+ *   All consumers of gap data (ORBStrategy, SevenGateScannerService etc)
+ *   have been deleted. This class no longer listens to candle events.
+ *
+ *   Changed from @Service to @Component for two reasons:
+ *     1. The @EventListener onCandle() was firing on EVERY 5-minute candle
+ *        for ALL 400+ symbols and accumulating data that nobody ever reads.
+ *        This was wasting CPU and memory on every candle event.
+ *     2. @Component still allows explicit injection if a future strategy
+ *        needs gap data — call setPrevClose() and getGapData() directly.
+ *
+ *   TO RE-ACTIVATE: Change @Component back to @Service and add
+ *   @EventListener + @Async back to onCandle().
+ *
+ * Gap types:
+ *   GAP_AND_GO  — gapped up/down and holding above/below prev close
+ *   GAP_FILLED  — gapped but price returned to prev close level
+ *   NO_GAP      — no significant gap (< 0.5%)
  */
-@Service
+@Component
 @Slf4j
 public class GapDataService {
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
 
     public enum GapType {
-        GAP_AND_GO,   // Gapped up/down and holding
-        GAP_FILLED,   // Gapped but filled back to prev close
-        NO_GAP        // No significant gap
+        GAP_AND_GO,
+        GAP_FILLED,
+        NO_GAP
     }
 
     public record GapData(
             String     symbol,
             BigDecimal prevClose,
             BigDecimal openPrice,
-            BigDecimal gapPct,       // positive = gap up, negative = gap down
+            BigDecimal gapPct,
             GapType    type,
             boolean    gapUp,
             boolean    gapDown
     ) {}
 
-    // symbol → gap data
     private final Map<String, GapData>    gapDataMap   = new ConcurrentHashMap<>();
-    // symbol → prev day close (updated at EOD)
     private final Map<String, BigDecimal> prevCloseMap = new ConcurrentHashMap<>();
 
-    @EventListener
-    @Async("tradingExecutor")
-    public void onCandle(CandleCompleteEvent event) {
-        Candle c = event.getCandle();
+    /**
+     * Manually set the previous close for a symbol.
+     * Call this from a strategy or scanner before market open if gap data is needed.
+     */
+    public void setPrevClose(String symbol, BigDecimal prevClose) {
+        prevCloseMap.put(symbol.toUpperCase(), prevClose);
+    }
 
-        // Only process 5-minute candles
+    /**
+     * Manually register a candle for gap calculation.
+     * Call this from a strategy that needs gap data.
+     */
+    public void processCandle(Candle c) {
         if (!"5minute".equals(c.getTimeframe())) return;
 
         ZonedDateTime candleTime = c.getCandleTime().atZone(IST);
         LocalTime     lt         = candleTime.toLocalTime();
 
-        // Store first candle of day for gap calculation (9:15 candle)
         if (lt.equals(LocalTime.of(9, 15))) {
             String     sym       = c.getTradingSymbol();
             BigDecimal prevClose = prevCloseMap.get(sym);
             if (prevClose == null || prevClose.compareTo(BigDecimal.ZERO) == 0) {
-                prevClose = c.getOpen(); // fallback
+                prevClose = c.getOpen();
             }
             calculateGap(sym, prevClose, c.getOpen(), c.getClose());
         }
 
-        // Update gap type throughout the day
-        // If price comes back to prevClose, gap is "filled"
         GapData existing = gapDataMap.get(c.getTradingSymbol());
         if (existing != null && existing.type() != GapType.NO_GAP) {
             updateGapStatus(c);
         }
 
-        // Store previous close from last candle of day (14:55 candle)
         if (lt.isAfter(LocalTime.of(15, 20))) {
             prevCloseMap.put(c.getTradingSymbol(), c.getClose());
         }
-    }
-
-    public void setPrevClose(String symbol, BigDecimal prevClose) {
-        prevCloseMap.put(symbol.toUpperCase(), prevClose);
     }
 
     public GapData getGapData(String symbol) {
@@ -92,20 +104,20 @@ public class GapDataService {
         return data != null ? data.type() : GapType.NO_GAP;
     }
 
-    private void calculateGap(String sym, BigDecimal prevClose, BigDecimal open, BigDecimal close) {
+    private void calculateGap(String sym, BigDecimal prevClose,
+                              BigDecimal open, BigDecimal close) {
         if (prevClose.compareTo(BigDecimal.ZERO) == 0) return;
 
         BigDecimal gapPct = open.subtract(prevClose)
                 .divide(prevClose, MathContext.DECIMAL32)
                 .multiply(BigDecimal.valueOf(100));
 
-        double gap = gapPct.doubleValue();
+        double  gap     = gapPct.doubleValue();
         boolean gapUp   = gap > 0.5;
         boolean gapDown = gap < -0.5;
 
         GapType type = GapType.NO_GAP;
         if (gapUp || gapDown) {
-            // Check if gap is holding
             boolean holding = gapUp
                     ? close.compareTo(prevClose) > 0
                     : close.compareTo(prevClose) < 0;
@@ -120,7 +132,6 @@ public class GapDataService {
         GapData data = gapDataMap.get(c.getTradingSymbol().toUpperCase());
         if (data == null) return;
 
-        // Check if gap has been filled
         if (data.gapUp() && c.getLow().compareTo(data.prevClose()) <= 0) {
             gapDataMap.put(data.symbol().toUpperCase(), new GapData(
                     data.symbol(), data.prevClose(), data.openPrice(),

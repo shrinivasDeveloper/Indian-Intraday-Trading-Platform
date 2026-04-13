@@ -9,7 +9,6 @@ import com.trading.events.TradeExecutionResultEvent;
 import com.trading.execution.client.ZerodhaOrderClient;
 import com.trading.marketdata.service.MarketTimingService;
 import com.trading.regime.service.MarketDirectionService;
-import com.trading.scanner.service.SevenGateScannerService;
 import com.trading.sector.service.SectorClassificationService;
 import com.trading.sector.service.SectorStrengthService;
 import lombok.RequiredArgsConstructor;
@@ -30,7 +29,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Full trade management after entry — fully dynamic via application.yml.
  *
  * ALL scenarios handled:
- *   1. SL hit → close trade + cooldown
+ *   1. SL hit → close trade
  *   2. Target hit → close trade
  *   3. Breakeven at breakevenR (default 1R)
  *   4. Trailing SL at trailStartR (default 3R)
@@ -44,6 +43,10 @@ import java.util.concurrent.ConcurrentHashMap;
  *   7. Sector turns → exit immediately
  *   8. Momentum candle → skip trailing
  *   9. Force close at 15:00 IST
+ *
+ * NOTE: SevenGateScannerService has been removed from the project.
+ *       The scanner.startCooldown() calls have been removed entirely.
+ *       Cooldown logic can be re-implemented in the new strategy engine.
  */
 @Service
 @Slf4j
@@ -55,12 +58,11 @@ public class TradeManagementService {
     private final MarketDirectionService      marketDirection;
     private final SectorStrengthService       sectorStrength;
     private final SectorClassificationService sectorClassify;
-    private final SevenGateScannerService     scanner;
     private final MarketTimingService         timing;
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // ALL configurable via application.yml
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     /** R at which SL moves to breakeven. Default: 1.0 */
     @Value("${trading.breakeven-r:1.0}")
@@ -102,16 +104,16 @@ public class TradeManagementService {
     @Value("${trading.exit-on-sector-turn:true}")
     private boolean exitOnSectorTurn;
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // State
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     private final Map<String, ManagedTrade> activeTrades = new ConcurrentHashMap<>();
     private final Map<String, BigDecimal>   lastPrices   = new ConcurrentHashMap<>();
 
-    // ══════════════════════════════════════════════════════════════════════
-    // ManagedTrade — ALL original fields preserved + trailActive added
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
+    // ManagedTrade record
+    // ══════════════════════════════════════════════════════════════════════════
 
     public record ManagedTrade(
             Trade          trade,
@@ -127,9 +129,9 @@ public class TradeManagementService {
             boolean        strongTrend
     ) {}
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // Register — called by TradeExecutionService after entry
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     public void register(Trade trade, double atr,
                          MarketTimingService.TimeWindow entryWindow,
@@ -152,12 +154,12 @@ public class TradeManagementService {
                 String.format("%.2f", atr), entryWindow, strongTrend);
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // SCENARIO 1,2,3,5: Tick-level monitoring
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
-    @Async("tickExecutor")             // ← FIXED: was tradingExecutor; tickExecutor for latency-critical SL monitoring
+    @Async("tickExecutor")
     public void onTick(TickReceivedEvent tick) {
         String sym = tick.getTradingSymbol();
         lastPrices.put(sym, tick.getLastTradedPrice());
@@ -175,7 +177,6 @@ public class TradeManagementService {
         if (long_ ? ltp.compareTo(t.getStopLoss()) <= 0
                 : ltp.compareTo(t.getStopLoss()) >= 0) {
             closeTrade(sym, t.getStopLoss(), "STOPLOSS_HIT");
-            scanner.startCooldown(sym);
             return;
         }
 
@@ -205,10 +206,10 @@ public class TradeManagementService {
         handlePartialExit(sym, mt, ltp, rMultiple);
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // SCENARIO 4: Trailing SL on 5min candle
     // Activates ONLY at trailStartR (default 3R)
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
     @Async("tradingExecutor")
@@ -265,8 +266,8 @@ public class TradeManagementService {
         // Phase A: trailStartR to trailTightenR → normal ATR trail
         // Phase B: beyond trailTightenR → tight ATR trail
         double atrMultiplier = rMultiple >= trailTightenR
-                ? trailTightAtrMultiplier   // default 0.5 ATR
-                : trailAtrMultiplier;        // default 1.0 ATR
+                ? trailTightAtrMultiplier
+                : trailAtrMultiplier;
 
         double trailDist = mt.atr() * atrMultiplier;
 
@@ -293,9 +294,9 @@ public class TradeManagementService {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // SCENARIO 5: Partial exit
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     private void handlePartialExit(String sym, ManagedTrade mt,
                                    BigDecimal ltp, double rMultiple) {
@@ -340,9 +341,9 @@ public class TradeManagementService {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // Move SL to breakeven
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     private void moveSlToBreakeven(String sym, ManagedTrade mt) {
         Trade t = mt.trade();
@@ -366,9 +367,9 @@ public class TradeManagementService {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // SCENARIO 6 + 7: Market/sector alignment (every 15min candle)
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
     @Async("tradingExecutor")
@@ -413,9 +414,9 @@ public class TradeManagementService {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // SCENARIO 9: Force close at 15:00 IST
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     @Scheduled(cron = "0 0 15 * * MON-FRI", zone = "Asia/Kolkata")
     public void forceCloseAll() {
@@ -428,9 +429,9 @@ public class TradeManagementService {
         });
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // Close trade
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     private void closeTrade(String sym, BigDecimal exitPrice, String reason) {
         ManagedTrade mt = activeTrades.remove(sym);
@@ -461,9 +462,9 @@ public class TradeManagementService {
                 t.getEntryPrice(), exitPrice, pnl, reason));
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // Dashboard getters
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     public Collection<ManagedTrade> getActiveTrades() {
         return Collections.unmodifiableCollection(activeTrades.values());
@@ -473,9 +474,9 @@ public class TradeManagementService {
         return Collections.unmodifiableMap(lastPrices);
     }
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
     // Helpers
-    // ══════════════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
 
     private boolean isMomentumCandle(Candle c) {
         return c.bodyPct().compareTo(new BigDecimal("0.80")) >= 0;

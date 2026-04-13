@@ -75,48 +75,17 @@ trading:
   exit-on-sector-turn: true
 
   # ── 10-2-3 Slot Manager ──────────────────────────────────────────────
-  max-trades-per-strategy: 2
   max-phase1-concurrent: 3
-  max-sector-trades: 2
-
-  # ── FLAW 3 FIX: Stale Signal Guard ───────────────────────────────────
-  # Signals older than this many seconds are rejected at Gate-0.
-  # 30s = realistic queue delay budget for the @Async trading executor.
-  # Increase to 60s if signals are legitimately slower (e.g. heavy load days).
-  max-signal-age-seconds: 30
 
 # ================================
 # PAPER TRADING
 # ================================
 paper-trading:
   initial-capital: ${PAPER_CAPITAL:${TRADING_CAPITAL:100000}}
-  entry-slip-pct: 0.0005        # Legacy flat slip — overridden by impact cost below
   sl-slip-pct: 0.001
   target-slip-pct: 0.0005
   eod-slip-pct: 0.0015
   brokerage: 40.0
-
-  # ── FLAW 2 FIX: Dynamic Impact Cost (replaces flat entry-slip-pct) ───
-  # Formula: slipPct = base + (atr-weight × atr%) + (vol-weight × (avgVol/curVol - 1))
-  # Clamped to [min-slip, max-slip]
-  #
-  # Calibration guide:
-  #   base:       3 bps  (minimum for any market order, even Nifty50 liquid stocks)
-  #   atr-weight: 0.15   (15% of ATR% = intraday range contribution to impact)
-  #   vol-weight: 0.001  (0.1% per unit of volume scarcity beyond normal)
-  #   min-slip:   0.0003 (3 bps  — Nifty50 + high ADV, normal session)
-  #   max-slip:   0.005  (50 bps — illiquid mid-cap, thin book, high-ATR session)
-  #
-  # Example results:
-  #   RELIANCE (ATR%=0.8%, vol=2×avg):   0.03% + 0.12% + 0    = 0.15%
-  #   Mid-cap  (ATR%=2.5%, vol=0.3×avg): 0.03% + 0.375%+ 0.07%= 0.475%
-  #   Illiquid (ATR%=4.0%, vol=0.1×avg): 0.03% + 0.6%  + 0.09%= 0.72% → capped 0.5%
-  impact-cost:
-    base: 0.0003
-    atr-weight: 0.15
-    vol-weight: 0.001
-    min-slip: 0.0003
-    max-slip: 0.005
 
 # ================================
 # RISK CONTROL
@@ -125,27 +94,14 @@ circuit-breaker:
   # 10-2-3 Slot Manager: max 10 trades per day
   max-trades-per-day: 10
 
-  # FLAW hard-kill at -2.5% (REQ 2a) — triggers immediate CLOSE_ALL
   daily-loss-cap-pct: -3.5
   weekly-drawdown-cap-pct: -8.0
   monthly-drawdown-cap-pct: -15.0
 
-  # ── FLAW 5 FIX: Dynamic Trailing Profit Floor ─────────────────────────
-  # Activates profit lock when daily P&L reaches +6%.
+  # ── Dynamic Trailing Profit Floor ─────────────────────────────────────
   profit-lock-trigger-pct: 6.0
-
-  # Static minimum floor — trailing floor never drops below this.
-  # Even on the most volatile day, +4% is the guaranteed minimum.
   profit-floor-pct: 4.0
-
-  # Give-back multiplier: dynamicGiveBack = dailyVol × giveback-multiplier
-  # dailyVol = VIX / sqrt(252) / 100 × 100  (VIX as %, converted to daily %)
-  # VIX=15 → dailyVol≈0.94% → giveBack=max(0.5, 0.94×2)=1.88%
-  # VIX=25 → dailyVol≈1.57% → giveBack=max(0.5, 1.57×2)=3.14%
   giveback-multiplier: 2.0
-
-  # Minimum give-back regardless of VIX — prevents unrealistically tight floor
-  # on ultra-calm days (VIX < 8). 0.5% = 50 bps minimum trailing window.
   min-giveback-pct: 0.5
 
 # ================================
@@ -177,10 +133,11 @@ sector:
   min-relative-strength: 0.8
 
 # ================================
-# STRATEGY
+# STRATEGY — Global/Rvol (used by PaperTradeManagementService)
 # ================================
 strategy:
   enabled: true
+
   global:
     gravity-exhaustion-pct: 1.5
     poc-proximity-pct: 1.0
@@ -192,66 +149,55 @@ strategy:
     partial-exit-r: 3.0
     trailing-mode: CANDLE_LOW
     global-time-stop: 30m
-  auto-mode:
-    sector-move-min-pct: 0.5
-    reversal-gain-min-pct: 2.8
-    range-sector-max-pct: 0.3
-    wick-ratio-min: 0.6
-    range-breakout-volume: 2.0
-    trend-rr: 2.5
-    reversal-rr: 2.0
-    range-rr: 1.5
     trend-trail-trigger-r: 2.0
-    reversal-time-stop: 45m
-  range-breakout:
-    min-touches: 2
-    touch-tolerance-pct: 0.2
-    volume-breakout-multiplier: 1.5
-    body-ratio-min: 0.5
-    consolidation-candles: 16
-    max-range-pct: 4.0
-    rr: 2.0
-    entry-start: "09:45"
-    entry-end: "12:00"
-    spring-enabled: true
-    spring-max-depth-pct: 0.6
-    spring-recovery-candles: 2
-    spring-score: 95.0
-    normal-breakout-score: 80.0
-    poc-sl-buffer: 0.0005
-    trail-trigger-r: 1.5
-    time-stop: 30m
-    min-rvol-breakout: 1.4
-    min-rvol-spring: 1.2
-    vah-proximity-pct: 0.5
-  orb:
-    nifty-min-change-pct: 0.2
-    sector-min-change-pct: 0.3
-    volume-min-multiplier: 1.2
-    retest-tolerance-pct: 0.5
-    body-ratio-min: 0.50
-    wick-ratio-max: 0.40
-    rr: 2.0
-    entry-start: "09:30"
-    entry-end: "13:00"
-    orb-candles: 3
-  pullback:
-    impulse-min-pct: 1.5
-    min-rvol-impulse: 1.5
-    min-rsi-impulse: 65.0
-    pullback-vol-ratio: 0.7
-    rr: 3.0
-    poc-sl-buffer: 0.0005
-    entry-start: "09:45"
-    entry-end: "14:00"
-    state-ttl-minutes: 45
-    time-stop: 30m
+
   rvol:
     history-days: 5
     slot-minutes: 5
     min-rvol-for-impulse: 1.5
     min-rvol-for-signal: 1.3
     min-rvol-for-spring: 1.2
+
+  # ════════════════════════════════════════════════════════════════════════
+  # SMART CHANNEL PULLBACK STRATEGY v2
+  # Implements SmartChannelPullbackStrategy_v2 spec:
+  #   15M market trend + 5M channel structure + pullback entry
+  # ════════════════════════════════════════════════════════════════════════
+  smart-channel-pullback:
+    # Master switch — set to false to disable without removing code
+    enabled: ${SCPS_ENABLED:true}
+
+    # Require HIGH_QUALITY channel (≥3 touches) before firing
+    # Set true for more conservative operation
+    require-high-quality-channel: false
+
+    # Time stop: exit trade if no 0.5R profit within 60 minutes
+    # 0 = use global time stop from strategy.global.global-time-stop
+    time-stop-minutes: 60
+
+    # Minimum RVOL — signals still fire below this but score lower
+    min-rvol: 1.0
+
+    # Max signals per session (09:40–14:40)
+    max-signals-per-session: 3
+
+    # Sector filters
+    sector-buy-threshold: 0.3    # sector must be ≥ +0.3% for BUY
+    sector-sell-threshold: -0.3  # sector must be ≤ -0.3% for SELL
+
+    # Slippage-adjusted RR pre-flight check (Gate 7.5)
+    # Accounts for 0.05% entry + 0.05% exit slippage
+    min-adjusted-rr: 1.8
+
+    # Cooldown per symbol between signals (minutes)
+    symbol-cooldown-minutes: 60
+
+    # Skip channels wider than this %
+    max-channel-width-pct: 5.0
+
+    # Target multipliers
+    t1-rr: 2.0
+    t2-rr: 3.0
 
 # ================================
 # NOTIFICATIONS
@@ -288,12 +234,10 @@ app:
 
 logging:
   level:
-    root: INFO                  # base level
-
-    com.trading: TRACE          # 🔥 FULL logs (your core system)
-    com.zerodhatech: DEBUG      # API + WebSocket
-
-    org.springframework: WARN   # reduce noise
+    root: INFO
+    com.trading: TRACE
+    com.zerodhatech: DEBUG
+    org.springframework: WARN
     org.hibernate: WARN
     com.zaxxer.hikari: WARN
 
