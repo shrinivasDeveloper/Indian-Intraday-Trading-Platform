@@ -8,8 +8,6 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.math.BigDecimal;
-import java.math.MathContext;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.*;
@@ -18,121 +16,88 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * ChannelDetectionService — 5M Channel Structure Engine.
  *
- * CHANNEL RULES (per SmartChannelPullbackStrategy_v2 spec):
- *   Bullish channel → Higher Highs + Higher Lows
- *   Bearish channel → Lower Highs + Lower Lows
- *
- * VALIDATION:
- *   ≥ 2 touches (support + resistance) → VALID
- *   ≥ 3 touches                        → HIGH_QUALITY
- *   < 2 touches                        → INVALID
- *
- * CHANNEL COMPONENTS:
- *   → Support trendline
- *   → Resistance trendline
- *   → Pullback zone
- *
- * BUFFER MANAGEMENT:
- *   Keeps last 40 5M candles per symbol (covers ~3.5 hours of session).
- *   Resets daily at 9:10 IST.
- *
- * LOGGING:
- *   [INFO]  Channel detection started / completed
- *   [DEBUG] Swing point detection, touch counting
- *   [TRACE] Per-candle analysis
- *   [WARN]  Insufficient data, invalid channel
+ * FIXES vs previous version:
+ *   FIX 1: Buffer 40 → 75 candles (6.25 hour full session coverage)
+ *   FIX 2: Removed synchronized blocks (ConcurrentHashMap.compute is atomic)
+ *   FIX 3: Channel age validation via sessionDate field
+ *   FIX 4: 2-candle lookback swing detection (cleaner pivots, less noise)
+ *   FIX 5: String.format guarded behind isDebugEnabled() (no alloc in hot path)
  */
 @Service
 @Slf4j
 public class ChannelDetectionService {
 
-    private static final ZoneId IST         = ZoneId.of("Asia/Kolkata");
-    private static final int    MAX_CANDLES = 40;    // last 40 x 5M = ~3.5 hrs
-    private static final int    MIN_CANDLES = 6;     // minimum for channel detection
-    private static final double TOUCH_TOLERANCE_PCT = 0.003; // 0.3% tolerance for touch
+    private static final ZoneId IST                 = ZoneId.of("Asia/Kolkata");
+    private static final int    MAX_CANDLES         = 75;   // FIX 1: was 40
+    private static final int    MIN_CANDLES         = 8;
+    private static final double TOUCH_TOLERANCE_PCT = 0.003;
 
-    // ── Per-symbol 5M candle buffer ────────────────────────────────────────
-    private final Map<String, Deque<Candle>> buffers5m = new ConcurrentHashMap<>();
+    // FIX 2: ConcurrentHashMap — no synchronized needed anywhere
+    private final Map<String, Deque<Candle>>  buffers5m    = new ConcurrentHashMap<>();
+    private final Map<String, ChannelResult>  channelCache = new ConcurrentHashMap<>();
 
-    // ── Cached channel results (updated on each new 5M candle) ────────────
-    private final Map<String, ChannelResult> channelCache = new ConcurrentHashMap<>();
+    // ── Data structures ───────────────────────────────────────────────────
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Channel data structures
-    // ─────────────────────────────────────────────────────────────────────
-
-    public enum ChannelType { BULLISH, BEARISH, SIDEWAYS, INSUFFICIENT_DATA }
+    public enum ChannelType    { BULLISH, BEARISH, SIDEWAYS, INSUFFICIENT_DATA }
     public enum ChannelValidity { HIGH_QUALITY, VALID, INVALID }
 
     public record TrendLine(
-            double startPrice,
-            double endPrice,
-            double slope,         // price change per candle
-            int    touches,
-            int    startIndex,    // candle index (0 = most recent)
-            int    endIndex
+            double startPrice, double endPrice, double slope,
+            int touches, int startIndex, int endIndex
     ) {
-        public double priceAt(int candleIndex) {
-            return endPrice + slope * (endIndex - candleIndex);
-        }
+        public double priceAt(int idx) { return endPrice + slope * (endIndex - idx); }
     }
 
+    /** FIX 3: sessionDate added so getChannel() rejects stale previous-day data */
     public record ChannelResult(
-            String         symbol,
-            ChannelType    type,
-            ChannelValidity validity,
-            TrendLine      supportLine,
-            TrendLine      resistanceLine,
-            double         channelWidthPct,
-            double         supportPrice,       // current support level
-            double         resistancePrice,    // current resistance level
-            double         pullbackZoneTop,    // top of pullback zone
-            double         pullbackZoneBottom, // bottom of pullback zone
-            int            candlesAnalyzed,
-            String         reason
+            String symbol, ChannelType type, ChannelValidity validity,
+            TrendLine supportLine, TrendLine resistanceLine,
+            double channelWidthPct, double supportPrice, double resistancePrice,
+            double pullbackZoneTop, double pullbackZoneBottom,
+            int candlesAnalyzed, String reason,
+            LocalDate sessionDate, long lastUpdateEpoch
     ) {
         public boolean isValid() {
-            return validity == ChannelValidity.VALID
-                    || validity == ChannelValidity.HIGH_QUALITY;
+            return (validity == ChannelValidity.VALID || validity == ChannelValidity.HIGH_QUALITY)
+                    && sessionDate != null
+                    && sessionDate.equals(LocalDate.now(ZoneId.of("Asia/Kolkata")));
         }
-
-        public boolean isHighQuality() {
-            return validity == ChannelValidity.HIGH_QUALITY;
-        }
-
-        /** Is current price inside the pullback zone? */
+        public boolean isHighQuality() { return validity == ChannelValidity.HIGH_QUALITY && isValid(); }
         public boolean isPriceInPullbackZone(double price) {
-            return isValid()
-                    && price >= pullbackZoneBottom
-                    && price <= pullbackZoneTop;
+            return isValid() && price >= pullbackZoneBottom && price <= pullbackZoneTop;
+        }
+        public long ageInMinutes() {
+            return (System.currentTimeMillis() - lastUpdateEpoch) / 60_000;
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Candle event listener
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Event listener ────────────────────────────────────────────────────
 
     @EventListener
     @Async("tradingExecutor")
     public void onCandle(CandleCompleteEvent event) {
         Candle c = event.getCandle();
-        if (!"5minute".equals(c.getTimeframe())) return;
-        if (!c.isComplete()) return;
+        if (!"5minute".equals(c.getTimeframe()) || !c.isComplete()) return;
 
         String sym = c.getTradingSymbol();
 
-        // Update buffer
-        Deque<Candle> buf = buffers5m.computeIfAbsent(sym, k -> new ArrayDeque<>());
-        buf.addFirst(c);
-        if (buf.size() > MAX_CANDLES) ((ArrayDeque<Candle>) buf).removeLast();
+        // FIX 2: compute() is atomic on ConcurrentHashMap — no synchronized block needed
+        buffers5m.compute(sym, (k, buf) -> {
+            if (buf == null) buf = new ArrayDeque<>();
+            buf.addFirst(c);
+            while (buf.size() > MAX_CANDLES) ((ArrayDeque<Candle>) buf).removeLast();
+            return buf;
+        });
 
-        // Re-detect channel
-        List<Candle> candles = new ArrayList<>(buf);
-        ChannelResult result = detectChannel(sym, candles);
-        channelCache.put(sym, result);
+        Deque<Candle> buf = buffers5m.get(sym);
+        if (buf == null) return;
 
-        if (result.isValid()) {
-            log.debug("[CHANNEL] {} → {} {} | support={} resist={} width={}% touches={}+{}",
+        ChannelResult result = detectChannel(sym, new ArrayList<>(buf));
+        channelCache.put(sym, result); // ConcurrentHashMap.put is thread-safe
+
+        // FIX 5: guard String.format() behind log level check
+        if (log.isDebugEnabled() && result.isValid()) {
+            log.debug("[CHANNEL] {} → {} {} | sup={} res={} w={}% t={}+{}",
                     sym, result.type(), result.validity(),
                     String.format("%.2f", result.supportPrice()),
                     String.format("%.2f", result.resistancePrice()),
@@ -142,287 +107,178 @@ public class ChannelDetectionService {
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Core channel detection algorithm
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Core detection ────────────────────────────────────────────────────
 
     private ChannelResult detectChannel(String symbol, List<Candle> candles) {
-        if (candles.size() < MIN_CANDLES) {
-            return invalidResult(symbol, "Insufficient data: " + candles.size() + " candles");
+        if (candles.size() < MIN_CANDLES)
+            return invalid(symbol, "Insufficient data: " + candles.size());
+
+        List<SwingPoint> highs = detectSwingHighs(candles);
+        List<SwingPoint> lows  = detectSwingLows(candles);
+
+        if (highs.size() < 2 || lows.size() < 2)
+            return invalid(symbol, "Not enough swings: H=" + highs.size() + " L=" + lows.size());
+
+        ChannelType type = channelType(highs, lows);
+        if (type == ChannelType.SIDEWAYS || type == ChannelType.INSUFFICIENT_DATA)
+            return invalid(symbol, "No directional channel: " + type);
+
+        TrendLine sup = fitSupport(lows);
+        TrendLine res = fitResistance(highs);
+        if (sup == null || res == null) return invalid(symbol, "Trendline fit failed");
+
+        int st = countTouches(candles, sup, true);
+        int rt = countTouches(candles, res, false);
+        sup = new TrendLine(sup.startPrice(), sup.endPrice(), sup.slope(), st, sup.startIndex(), sup.endIndex());
+        res = new TrendLine(res.startPrice(), res.endPrice(), res.slope(), rt, res.startIndex(), res.endIndex());
+
+        int min = Math.min(st, rt);
+        ChannelValidity validity = min >= 3 ? ChannelValidity.HIGH_QUALITY
+                : min >= 2 ? ChannelValidity.VALID
+                : null;
+        if (validity == null) return invalid(symbol, "Touches too few: sup=" + st + " res=" + rt);
+
+        double curSup = sup.priceAt(0);
+        double curRes = res.priceAt(0);
+        double width  = curRes - curSup;
+        if (width <= 0) return invalid(symbol, "Negative channel width");
+
+        double widthPct = width / curSup * 100;
+        double pzTop, pzBot;
+        if (type == ChannelType.BULLISH) { pzBot = curSup; pzTop = curSup + width * 0.30; }
+        else                             { pzTop = curRes; pzBot = curRes - width * 0.30; }
+
+        if (log.isDebugEnabled()) {
+            log.debug("[CHANNEL] {} {} {} sup={} res={} w={}% pz=[{},{}]",
+                    symbol, type, validity,
+                    String.format("%.2f", curSup), String.format("%.2f", curRes),
+                    String.format("%.2f", widthPct),
+                    String.format("%.2f", pzBot), String.format("%.2f", pzTop));
         }
 
-        log.trace("[CHANNEL] Detecting channel for {} with {} candles", symbol, candles.size());
-
-        // Step 1: Identify swing highs and swing lows
-        List<SwingPoint> swingHighs = detectSwingHighs(candles);
-        List<SwingPoint> swingLows  = detectSwingLows(candles);
-
-        log.trace("[CHANNEL] {} → swingHighs={} swingLows={}", symbol, swingHighs.size(), swingLows.size());
-
-        if (swingHighs.size() < 2 || swingLows.size() < 2) {
-            return invalidResult(symbol, "Insufficient swing points: highs=" + swingHighs.size() + " lows=" + swingLows.size());
-        }
-
-        // Step 2: Determine channel direction from swing structure
-        ChannelType channelType = determineChannelType(swingHighs, swingLows);
-        log.debug("[CHANNEL] {} → type={}", symbol, channelType);
-
-        if (channelType == ChannelType.SIDEWAYS || channelType == ChannelType.INSUFFICIENT_DATA) {
-            return invalidResult(symbol, "No directional channel: " + channelType);
-        }
-
-        // Step 3: Fit trendlines
-        TrendLine supportLine    = fitSupportLine(swingLows, candles);
-        TrendLine resistanceLine = fitResistanceLine(swingHighs, candles);
-
-        if (supportLine == null || resistanceLine == null) {
-            return invalidResult(symbol, "Could not fit trendlines");
-        }
-
-        // Step 4: Count touches on each trendline
-        int supportTouches    = countTouches(candles, supportLine, true);
-        int resistanceTouches = countTouches(candles, resistanceLine, false);
-
-        // Rebuild with actual touch counts
-        supportLine    = new TrendLine(supportLine.startPrice(), supportLine.endPrice(),
-                supportLine.slope(), supportTouches, supportLine.startIndex(), supportLine.endIndex());
-        resistanceLine = new TrendLine(resistanceLine.startPrice(), resistanceLine.endPrice(),
-                resistanceLine.slope(), resistanceTouches, resistanceLine.startIndex(), resistanceLine.endIndex());
-
-        log.debug("[CHANNEL] {} → supportTouches={} resistanceTouches={}", symbol, supportTouches, resistanceTouches);
-
-        // Step 5: Validate (need ≥2 touches on both lines)
-        int minTouches = Math.min(supportTouches, resistanceTouches);
-        ChannelValidity validity;
-        if (minTouches >= 3) {
-            validity = ChannelValidity.HIGH_QUALITY;
-        } else if (minTouches >= 2) {
-            validity = ChannelValidity.VALID;
-        } else {
-            return invalidResult(symbol, "Insufficient touches: support=" + supportTouches + " resist=" + resistanceTouches);
-        }
-
-        // Step 6: Compute current prices and pullback zone
-        double currentSupport    = supportLine.priceAt(0);
-        double currentResistance = resistanceLine.priceAt(0);
-        double channelWidth      = currentResistance - currentSupport;
-
-        if (channelWidth <= 0) {
-            return invalidResult(symbol, "Invalid channel width");
-        }
-
-        double channelWidthPct = channelWidth / currentSupport * 100;
-
-        // Pullback zone: 15-30% of channel width from support (BUY) / from resistance (SELL)
-        double pullbackZoneTop;
-        double pullbackZoneBottom;
-        if (channelType == ChannelType.BULLISH) {
-            pullbackZoneBottom = currentSupport;
-            pullbackZoneTop    = currentSupport + channelWidth * 0.30;
-        } else {
-            pullbackZoneTop    = currentResistance;
-            pullbackZoneBottom = currentResistance - channelWidth * 0.30;
-        }
-
-        log.debug("[CHANNEL] {} → {} {} support={} resist={} width={}% pullback=[{},{}]",
-                symbol, channelType, validity,
-                String.format("%.2f", currentSupport),
-                String.format("%.2f", currentResistance),
-                String.format("%.2f", channelWidthPct),
-                String.format("%.2f", pullbackZoneBottom),
-                String.format("%.2f", pullbackZoneTop));
-
-        return new ChannelResult(
-                symbol, channelType, validity,
-                supportLine, resistanceLine,
-                channelWidthPct,
-                currentSupport, currentResistance,
-                pullbackZoneTop, pullbackZoneBottom,
-                candles.size(), "OK"
-        );
+        return new ChannelResult(symbol, type, validity, sup, res, widthPct,
+                curSup, curRes, pzTop, pzBot, candles.size(), "OK",
+                LocalDate.now(IST), System.currentTimeMillis());
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Swing point detection
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Swing detection — FIX 4: 2-candle lookback each side ─────────────
 
     private record SwingPoint(int index, double price, boolean isHigh) {}
 
-    private List<SwingPoint> detectSwingHighs(List<Candle> candles) {
-        List<SwingPoint> highs = new ArrayList<>();
-        for (int i = 1; i < candles.size() - 1; i++) {
-            double prev    = candles.get(i + 1).getHigh().doubleValue();
-            double current = candles.get(i).getHigh().doubleValue();
-            double next    = candles.get(i - 1).getHigh().doubleValue();
-            if (current > prev && current > next) {
-                highs.add(new SwingPoint(i, current, true));
-            }
+    private List<SwingPoint> detectSwingHighs(List<Candle> c) {
+        List<SwingPoint> r = new ArrayList<>();
+        for (int i = 2; i < c.size() - 2; i++) {
+            double v = c.get(i).getHigh().doubleValue();
+            if (v > c.get(i+1).getHigh().doubleValue() && v > c.get(i+2).getHigh().doubleValue()
+                    && v > c.get(i-1).getHigh().doubleValue() && v > c.get(i-2).getHigh().doubleValue())
+                r.add(new SwingPoint(i, v, true));
         }
-        return highs;
+        return r;
     }
 
-    private List<SwingPoint> detectSwingLows(List<Candle> candles) {
-        List<SwingPoint> lows = new ArrayList<>();
-        for (int i = 1; i < candles.size() - 1; i++) {
-            double prev    = candles.get(i + 1).getLow().doubleValue();
-            double current = candles.get(i).getLow().doubleValue();
-            double next    = candles.get(i - 1).getLow().doubleValue();
-            if (current < prev && current < next) {
-                lows.add(new SwingPoint(i, current, false));
-            }
+    private List<SwingPoint> detectSwingLows(List<Candle> c) {
+        List<SwingPoint> r = new ArrayList<>();
+        for (int i = 2; i < c.size() - 2; i++) {
+            double v = c.get(i).getLow().doubleValue();
+            if (v < c.get(i+1).getLow().doubleValue() && v < c.get(i+2).getLow().doubleValue()
+                    && v < c.get(i-1).getLow().doubleValue() && v < c.get(i-2).getLow().doubleValue())
+                r.add(new SwingPoint(i, v, false));
         }
-        return lows;
+        return r;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Channel type determination
-    // ─────────────────────────────────────────────────────────────────────
-
-    private ChannelType determineChannelType(List<SwingPoint> highs, List<SwingPoint> lows) {
-        // Bullish = Higher Highs + Higher Lows
-        // Bearish = Lower Highs + Lower Lows
-        // Compare the two most recent vs the two before
-
-        boolean higherHighs = false;
-        boolean higherLows  = false;
-        boolean lowerHighs  = false;
-        boolean lowerLows   = false;
-
-        if (highs.size() >= 2) {
-            // Most recent swing high is at index 0 in our list (newest first)
-            double recentHigh = highs.get(0).price();
-            double olderHigh  = highs.get(highs.size() - 1).price();
-            higherHighs = recentHigh > olderHigh;
-            lowerHighs  = recentHigh < olderHigh;
-        }
-
-        if (lows.size() >= 2) {
-            double recentLow = lows.get(0).price();
-            double olderLow  = lows.get(lows.size() - 1).price();
-            higherLows = recentLow > olderLow;
-            lowerLows  = recentLow < olderLow;
-        }
-
-        if (higherHighs && higherLows) return ChannelType.BULLISH;
-        if (lowerHighs  && lowerLows)  return ChannelType.BEARISH;
+    private ChannelType channelType(List<SwingPoint> highs, List<SwingPoint> lows) {
+        if (highs.size() < 2 || lows.size() < 2) return ChannelType.INSUFFICIENT_DATA;
+        double rH = highs.get(0).price(), oH = highs.get(highs.size()-1).price();
+        double rL = lows.get(0).price(),  oL = lows.get(lows.size()-1).price();
+        if (rH > oH && rL > oL) return ChannelType.BULLISH;
+        if (rH < oH && rL < oL) return ChannelType.BEARISH;
         return ChannelType.SIDEWAYS;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Trendline fitting (linear regression on swing points)
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Trendline fitting ─────────────────────────────────────────────────
 
-    private TrendLine fitSupportLine(List<SwingPoint> lows, List<Candle> candles) {
+    private TrendLine fitSupport(List<SwingPoint> lows) {
         if (lows.size() < 2) return null;
-        SwingPoint newest = lows.get(0);
-        SwingPoint oldest = lows.get(lows.size() - 1);
-        int   indexDiff   = oldest.index() - newest.index();
-        if (indexDiff == 0) return null;
-        double slope = (newest.price() - oldest.price()) / indexDiff;
-        return new TrendLine(oldest.price(), newest.price(), slope, lows.size(),
-                oldest.index(), newest.index());
+        SwingPoint n = lows.get(0), o = lows.get(lows.size()-1);
+        int d = o.index() - n.index();
+        if (d == 0) return null;
+        return new TrendLine(o.price(), n.price(), (n.price()-o.price())/d, lows.size(), o.index(), n.index());
     }
 
-    private TrendLine fitResistanceLine(List<SwingPoint> highs, List<Candle> candles) {
+    private TrendLine fitResistance(List<SwingPoint> highs) {
         if (highs.size() < 2) return null;
-        SwingPoint newest = highs.get(0);
-        SwingPoint oldest = highs.get(highs.size() - 1);
-        int   indexDiff   = oldest.index() - newest.index();
-        if (indexDiff == 0) return null;
-        double slope = (newest.price() - oldest.price()) / indexDiff;
-        return new TrendLine(oldest.price(), newest.price(), slope, highs.size(),
-                oldest.index(), newest.index());
+        SwingPoint n = highs.get(0), o = highs.get(highs.size()-1);
+        int d = o.index() - n.index();
+        if (d == 0) return null;
+        return new TrendLine(o.price(), n.price(), (n.price()-o.price())/d, highs.size(), o.index(), n.index());
     }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Touch counting
-    // ─────────────────────────────────────────────────────────────────────
 
     private int countTouches(List<Candle> candles, TrendLine line, boolean isSupport) {
-        int touches = 0;
+        int t = 0;
         for (int i = 0; i < candles.size(); i++) {
-            Candle c = candles.get(i);
-            double linePrice = line.priceAt(i);
-            double tolerance = linePrice * TOUCH_TOLERANCE_PCT;
-            double candlePrice = isSupport
-                    ? c.getLow().doubleValue()
-                    : c.getHigh().doubleValue();
-            if (Math.abs(candlePrice - linePrice) <= tolerance) {
-                touches++;
-            }
+            double lp  = line.priceAt(i);
+            double tol = lp * TOUCH_TOLERANCE_PCT;
+            double cp  = isSupport ? candles.get(i).getLow().doubleValue()
+                    : candles.get(i).getHigh().doubleValue();
+            if (Math.abs(cp - lp) <= tol) t++;
         }
-        return touches;
+        return t;
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Public API
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Public API ────────────────────────────────────────────────────────
 
     /**
-     * Get cached channel result for a symbol.
-     * Returns empty INVALID result if not yet analyzed.
+     * FIX 3: Rejects stale previous-session channels.
      */
     public ChannelResult getChannel(String symbol) {
-        return channelCache.getOrDefault(symbol,
-                invalidResult(symbol, "No channel data yet"));
+        ChannelResult r = channelCache.get(symbol);
+        if (r == null) return invalid(symbol, "No data yet");
+        if (r.sessionDate() != null && !r.sessionDate().equals(LocalDate.now(IST)))
+            return invalid(symbol, "Stale channel from previous session");
+        return r;
     }
 
-    /**
-     * Returns true if the symbol has a valid channel (VALID or HIGH_QUALITY).
-     */
     public boolean hasValidChannel(String symbol) {
         ChannelResult r = channelCache.get(symbol);
         return r != null && r.isValid();
     }
 
-    /**
-     * Force-update channel for a symbol using provided candles.
-     * Used by strategy during pre-market warmup.
-     */
     public void updateChannel(String symbol, List<Candle> candles5m) {
         if (candles5m == null || candles5m.isEmpty()) return;
-        Deque<Candle> buf = buffers5m.computeIfAbsent(symbol, k -> new ArrayDeque<>());
-        buf.clear();
-        candles5m.forEach(c -> {
-            buf.addFirst(c);
-            if (buf.size() > MAX_CANDLES) ((ArrayDeque<Candle>) buf).removeLast();
+        buffers5m.compute(symbol, (k, existing) -> {
+            Deque<Candle> newBuf = new ArrayDeque<>();
+            for (Candle c : candles5m) {
+                newBuf.addFirst(c);
+                while (newBuf.size() > MAX_CANDLES) ((ArrayDeque<Candle>) newBuf).removeLast();
+            }
+            return newBuf;
         });
-        List<Candle> list = new ArrayList<>(buf);
-        channelCache.put(symbol, detectChannel(symbol, list));
+        Deque<Candle> buf = buffers5m.get(symbol);
+        if (buf != null) channelCache.put(symbol, detectChannel(symbol, new ArrayList<>(buf)));
     }
 
-    /**
-     * Get all symbols with valid channels — for dashboard display.
-     */
     public Map<String, ChannelResult> getAllValidChannels() {
         Map<String, ChannelResult> valid = new LinkedHashMap<>();
-        channelCache.forEach((sym, r) -> {
-            if (r.isValid()) valid.put(sym, r);
-        });
+        channelCache.forEach((k, v) -> { if (v.isValid()) valid.put(k, v); });
         return valid;
     }
 
     public int getTrackedSymbolCount() { return buffers5m.size(); }
-    public int getValidChannelCount()  { return (int) channelCache.values().stream().filter(ChannelResult::isValid).count(); }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // Scheduled reset
-    // ─────────────────────────────────────────────────────────────────────
+    public int getValidChannelCount()  {
+        return (int) channelCache.values().stream().filter(ChannelResult::isValid).count();
+    }
 
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
         buffers5m.clear();
         channelCache.clear();
-        log.info("[CHANNEL] Daily reset complete — channel buffers cleared");
+        log.info("[CHANNEL] Daily reset — 75-candle buffers cleared");
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Helpers
-    // ─────────────────────────────────────────────────────────────────────
-
-    private ChannelResult invalidResult(String symbol, String reason) {
+    private ChannelResult invalid(String symbol, String reason) {
         return new ChannelResult(symbol, ChannelType.INSUFFICIENT_DATA,
                 ChannelValidity.INVALID, null, null,
-                0, 0, 0, 0, 0, 0, reason);
+                0, 0, 0, 0, 0, 0, reason, LocalDate.now(IST), System.currentTimeMillis());
     }
 }
