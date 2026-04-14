@@ -364,12 +364,12 @@ public class SmartChannelPullbackStrategy {
         // ═════════════════════════════════════════════════════════════════
         // GATE 6: Entry Engine — Rejection Candle Check
         // ═════════════════════════════════════════════════════════════════
-        boolean isRejectionCandle = isRejectionCandle(latestCandle, isBullMarket);
-        if (!isRejectionCandle) {
-            log.trace("[SCPS] {} no rejection candle at {}",
-                    symbol, isBullMarket ? "support" : "resistance");
-            return;
-        }
+//        boolean isRejectionCandle = isRejectionCandle(latestCandle, isBullMarket);
+//        if (!isRejectionCandle) {
+//            log.trace("[SCPS] {} no rejection candle at {}",
+//                    symbol, isBullMarket ? "support" : "resistance");
+//            return;
+//        }
 
         // ═════════════════════════════════════════════════════════════════
         // GATE 7: Overextension Filter
@@ -538,29 +538,29 @@ public class SmartChannelPullbackStrategy {
      * BUY: lower wick >= body, close in upper 40% of candle range.
      * SELL: upper wick >= body, close in lower 40% of candle range.
      */
-    private boolean isRejectionCandle(Candle c, boolean isBullish) {
-        double open  = c.getOpen().doubleValue();
-        double high  = c.getHigh().doubleValue();
-        double low   = c.getLow().doubleValue();
-        double close = c.getClose().doubleValue();
-        double range = high - low;
-        if (range == 0) return false;
-
-        double body     = Math.abs(close - open);
-        double bodyPct  = body / range;
-
-        if (isBullish) {
-            // Bullish rejection: lower wick prominent, close in upper half
-            double lowerWick = Math.min(open, close) - low;
-            double closePos  = (close - low) / range;
-            return lowerWick >= body && closePos >= 0.5 && bodyPct <= 0.6;
-        } else {
-            // Bearish rejection: upper wick prominent, close in lower half
-            double upperWick = high - Math.max(open, close);
-            double closePos  = (close - low) / range;
-            return upperWick >= body && closePos <= 0.5 && bodyPct <= 0.6;
-        }
-    }
+//    private boolean isRejectionCandle(Candle c, boolean isBullish) {
+//        double open  = c.getOpen().doubleValue();
+//        double high  = c.getHigh().doubleValue();
+//        double low   = c.getLow().doubleValue();
+//        double close = c.getClose().doubleValue();
+//        double range = high - low;
+//        if (range == 0) return false;
+//
+//        double body     = Math.abs(close - open);
+//        double bodyPct  = body / range;
+//
+//        if (isBullish) {
+//            // Bullish rejection: lower wick prominent, close in upper half
+//            double lowerWick = Math.min(open, close) - low;
+//            double closePos  = (close - low) / range;
+//            return lowerWick >= body && closePos >= 0.5 && bodyPct <= 0.6;
+//        } else {
+//            // Bearish rejection: upper wick prominent, close in lower half
+//            double upperWick = high - Math.max(open, close);
+//            double closePos  = (close - low) / range;
+//            return upperWick >= body && closePos <= 0.5 && bodyPct <= 0.6;
+//        }
+//    }
 
     private boolean isStrongContinuation(Candle c, boolean isBullish) {
         return isBullish ? c.isBullish() : c.isBearish();
