@@ -77,8 +77,8 @@ public class SmartChannelPullbackStrategy {
     private static final LocalTime ENTRY_END   = LocalTime.of(14, 40);
 
     // ── Sector threshold ──────────────────────────────────────────────────
-    private static final double SECTOR_BUY_THRESHOLD  =  0.3;  // ≥ +0.3%
-    private static final double SECTOR_SELL_THRESHOLD = -0.3;  // ≤ -0.3%
+    private static final double SECTOR_BUY_THRESHOLD  =  0.15;  // ≥ +0.3%
+    private static final double SECTOR_SELL_THRESHOLD = -0.15;  // ≤ -0.3%
 
     // ── Pullback precision thresholds ────────────────────────────────────
     private static final double PULLBACK_BEST_MIN = 0.003;   // 0.3%
@@ -294,6 +294,11 @@ public class SmartChannelPullbackStrategy {
 
         if (!channel.isValid()) {
             log.trace("[SCPS] {} no valid channel: {}", symbol, channel.reason());
+            return;
+        }
+// GATE 4b: No new entries during channel-type switch (v5)
+        if (channel.isTransitioning()) {
+            log.trace("[SCPS] {} channel transitioning — skip", symbol);
             return;
         }
 
