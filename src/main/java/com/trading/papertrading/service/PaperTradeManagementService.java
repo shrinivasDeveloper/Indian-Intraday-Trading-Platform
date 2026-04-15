@@ -475,7 +475,7 @@ public class PaperTradeManagementService {
             }
 
             if (exitOnSectorTurn) {
-                if (!sectorStrength.isSectorAligned(sym, forLong)) {
+                if (!sectorStrength.isSectorAlignedForSymbol(sym, forLong)) {
                     BigDecimal ltp     = lastPrices.getOrDefault(sym, t.getEntryPrice());
                     BigDecimal eodFill = simulateEodFill(ltp, t.getDirection());
                     log.warn("[PAPER] Sector turned against {} — exiting at {}", sym, eodFill);

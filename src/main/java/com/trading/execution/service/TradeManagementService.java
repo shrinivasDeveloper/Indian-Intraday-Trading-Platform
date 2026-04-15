@@ -405,7 +405,7 @@ public class TradeManagementService {
 
             // SCENARIO 7: Sector turned
             if (exitOnSectorTurn) {
-                if (!sectorStrength.isSectorAligned(sym, forLong)) {
+                if (!sectorStrength.isSectorAlignedForSymbol(sym, forLong)) {
                     BigDecimal ltp = lastPrices.getOrDefault(sym, t.getEntryPrice());
                     log.warn("Sector turned against {} — exiting", sym);
                     closeTrade(sym, ltp, "SECTOR_TURNED");
