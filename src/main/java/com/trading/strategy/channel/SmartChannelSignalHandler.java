@@ -3,6 +3,7 @@ package com.trading.strategy.channel;
 import com.trading.events.SmartChannelPullbackSignalEvent;
 import com.trading.events.TradeApprovedEvent;
 import com.trading.events.TradeExecutionResultEvent;
+import com.trading.marketdata.service.MarketPressureDecisionEngine;
 import com.trading.risk.service.CircuitBreakerService;
 import com.trading.risk.service.RiskManagementService;
 import com.trading.sector.service.SectorClassificationService;
@@ -20,160 +21,125 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * SmartChannelSignalHandler — bridges SmartChannelPullbackStrategy signals
+ * SmartChannelSignalHandler — bridges ALL channel + pressure strategy signals
  * to the existing trade execution pipeline.
  *
- * PIPELINE:
- *   SmartChannelPullbackStrategy
- *     → SmartChannelPullbackSignalEvent  (published)
- *     → SmartChannelSignalHandler        (this class — gates check)
- *       ├─ Stale signal guard (>30s → reject)
- *       ├─ Circuit breaker check
- *       ├─ Slot manager check (phase1Count < maxPhase1Concurrent)
- *       └─ TradeApprovedEvent            (published if all gates pass)
- *         → PaperTradeExecutionService   (PAPER mode)
- *         → TradeExecutionService        (LIVE mode)
+ * HANDLES SIGNALS FROM:
+ *   1. SmartChannelPullbackStrategy  (SMART_CHANNEL_PULLBACK_V3)
+ *   2. SidewaysScalpStrategy         (SCALP_PRESSURE_V2)
+ *   3. MarketPressureDecisionEngine  (MARKET_PRESSURE_V1)
  *
- * CLOSE CALLBACK:
- *   Listens for TradeExecutionResultEvent to:
- *     1. Release phase1 slot / notify RiskManagementService
- *     2. Notify SmartChannelPullbackStrategy to release active signal lock
- *
- * LOGGING:
- *   [INFO]  Signal received, approved, rejected
- *   [WARN]  Stale signal, slot limit, CB active
- *   [DEBUG] Gate checks, slot counts
+ * GATES (in order):
+ *   1. Stale signal guard (>30s old → reject)
+ *   2. Duplicate symbol guard (no double-entry for same symbol)
+ *   3. Circuit breaker check
+ *   4. Phase-1 slot limit (maxPhase1Concurrent)
+ *   → TradeApprovedEvent → PaperTradeExecutionService / TradeExecutionService
  */
-@Service
-@Slf4j
-@RequiredArgsConstructor
+@Service @Slf4j @RequiredArgsConstructor
 public class SmartChannelSignalHandler {
 
-    private static final String STRATEGY_NAME = "SMART_CHANNEL_PULLBACK_V2";
-    // Reject signals older than 30 seconds
-    private static final long STALE_THRESHOLD_SEC = 30;
+    private static final long STALE_SEC = 30L;
 
-    private final ApplicationEventPublisher     publisher;
-    private final CircuitBreakerService         circuitBreaker;
-    private final RiskManagementService         riskManagement;
-    private final SectorClassificationService   sectorClassify;
-    private final SmartChannelPullbackStrategy  strategy;
+    private final ApplicationEventPublisher    publisher;
+    private final CircuitBreakerService        circuitBreaker;
+    private final RiskManagementService        riskManagement;
+    private final SectorClassificationService  sectorClassify;
+    private final SmartChannelPullbackStrategy scpsStrategy;
+    private final SidewaysScalpStrategy        scalpStrategy;
+    private final MarketPressureDecisionEngine pressureEngine;
 
-    @Value("${trading.max-phase1-concurrent:3}")
-    private int maxPhase1Concurrent;
+    @Value("${trading.max-phase1-concurrent:3}") private int maxPhase1;
+    @Value("${trading.mode:PAPER}")               private String tradingMode;
+    @Value("${trading.capital:100000}")           private BigDecimal capital;
 
-    @Value("${trading.mode:PAPER}")
-    private String tradingMode;
-
-    @Value("${trading.capital:100000}")
-    private BigDecimal capital;
-
-    // Track open trades from this strategy: symbol → entryTime
     private final Map<String, Instant> openTrades = new ConcurrentHashMap<>();
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Signal reception
-    // ─────────────────────────────────────────────────────────────────────
-
-    @EventListener
-    @Async("tradingExecutor")
+    @EventListener @Async("tradingExecutor")
     public void onSignal(SmartChannelPullbackSignalEvent event) {
+        String symbol   = event.getTradingSymbol();
+        String strategy = event.getStrategyName();
 
-        String symbol = event.getTradingSymbol();
+        log.info("[HANDLER] Signal from {}: {} | dir={} entry={} sl={} T1={} score={}",
+                strategy, symbol, event.getDirection(),
+                event.getEntryPrice(), event.getStopLoss(),
+                event.getTarget1(), event.getTotalScore());
 
-        log.info("[INFO] Signal received: {} | dir={} entry={} sl={} T1={} score={} decision={}",
-                symbol,
-                event.getDirection(),
-                event.getEntryPrice(),
-                event.getStopLoss(),
-                event.getTarget1(),
-                event.getTotalScore(),
-                event.getDecision());
-
-        // ── GATE: Stale signal check ──────────────────────────────────────
+        // Gate 1: stale
         if (event.isStale()) {
-            log.warn("[WARN] Stale signal rejected for {} (>{}s old)", symbol, STALE_THRESHOLD_SEC);
-            strategy.onSignalClosed(symbol);
+            log.warn("[HANDLER] Stale signal rejected: {} from {} (>{}s old)", symbol, strategy, STALE_SEC);
+            releaseStrategyLock(symbol, strategy);
             return;
         }
 
-        // ── GATE: Already have open trade for this symbol ─────────────────
+        // Gate 2: duplicate
         if (openTrades.containsKey(symbol)) {
-            log.debug("[SCPH] {} already has open trade — skipping duplicate signal", symbol);
+            log.debug("[HANDLER] {} already has open trade — skipping duplicate from {}", symbol, strategy);
             return;
         }
 
-        // ── GATE: Circuit breaker ─────────────────────────────────────────
+        // Gate 3: circuit breaker
         CircuitBreakerService.Permission cb = circuitBreaker.checkPermission(capital);
         if (!cb.isAllowed()) {
-            log.warn("[WARN] Circuit breaker blocked signal for {}: {}", symbol, cb.reason());
-            strategy.onSignalClosed(symbol);
+            log.warn("[HANDLER] CB blocked {} from {}: {}", symbol, strategy, cb.reason());
+            releaseStrategyLock(symbol, strategy);
             return;
         }
 
-        // ── GATE: Phase-1 slot limit ──────────────────────────────────────
-        int currentPhase1 = riskManagement.getPhase1Count();
-        if (currentPhase1 >= maxPhase1Concurrent) {
-            log.warn("[WARN] Phase-1 slot limit reached ({}/{}): {} blocked",
-                    currentPhase1, maxPhase1Concurrent, symbol);
-            strategy.onSignalClosed(symbol);
+        // Gate 4: phase-1 slot limit
+        int phase1 = riskManagement.getPhase1Count();
+        if (phase1 >= maxPhase1) {
+            log.warn("[HANDLER] Phase-1 limit reached ({}/{}): {} from {} blocked", phase1, maxPhase1, symbol, strategy);
+            releaseStrategyLock(symbol, strategy);
             return;
         }
 
-        // ── All gates passed → publish TradeApprovedEvent ─────────────────
-        log.info("[INFO] All gates passed for {} — publishing TradeApprovedEvent", symbol);
-
-        // Record the trade entry in circuit breaker
+        // All gates passed
+        log.info("[HANDLER] ✅ All gates passed for {} from {} — publishing TradeApprovedEvent", symbol, strategy);
         circuitBreaker.recordTradeEntered();
 
-        TradeApprovedEvent approved = new TradeApprovedEvent(
-                this,
-                symbol,
-                event.getInstrumentToken(),
-                event.getDirection(),
-                event.getEntryPrice(),
-                event.getStopLoss(),
-                event.getTarget1(),    // Primary target (T1)
-                event.getQuantity(),
-                event.getRiskAmount(),
+        publisher.publishEvent(new TradeApprovedEvent(
+                this, symbol, event.getInstrumentToken(), event.getDirection(),
+                event.getEntryPrice(), event.getStopLoss(), event.getTarget1(),
+                event.getQuantity(), event.getRiskAmount(),
                 BigDecimal.valueOf(event.getProbabilityScore()),
-                STRATEGY_NAME,
-                event.getTimeStopMinutes()
-        );
+                strategy, event.getTimeStopMinutes()));
 
         openTrades.put(symbol, event.getSignalTimestamp());
-        publisher.publishEvent(approved);
-
-        log.info("[INFO] TradeApprovedEvent published: {} | qty={} | risk=₹{} | RR=2:1/3:1",
-                symbol, event.getQuantity(), event.getRiskAmount());
+        log.info("[HANDLER] TradeApprovedEvent published: {} | strategy={} | qty={} | risk=₹{}",
+                symbol, strategy, event.getQuantity(), event.getRiskAmount());
     }
 
-    // ─────────────────────────────────────────────────────────────────────
-    // Trade close callback — release locks
-    // ─────────────────────────────────────────────────────────────────────
-
-    @EventListener
-    @Async("tradingExecutor")
+    @EventListener @Async("tradingExecutor")
     public void onTradeResult(TradeExecutionResultEvent event) {
         String symbol = event.getTradingSymbol();
-
-        if (!openTrades.containsKey(symbol)) return;
-        if (!"CLOSED".equals(event.getStatus())) return;
+        if (!openTrades.containsKey(symbol) || !"CLOSED".equals(event.getStatus())) return;
 
         openTrades.remove(symbol);
 
-        // Release active signal lock in strategy
-        strategy.onSignalClosed(symbol);
+        // Release all strategy locks (each guards its own active set)
+        scpsStrategy.onSignalClosed(symbol);
+        scalpStrategy.onSignalClosed(symbol);
+        pressureEngine.onSignalClosed(symbol);
 
-        String exitReason = event.getExitReason() != null ? event.getExitReason() : "UNKNOWN";
-        BigDecimal pnl    = event.getNetPnl() != null ? event.getNetPnl() : BigDecimal.ZERO;
+        BigDecimal pnl = event.getNetPnl() != null ? event.getNetPnl() : BigDecimal.ZERO;
+        String reason  = event.getExitReason() != null ? event.getExitReason() : "UNKNOWN";
 
-        log.info("[INFO] Exit executed: {} | reason={} | P&L=₹{:.2f}",
-                symbol, exitReason, pnl.doubleValue());
+        log.info("[HANDLER] Trade closed: {} | reason={} | P&L=₹{}", symbol, reason,
+                String.format("%.2f", pnl.doubleValue()));
 
-        // Log weak momentum warning if time-stopped
-        if (exitReason.contains("TIME_STOP") || exitReason.contains("GLOBAL")) {
-            log.warn("[WARN] Weak momentum → EXIT: {} closed by time stop", symbol);
+        if (reason.contains("TIME_STOP") || reason.contains("GLOBAL")) {
+            log.warn("[HANDLER] Weak momentum → EXIT: {} closed by time stop", symbol);
+        }
+    }
+
+    private void releaseStrategyLock(String symbol, String strategy) {
+        if (strategy != null && strategy.startsWith("SCALP")) {
+            scalpStrategy.onSignalClosed(symbol);
+        } else if (strategy != null && strategy.startsWith("MARKET_PRESSURE")) {
+            pressureEngine.onSignalClosed(symbol);
+        } else {
+            scpsStrategy.onSignalClosed(symbol);
         }
     }
 

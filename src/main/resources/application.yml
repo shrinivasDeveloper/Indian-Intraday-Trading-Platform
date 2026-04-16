@@ -1,6 +1,7 @@
 spring:
   application:
     name: trading-platform
+
   datasource:
     url: ${DB_URL}
     username: ${DB_USERNAME}
@@ -10,23 +11,28 @@ spring:
       maximum-pool-size: 20
       minimum-idle: 5
       connection-timeout: 30000
+
   jpa:
     open-in-view: false
     hibernate:
       ddl-auto: none
     show-sql: false
+
   flyway:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
+
   data:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
       password: ${REDIS_PASSWORD:}
       timeout: 2000ms
+
   session:
     timeout: 28800
+
   task:
     execution:
       pool:
@@ -73,8 +79,6 @@ trading:
   skip-trail-on-momentum: true
   exit-on-market-turn: true
   exit-on-sector-turn: true
-
-  # ── 10-2-3 Slot Manager ──────────────────────────────────────────────
   max-phase1-concurrent: 3
 
 # ================================
@@ -91,14 +95,10 @@ paper-trading:
 # RISK CONTROL
 # ================================
 circuit-breaker:
-  # 10-2-3 Slot Manager: max 10 trades per day
   max-trades-per-day: 10
-
   daily-loss-cap-pct: -3.5
   weekly-drawdown-cap-pct: -8.0
   monthly-drawdown-cap-pct: -15.0
-
-  # ── Dynamic Trailing Profit Floor ─────────────────────────────────────
   profit-lock-trigger-pct: 6.0
   profit-floor-pct: 4.0
   giveback-multiplier: 2.0
@@ -133,7 +133,7 @@ sector:
   min-relative-strength: 0.8
 
 # ================================
-# STRATEGY — Global/Rvol (used by PaperTradeManagementService)
+# STRATEGIES (MERGED CLEANLY)
 # ================================
 strategy:
   enabled: true
@@ -158,46 +158,46 @@ strategy:
     min-rvol-for-signal: 1.3
     min-rvol-for-spring: 1.2
 
-  # ════════════════════════════════════════════════════════════════════════
-  # SMART CHANNEL PULLBACK STRATEGY v2
-  # Implements SmartChannelPullbackStrategy_v2 spec:
-  #   15M market trend + 5M channel structure + pullback entry
-  # ════════════════════════════════════════════════════════════════════════
+  # ================================
+  # SMART CHANNEL PULLBACK
+  # ================================
   smart-channel-pullback:
-    # Master switch — set to false to disable without removing code
     enabled: ${SCPS_ENABLED:true}
-
-    # Require HIGH_QUALITY channel (≥3 touches) before firing
-    # Set true for more conservative operation
     require-high-quality-channel: false
-
-    # Time stop: exit trade if no 0.5R profit within 60 minutes
-    # 0 = use global time stop from strategy.global.global-time-stop
     time-stop-minutes: 60
-
-    # Minimum RVOL — signals still fire below this but score lower
     min-rvol: 1.0
-
-    # Max signals per session (09:40–14:40)
     max-signals-per-session: 3
-
-    # Sector filters
-    sector-buy-threshold: 0.3    # sector must be ≥ +0.3% for BUY
-    sector-sell-threshold: -0.3  # sector must be ≤ -0.3% for SELL
-
-    # Slippage-adjusted RR pre-flight check (Gate 7.5)
-    # Accounts for 0.05% entry + 0.05% exit slippage
+    sector-buy-threshold: 0.05
+    sector-sell-threshold: -0.05
     min-adjusted-rr: 1.8
-
-    # Cooldown per symbol between signals (minutes)
     symbol-cooldown-minutes: 60
-
-    # Skip channels wider than this %
     max-channel-width-pct: 5.0
-
-    # Target multipliers
     t1-rr: 2.0
     t2-rr: 3.0
+
+  # ================================
+  # SIDEWAYS SCALP
+  # ================================
+  sideways-scalp:
+    enabled: ${SCALP_ENABLED:true}
+    min-rvol: 1.1
+    max-signals-per-session: 5
+    time-stop-minutes: 20
+
+  # ================================
+  # MARKET PRESSURE STRATEGY
+  # ================================
+  market-pressure:
+    enabled: ${PRESSURE_ENABLED:true}
+    time-stop-minutes: 30
+    max-signals-per-session: 6
+
+  # ================================
+  # WARMUP CONFIG
+  # ================================
+  warmup:
+    redis-enabled: ${WARMUP_REDIS_ENABLED:true}
+    broker-fetch-threads: 20
 
 # ================================
 # NOTIFICATIONS
@@ -208,9 +208,15 @@ notifications:
     bot-token: ${TELEGRAM_BOT_TOKEN:}
     chat-id: ${TELEGRAM_CHAT_ID:}
 
+# ================================
+# SERVER
+# ================================
 server:
   port: 8081
 
+# ================================
+# ACTUATOR
+# ================================
 management:
   endpoints:
     web:
@@ -221,6 +227,9 @@ management:
     health:
       show-details: when-authorized
 
+# ================================
+# RESILIENCE
+# ================================
 resilience4j:
   retry:
     instances:
@@ -232,6 +241,9 @@ resilience4j:
 app:
   allowed-origins: http://localhost:8081,http://127.0.0.1:8081
 
+# ================================
+# LOGGING
+# ================================
 logging:
   level:
     root: INFO
