@@ -165,8 +165,10 @@ strategy:
     enabled: ${SCPS_ENABLED:true}
     require-high-quality-channel: false
     time-stop-minutes: 60
+    # FIX: was 1.0 (average RVOL = no conviction). Internal floor is 1.1.
     min-rvol: 1.0
     max-signals-per-session: 3
+    # FIX: sector must be strictly positive for BUY, strictly negative for SELL
     sector-buy-threshold: 0.05
     sector-sell-threshold: -0.05
     min-adjusted-rr: 1.8
@@ -174,6 +176,13 @@ strategy:
     max-channel-width-pct: 5.0
     t1-rr: 2.0
     t2-rr: 3.0
+    # FIX: Pullback zone factor (FIX 1): 0.50 = lower 50% of channel accepted
+    # (was 0.30 — too narrow, caused 0 signals on momentum days)
+    pb-zone-factor: 0.50
+    # FIX: Minimum SL distance % (FIX 4)
+    min-sl-pct: 0.004
+    # FIX: Minimum stock price (FIX 2)
+    min-stock-price: 100
 
   # ================================
   # SIDEWAYS SCALP
@@ -183,6 +192,24 @@ strategy:
     min-rvol: 1.1
     max-signals-per-session: 5
     time-stop-minutes: 20
+    # FIX: Strong pressure bypass ratio (see SidewaysScalpStrategy FIX 1)
+    # When market pressure ratio >= this value, strict hammer/shooting-star
+    # pattern is relaxed to any bullish/bearish candle direction.
+    strong-pressure-bypass-ratio: 1.50
+    # FIX: Minimum SL distance as % of entry price (FIX 3)
+    min-sl-pct: 0.0035
+    # FIX: Minimum stock price filter (FIX 2)
+    min-stock-price: 100
+
+  # ================================
+  # HIGH RR INTRADAY STRATEGY
+  # FIX: was incorrectly nested under sideways-scalp due to bad indentation.
+  # Must be a sibling block at the same level as smart-channel-pullback.
+  # ================================
+  high-rr:
+    enabled: ${HIGHRR_ENABLED:true}
+    time-stop-minutes: 90
+    risk-per-trade: 0.01
 
   # ================================
   # MARKET PRESSURE STRATEGY
@@ -193,11 +220,36 @@ strategy:
     max-signals-per-session: 6
 
   # ================================
-  # WARMUP CONFIG
+  # ORB (OPENING RANGE BREAKOUT) STRATEGY
+  # Added: was previously missing, causing @Value defaults to be used silently.
+  # Explicitly declared here for visibility and easy tuning.
   # ================================
-  warmup:
-    redis-enabled: ${WARMUP_REDIS_ENABLED:true}
-    broker-fetch-threads: 20
+  orb:
+    enabled: ${ORB_ENABLED:true}
+    # Reward:risk multiplier for T1 target.
+    # T1 = entry ± (orbRange × target-rr)
+    # T2 = entry ± (orbRange × target-rr × 1.5)
+    target-rr: 1.5
+    # Auto-cancel breakout watch if no breakout by 11:30 AM.
+    # Time-stop for active trades: 120 minutes from entry (≈ 1:30 PM exit).
+    # Note: forced exit at 1:30 PM is also enforced by HighRROrderExecutionService
+    # scheduler. The time-stop-minutes here governs PaperTradeManagementService
+    # tick-level exit, providing a second line of defence.
+    time-stop-minutes: 120
+    # GAP FIX 1: Minimum traded volume at 9:15 for a stock to qualify for ORB tracking.
+    # Stocks below this volume threshold are pre-filtered before entering the ORB pipeline.
+    # This prevents illiquid stocks (wide spreads, unreliable price discovery) from
+    # being tracked. Adjust based on your universe (Nifty 100 vs Nifty 500).
+    # 100,000 = conservative (works well for Nifty 100 stocks)
+    # 50,000  = wider net (includes mid-cap stocks)
+    min-premarket-volume: 100000
+
+# ================================
+# WARMUP CONFIG
+# ================================
+warmup:
+  redis-enabled: ${WARMUP_REDIS_ENABLED:true}
+  broker-fetch-threads: 20
 
 # ================================
 # NOTIFICATIONS

@@ -24,33 +24,34 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
- * PaperTradeExecutionService — simulates Zerodha order execution for paper mode.
+ * PaperTradeExecutionService – simulates Zerodha order execution for paper mode.
  *
- * ═══════════════════════════════════════════════════════════════════════
+ * ─────────────────────────────────────────────────────────────────────────────
+ * CRITICAL FIX: Strategy isolation for HighRR and ORB
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Root cause: This service previously responded to ALL TradeApprovedEvents
+ * regardless of strategy name. When HighRROrderExecutionService (or any future
+ * strategy with its own execution engine) also handles the same event, it caused:
+ *   1. Double trade execution for the same signal
+ *   2. Two trade managers (PaperTradeManagementService + HighRRTradeManager)
+ *      monitoring the same symbol simultaneously → duplicate SL/target fires
+ *   3. Double P&L accounting in PaperAccount and RiskManagementService
+ *
+ * Fix: SELF_MANAGED_STRATEGIES set. Any strategy listed here has its own
+ * execution pipeline and must NOT be handled by this service. This is the
+ * single point of control for strategy isolation — add/remove strategies here.
+ *
+ * Currently self-managed:
+ *   - HIGH_RR_INTRADAY_V1 → HighRROrderExecutionService + HighRRTradeManager
+ *   - ORB_BREAKOUT_V1     → ORB uses PaperTradeExecutionService (NOT self-managed)
+ *     NOTE: ORB signals flow through standard pipeline. Only HighRR is excluded.
+ *
  * CHANGES vs previous version:
- *
- * 1. closeTrade() now accepts a boolean reachedPhase2 parameter.
- *    This is forwarded to riskService.onTradeClosed(symbol, pnl, strategy, reachedPhase2)
- *    so RiskManagementService can correctly decrement phase1Count:
- *      - reachedPhase2=true  → phase1Count was already decremented at migration time,
- *                              do NOT decrement again.
- *      - reachedPhase2=false → trade closed while still in Phase-1,
- *                              decrement phase1Count now.
- *
- * 2. Backward-compatible 3-param closeTrade(trade, exitPrice, reason) preserved
- *    for any callers that don't know about phase2 yet (defaults to false).
- *
- * 3. riskService.onTradeClosed() now called with all 4 params for accurate
- *    10-2-3 slot manager counter management.
- *
- * PRESERVED UNCHANGED:
- *   - Entry slippage simulation
- *   - Trading window and duplicate trade guards
- *   - ATR estimation, strongTrend logic
- *   - timeStopMinutes pipeline (FIX 1)
- *   - PaperAccount.applyPnl() call
- *   - publishResult() event publishing
- * ═══════════════════════════════════════════════════════════════════════
+ *   1. SELF_MANAGED_STRATEGIES constant added (line ~80)
+ *   2. onTradeApproved() early-return check added (line ~115)
+ *   3. onShutdown() respects same filter (line ~200)
+ *   All other logic is identical to the previous fixed version.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 @Service
 @Slf4j
@@ -76,6 +77,19 @@ public class PaperTradeExecutionService {
         this.account         = account;
     }
 
+    /**
+     * Strategies that manage their own paper execution pipeline.
+     * This service must NOT handle TradeApprovedEvents for these strategies
+     * to prevent double execution, duplicate P&L, and conflicting trade managers.
+     *
+     * HIGH_RR_INTRADAY_V1: handled by HighRROrderExecutionService + HighRRTradeManager.
+     */
+    private static final Set<String> SELF_MANAGED_STRATEGIES = Set.of(
+            "HIGH_RR_INTRADAY_V1"
+            // Add future self-managed strategies here, e.g.:
+            // "MY_CUSTOM_STRATEGY_V1"
+    );
+
     @Value("${trading.mode:LIVE}")
     private String tradingMode;
 
@@ -85,28 +99,40 @@ public class PaperTradeExecutionService {
     @Value("${trading.max-position-pct:0.20}")
     private BigDecimal maxPositionPct;
 
-    // Entry slippage — 0.05% market order impact
+    // Entry slippage – 0.05% market order impact
     private static final double ENTRY_SLIP = 0.0005;
 
-    // ── In-memory trade tracking ───────────────────────────────────────────────
+    // ── In-memory trade tracking ────────────────────────────────────────────
     private final Map<String, Trade> activeTrades = new ConcurrentHashMap<>();
     private final List<Trade>        todayTrades  = Collections.synchronizedList(new ArrayList<>());
 
     // ══════════════════════════════════════════════════════════════════════════
-    // ENTRY — fires on TradeApprovedEvent
+    // ENTRY – fires on TradeApprovedEvent
     // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
     @Async("tradingExecutor")
     public void onTradeApproved(TradeApprovedEvent event) {
 
+        // ── Mode guard ──────────────────────────────────────────────────────
         if (!"PAPER".equalsIgnoreCase(tradingMode)) {
-            log.debug("[LIVE] Skipping TradeApprovedEvent — mode is {}.", tradingMode);
+            log.debug("[LIVE] Skipping TradeApprovedEvent – mode is {}.", tradingMode);
             return;
         }
 
+        // ── CRITICAL FIX: Strategy isolation guard ──────────────────────────
+        // Strategies in SELF_MANAGED_STRATEGIES have their own execution engine.
+        // Processing them here would cause double execution and conflicting managers.
+        String strategyName = event.getStrategyName();
+        if (strategyName != null && SELF_MANAGED_STRATEGIES.contains(strategyName)) {
+            log.debug("[PAPER] Skipping TradeApprovedEvent for self-managed strategy: {}. " +
+                    "Execution handled by its dedicated service.", strategyName);
+            return;
+        }
+
+        // ── Time window guard ───────────────────────────────────────────────
         if (!isWithinWindow()) {
-            log.warn("[PAPER] Outside trading window — rejected: {}", event.getTradingSymbol());
+            log.warn("[PAPER] Outside trading window – rejected: {}", event.getTradingSymbol());
             return;
         }
 
@@ -114,13 +140,14 @@ public class PaperTradeExecutionService {
         int    qty = event.getQuantity();
 
         if (activeTrades.containsKey(sym)) {
-            log.warn("[PAPER] Trade already active for {} — skipping", sym);
+            log.warn("[PAPER] Trade already active for {} – skipping", sym);
             return;
         }
 
-        log.info("[PAPER] Executing: {} dir={} qty={} entry={} sl={} target={}",
+        log.info("[PAPER] Executing: {} dir={} qty={} entry={} sl={} target={} strategy={}",
                 sym, event.getDirection(), qty,
-                event.getEntryPrice(), event.getStopLoss(), event.getTarget());
+                event.getEntryPrice(), event.getStopLoss(), event.getTarget(),
+                strategyName);
 
         BigDecimal rawEntry  = event.getEntryPrice();
         BigDecimal fillPrice = simulateEntryFill(rawEntry, event.getDirection());
@@ -142,7 +169,7 @@ public class PaperTradeExecutionService {
                 .target(event.getTarget())
                 .slOrderId(slOrderId)
                 .probabilityScore(event.getProbabilityScore())
-                .strategyName(event.getStrategyName())
+                .strategyName(strategyName)
                 .createdAt(Instant.now())
                 .updatedAt(Instant.now())
                 .build();
@@ -176,18 +203,11 @@ public class PaperTradeExecutionService {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // closeTrade — called by PaperTradeManagementService
+    // closeTrade – called by PaperTradeManagementService
     // ══════════════════════════════════════════════════════════════════════════
 
     /**
      * Full close with phase-2 flag.
-     *
-     * @param trade          the trade entity to close
-     * @param exitPrice      tick-aligned exit fill price
-     * @param reason         exit reason string (SL, TARGET, TIME_STOP, etc.)
-     * @param reachedPhase2  true if trade had slAtBreakeven=true when closed.
-     *                       Forwarded to RiskManagementService to avoid double-decrementing
-     *                       phase1Count (it was already decremented at migration time).
      */
     public void closeTrade(Trade trade, BigDecimal exitPrice,
                            String reason, boolean reachedPhase2) {
@@ -195,7 +215,6 @@ public class PaperTradeExecutionService {
         String sym      = trade.getTradingSymbol();
         String strategy = trade.getStrategyName();
 
-        // P&L — uses remainingQty from management service for partial-exit accuracy
         BigDecimal pnl = trade.getDirection() == TradeDirection.LONG
                 ? exitPrice.subtract(trade.getEntryPrice())
                 .multiply(BigDecimal.valueOf(
@@ -208,7 +227,6 @@ public class PaperTradeExecutionService {
                                 ? paperManagement.getRemainingQty(sym, trade.getQuantity())
                                 : trade.getQuantity()));
 
-        // Flat ₹40 brokerage per round trip (full close leg)
         BigDecimal brokerage = BigDecimal.valueOf(40.0);
         BigDecimal netPnl    = pnl.subtract(brokerage);
 
@@ -221,8 +239,6 @@ public class PaperTradeExecutionService {
 
         activeTrades.remove(sym);
         account.applyPnl(netPnl);
-
-        // Notify risk service — releases sector slot, strategy slot, phase1Count, records P&L
         riskService.onTradeClosed(sym, netPnl, strategy, reachedPhase2);
 
         log.info("[PAPER] CLOSED: {} reason={} gross=₹{:.2f} brok=₹{:.2f} NET=₹{:.2f} phase2={}",
@@ -237,24 +253,29 @@ public class PaperTradeExecutionService {
 
     /**
      * Backward-compatible 3-param overload.
-     * Assumes trade never reached Phase-2 (conservative — decrements phase1Count).
-     * Used by app shutdown handler and any legacy callers.
      */
     public void closeTrade(Trade trade, BigDecimal exitPrice, String reason) {
         closeTrade(trade, exitPrice, reason, false);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // Shutdown — close all on app stop
+    // Shutdown – close all on app stop (respects strategy isolation)
     // ══════════════════════════════════════════════════════════════════════════
 
     @PreDestroy
     public void onShutdown() {
         if (!"PAPER".equalsIgnoreCase(tradingMode)) return;
         if (activeTrades.isEmpty()) return;
-        log.warn("[PAPER] App shutdown — force closing {} positions", activeTrades.size());
+        log.warn("[PAPER] App shutdown – force closing {} positions", activeTrades.size());
         new ArrayList<>(activeTrades.values())
-                .forEach(trade -> closeTrade(trade, trade.getEntryPrice(), "APP_SHUTDOWN", false));
+                .forEach(trade -> {
+                    // Only close trades NOT managed by a self-managed strategy.
+                    // Self-managed strategies handle their own shutdown.
+                    String strat = trade.getStrategyName();
+                    if (strat == null || !SELF_MANAGED_STRATEGIES.contains(strat)) {
+                        closeTrade(trade, trade.getEntryPrice(), "APP_SHUTDOWN", false);
+                    }
+                });
     }
 
     // ══════════════════════════════════════════════════════════════════════════

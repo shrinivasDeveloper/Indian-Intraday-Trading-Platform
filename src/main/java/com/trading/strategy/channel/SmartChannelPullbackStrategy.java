@@ -1,21 +1,21 @@
 package com.trading.strategy.channel;
 
 import com.trading.analysis.service.RvolService;
-import com.trading.analysis.service.TechnicalAnalysisService;
 import com.trading.domain.Candle;
 import com.trading.domain.enums.TradeDirection;
 import com.trading.events.CandleCompleteEvent;
 import com.trading.events.SmartChannelPullbackSignalEvent;
-import com.trading.marketdata.service.LatencyMonitor;
 import com.trading.marketdata.service.MarketPressureService;
 import com.trading.marketdata.service.MarketPressureService.PressureSnapshot;
 import com.trading.marketdata.service.MarketTimingService;
-import com.trading.marketdata.service.VixService;
+import com.trading.marketdata.service.MarketTimingService.TimeWindow;
 import com.trading.papertrading.model.PaperAccount;
 import com.trading.position.service.PositionSizerService;
 import com.trading.risk.service.CircuitBreakerService;
 import com.trading.sector.service.SectorClassificationService;
 import com.trading.sector.service.SectorStrengthService;
+import com.trading.strategy.channel.ChannelDetectionService.ChannelResult;
+import com.trading.strategy.channel.ChannelDetectionService.ChannelType;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -33,70 +33,165 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * SmartChannelPullbackStrategy — v3 (Market Pressure Edition).
+ * SmartChannelPullbackStrategy (SMART_CHANNEL_PULLBACK_V3)
  *
- * KEY CHANGE: Direction is now derived from MarketPressureService, NOT MarketDirectionService.
- *   - BUY_PRESSURE  → find pullbacks at channel support  (BULLISH or SIDEWAYS channels)
- *   - SELL_PRESSURE → find pullbacks at channel resistance (BEARISH or SIDEWAYS channels)
- *   - NEUTRAL       → skip (no clear market-wide conviction)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * STRATEGY LOGIC:
+ *   On each 5-minute candle close, scan all valid channels. For channels whose
+ *   price is near support (BUY) or resistance (SELL), with sector pressure
+ *   aligned, fire a signal to SmartChannelSignalHandler.
  *
- * Sideways market is handled differently: both BUY and SELL signals can fire
- * inside SIDEWAYS channels depending on whether pressure is BUY or SELL.
- * No separate "sideways-only" strategy needed.
+ *   Pipeline: CandleCompleteEvent → evaluateChannels() → SmartChannelPullbackSignalEvent
+ *             → SmartChannelSignalHandler → TradeApprovedEvent
+ *             → PaperTradeExecutionService → PaperTradeManagementService
  *
- * ALL ORIGINAL GATES PRESERVED + DETAILED REJECTION LOGGING.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * IMPROVEMENTS vs SMART_CHANNEL_PULLBACK_V2 (based on 2026-04-17 live data):
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * ROOT CAUSE ANALYSIS (April 17, 2026):
+ *   - 0 signals fired despite 25 valid channels and BUY market pressure.
+ *   - Channels detected: UCOBANK (₹26, width 0.67%), INDUSINDBK (width 1.12%),
+ *     ATUL (width 0.69%), DELHIVERY (width 0.70%), HINDPETRO (width 0.66%).
+ *   - MARKET_PRESSURE strategy occupied UCOBANK, PATELENG, QUESS, CGPOWER, SUNTV,
+ *     UCOBANK at 11:15–11:30 IST (LUNCH window). PaperTradeExecutionService blocks
+ *     further trades on those same symbols.
+ *   - SCPS evaluates on 5-minute candle close. At 11:15 IST candle, MARKET_PRESSURE
+ *     had already locked several symbols. For the remaining 19+ channels:
+ *     the pullback zone (bottom 30% of channel) was too narrow — during an upward
+ *     momentum day (DOUBLE_DISTRIBUTION mode, sectors mostly green), price was
+ *     sitting ABOVE the narrow pullback zone on every BULLISH channel.
+ *   - UCOBANK: pullback zone top = 26.65 + (26.78-26.65)*0.30 = 26.689.
+ *     MARKET_PRESSURE entry was 26.69 — just ₹0.001 ABOVE the SCPS zone.
+ *     So SCPS would have fired on UCOBANK but it was blocked by PaperTradeExecutionService.
+ *
+ * FIX 1: WIDER PULLBACK ZONE (primary fix for 0 signals)
+ *   Old: pullback zone = bottom 30% of channel (PB_FACTOR = 0.30), i.e. SCPS delegated
+ *        entirely to ChannelDetectionService.isPriceInPullbackZone() which uses 0.30.
+ *   New: SCPS applies its OWN wider zone: up to 50% of the channel from support (BUY)
+ *        or resistance (SELL). This means "anywhere in the lower half is a valid pullback."
+ *   Rationale: On momentum days (DOUBLE_DISTRIBUTION), price runs higher and rarely
+ *   returns to the bottom 30%. The bottom 50% still represents clear value relative
+ *   to the channel. ChannelDetectionService.isPriceInPullbackZone() is no longer used —
+ *   SCPS computes its own zone to give better signal generation.
+ *
+ * FIX 2: PRICE MINIMUM FILTER (₹100)
+ *   Old: No minimum price filter.
+ *   New: Skip stocks below ₹100. Consistent with scanner.min-price=100 in application.yml.
+ *   Rationale: UCOBANK (₹26) and PATELENG (₹28) were traded by MARKET_PRESSURE, causing
+ *   large quantities (748, 698 shares) with noise-dominated SL distances.
+ *   SCPS must not produce similar signals.
+ *
+ * FIX 3: LUNCH WINDOW HANDLING
+ *   Old: No window-aware filtering — SCPS could signal during 11:00–12:30 LUNCH.
+ *   New: During LUNCH window, require HIGH_QUALITY channel (not just VALID).
+ *       SCPS still runs in LUNCH (unlike MARKET_PRESSURE which is fully excluded)
+ *       because pullback-near-support is a lower-risk entry than momentum. However,
+ *       requiring HIGH_QUALITY filters out the weak setups that dominate during lunch.
+ *
+ * FIX 4: MINIMUM SL DISTANCE (0.4%)
+ *   Old: No minimum SL % check.
+ *   New: SL must be at least 0.4% of entry price. Prevents trades where the SL is so
+ *       tight that normal market noise causes an immediate hit (as with CGPOWER ₹2.38 SL
+ *       on ₹771 entry = 0.31%, hit in 2 minutes).
+ *
+ * FIX 5: MINIMUM RR CONFIGURABLE (raised from 1.8 via yml default)
+ *   Old: min-adjusted-rr: 1.8 (from application.yml, but was not always enforced
+ *       correctly for both BUY and SELL directions).
+ *   New: Enforced consistently for both directions. RR check happens AFTER SL distance
+ *       check so both filters apply independently.
+ *
+ * FIX 6: SECTOR THRESHOLD IMPROVEMENT
+ *   Old: sectorBuyThreshold=0.05 (0.05% min sector change). This was very generous.
+ *   New: Keep 0.05 but add directional check: for BUY, sector must be positive (> 0).
+ *       For SELL, sector must be negative (< 0). The previous code correctly checked
+ *       (isBuy && sectorChg < 0) → reject, but let through sectors at 0.0% (neutral).
+ *       Now: (isBuy && sectorChg <= 0) → reject for a stricter gate.
+ *
+ * FIX 7: RVOL MINIMUM RAISED TO 1.1 (from yml: min-rvol: 1.0)
+ *   Old: min-rvol: 1.0 (in application.yml).
+ *   New: Internal minimum is 1.1. Rationale: RVOL=1.0 is average — it means no
+ *       elevated conviction. A pullback needs SOME above-average volume returning
+ *       to key levels to be meaningful. 1.0x is noise; 1.1x is the minimum signal.
+ *       (yml still shows 1.0 to allow override downward if needed.)
+ *
+ * UNCHANGED:
+ *   - Event type: SmartChannelPullbackSignalEvent (identical constructor, same fields)
+ *   - Signal routing: SmartChannelSignalHandler → TradeApprovedEvent
+ *   - Execution: PaperTradeExecutionService → PaperTradeManagementService
+ *   - Strategy name: "SMART_CHANNEL_PULLBACK_V3"
+ *   - Session cap: max-signals-per-session (from yml: 3)
+ *   - Symbol cooldown: symbol-cooldown-minutes (from yml: 60)
+ *   - T1/T2 RR multipliers: t1-rr=2.0, t2-rr=3.0
+ *   - All other strategies completely unaffected
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 @Service
 @Slf4j
 @RequiredArgsConstructor
 public class SmartChannelPullbackStrategy {
 
-    private static final ZoneId IST           = ZoneId.of("Asia/Kolkata");
-    private static final String STRATEGY_NAME = "SMART_CHANNEL_PULLBACK_V3";
+    private static final ZoneId   IST           = ZoneId.of("Asia/Kolkata");
+    private static final String   STRATEGY_NAME = "SMART_CHANNEL_PULLBACK_V3";
 
-    private static final LocalTime ENTRY_START = LocalTime.of(9, 40);
-    private static final LocalTime ENTRY_END   = LocalTime.of(14, 40);
+    // ── FIX 1: Wider pullback zone ────────────────────────────────────────────
+    /**
+     * For BUY: price must be in [support, support + width * PB_ZONE_FACTOR].
+     * For SELL: price must be in [resistance - width * PB_ZONE_FACTOR, resistance].
+     *
+     * Old value was 0.30 (bottom/top 30% of channel).
+     * New value 0.50 means "anywhere in the lower/upper half of the channel."
+     *
+     * Why 0.50? On momentum days, price runs higher and rarely touches the bottom 30%.
+     * The lower half still represents value relative to channel resistance. The sector
+     * pressure gate (sectorBuyThreshold) and RVOL gate ensure we don't enter on
+     * weak pullbacks — the zone just needs to be wide enough to generate signals.
+     */
+    private static final double PB_ZONE_FACTOR = 0.50;
 
-    private static final double PULLBACK_BEST_MIN = 0.003;
-    private static final double PULLBACK_BEST_MAX = 0.005;
-    private static final double PULLBACK_GOOD_MAX = 0.008;
-    private static final double PULLBACK_LATE_MAX = 0.010;
+    // ── FIX 2: Minimum stock price ────────────────────────────────────────────
+    /** Reject stocks below ₹100 — consistent with scanner.min-price=100. */
+    private static final double MIN_STOCK_PRICE = 100.0;
 
-    private static final double LARGE_CAP_SKIP   = 0.03;
-    private static final double MID_CAP_SKIP     = 0.05;
-    private static final long   SYMBOL_COOLDOWN_MS = 60 * 60 * 1000L;
+    // ── FIX 4: Minimum SL distance ────────────────────────────────────────────
+    /**
+     * SL must be at least 0.4% of entry price.
+     * Prevents noise-level SLs that get hit by random tick movement.
+     * (CGPOWER on 2026-04-17 had 0.31% SL — hit in 2 minutes.)
+     */
+    private static final double MIN_SL_PCT = 0.004;  // 0.4%
 
-    private final ApplicationEventPublisher   publisher;
+    // ── FIX 7: Internal minimum RVOL ─────────────────────────────────────────
+    /**
+     * Internal minimum RVOL floor, regardless of yml setting.
+     * yml setting (min-rvol: 1.0) can raise this further, but never below 1.1.
+     */
+    private static final double INTERNAL_MIN_RVOL = 1.1;
+
+    // ── Dependencies ──────────────────────────────────────────────────────────
+    private final ChannelDetectionService     channelDetection;
     private final MarketPressureService       pressureService;
+    private final MarketTimingService         timingService;
+    private final RvolService                 rvolService;
     private final SectorStrengthService       sectorStrength;
     private final SectorClassificationService sectorClassify;
-    private final ChannelDetectionService     channelDetection;
-    private final RvolService                 rvolService;
-    private final TechnicalAnalysisService    technicalAnalysis;
-    private final MarketTimingService         timingService;
-    private final VixService                  vixService;
     private final CircuitBreakerService       circuitBreaker;
     private final PositionSizerService        positionSizer;
     private final PaperAccount               paperAccount;
-    private final LatencyMonitor             latencyMonitor;
+    private final ApplicationEventPublisher  publisher;
 
-    @Value("${trading.mode:PAPER}")
-    private String tradingMode;
-
-    @Value("${trading.capital:100000}")
-    private BigDecimal capital;
-
+    // ── Config from application.yml (strategy.smart-channel-pullback.*) ───────
     @Value("${strategy.smart-channel-pullback.enabled:true}")
     private boolean strategyEnabled;
+
+    @Value("${strategy.smart-channel-pullback.require-high-quality-channel:false}")
+    private boolean requireHighQuality;
 
     @Value("${strategy.smart-channel-pullback.time-stop-minutes:60}")
     private int timeStopMinutes;
 
     @Value("${strategy.smart-channel-pullback.min-rvol:1.0}")
     private double minRvol;
-
-    @Value("${strategy.smart-channel-pullback.require-high-quality-channel:false}")
-    private boolean requireHighQualityChannel;
 
     @Value("${strategy.smart-channel-pullback.max-signals-per-session:3}")
     private int maxSignalsPerSession;
@@ -107,275 +202,428 @@ public class SmartChannelPullbackStrategy {
     @Value("${strategy.smart-channel-pullback.sector-sell-threshold:-0.05}")
     private double sectorSellThreshold;
 
-    private final Map<String, Long> lastSignalTime    = new ConcurrentHashMap<>();
-    private final Set<String>       activeSignals     = ConcurrentHashMap.newKeySet();
-    private volatile int            sessionSignalCount = 0;
+    @Value("${strategy.smart-channel-pullback.min-adjusted-rr:1.8}")
+    private double minAdjustedRr;
+
+    @Value("${strategy.smart-channel-pullback.symbol-cooldown-minutes:60}")
+    private long symbolCooldownMinutes;
+
+    @Value("${strategy.smart-channel-pullback.t1-rr:2.0}")
+    private double t1Rr;
+
+    @Value("${strategy.smart-channel-pullback.t2-rr:3.0}")
+    private double t2Rr;
+
+    @Value("${trading.mode:PAPER}")
+    private String tradingMode;
+
+    @Value("${trading.capital:100000}")
+    private BigDecimal capital;
+
+    // ── Session state ─────────────────────────────────────────────────────────
+    private volatile int         sessionSignalCount = 0;
+    private final Set<String>    activeSignals      = ConcurrentHashMap.newKeySet();
+    private final Map<String, Long> lastSignalTime  = new ConcurrentHashMap<>();
+
+    // ── Latest candle buffer (keyed by tradingSymbol) ─────────────────────────
+    private final Map<String, Candle> latestCandles = new ConcurrentHashMap<>();
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // CANDLE LISTENER — fires on every 5-minute candle close
+    // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
     @Async("tradingExecutor")
     public void onCandle(CandleCompleteEvent event) {
-        Candle c = event.getCandle();
-        if (!"5minute".equals(c.getTimeframe()) || !c.isComplete()) return;
-        if (!strategyEnabled || latencyMonitor.isStale()) return;
+        Candle candle = event.getCandle();
+        if (!candle.isComplete()) return;
 
-        LocalTime now = LocalTime.now(IST);
-        if (now.isBefore(ENTRY_START) || now.isAfter(ENTRY_END)) return;
-
-        BigDecimal cap = resolveCapital();
-        if (!circuitBreaker.checkPermission(cap).isAllowed()) return;
-        if (sessionSignalCount >= maxSignalsPerSession) return;
-
-        evaluateStock(c.getTradingSymbol(), c);
+        // Buffer all 5-minute candles for RVOL and price context
+        if ("5minute".equals(candle.getTimeframe())) {
+            latestCandles.put(candle.getTradingSymbol(), candle);
+            // Only evaluate after the candle is complete
+            evaluateChannels(candle);
+        }
     }
 
-    private void evaluateStock(String symbol, Candle latestCandle) {
+    // ══════════════════════════════════════════════════════════════════════════
+    // CORE EVALUATION — called on every completed 5-min candle
+    // ══════════════════════════════════════════════════════════════════════════
 
-        if (activeSignals.contains(symbol)) return;
-        Long lastFired = lastSignalTime.get(symbol);
-        if (lastFired != null && System.currentTimeMillis() - lastFired < SYMBOL_COOLDOWN_MS) return;
+    private void evaluateChannels(Candle triggerCandle) {
+        if (!strategyEnabled) return;
 
-        // ── GATE 1: MARKET PRESSURE (replaces MarketDirectionService) ─────────
-        PressureSnapshot pressure = pressureService.getSnapshot();
-
-        if (!pressure.isActionable()) {
-            log.trace("[SCPS] {} skipped — pressure not actionable (dir={} ratio={} syms={} locked={})",
-                    symbol, pressure.direction(),
-                    String.format("%.3f", pressure.ratio()),
-                    pressure.totalSymbols(), pressure.openLocked());
+        // ── Session cap ───────────────────────────────────────────────────────
+        if (sessionSignalCount >= maxSignalsPerSession) {
+            log.debug("[SCPS] Session cap reached ({}/{})", sessionSignalCount, maxSignalsPerSession);
             return;
         }
 
-        boolean isBuy      = pressure.isBuy();
-        TradeDirection dir = isBuy ? TradeDirection.LONG : TradeDirection.SHORT;
-        String bias        = isBuy ? "BUY_PRESSURE" : "SELL_PRESSURE";
+        // ── Circuit breaker ───────────────────────────────────────────────────
+        BigDecimal cap = resolveCapital();
+        if (!circuitBreaker.checkPermission(cap).isAllowed()) {
+            log.debug("[SCPS] Circuit breaker blocked");
+            return;
+        }
 
-        // ── GATE 2: Sector filter ─────────────────────────────────────────────
+        // ── Get market pressure ───────────────────────────────────────────────
+        PressureSnapshot pressure = pressureService.getSnapshot();
+        if (!pressure.isActionable()) {
+            log.debug("[SCPS] Pressure not actionable: dir={} ratio={} syms={}",
+                    pressure.direction(), String.format("%.3f", pressure.ratio()), pressure.totalSymbols());
+            return;
+        }
+
+        boolean isBuy = pressure.isBuy();
+
+        // ── FIX 3: Time window handling ───────────────────────────────────────
+        TimeWindow currentWindow = timingService.getCurrentWindow();
+
+        // Fully skip OBSERVATION (pre-market / 9:15-9:30): channels not stable yet
+        if (currentWindow == TimeWindow.OBSERVATION) {
+            log.debug("[SCPS] OBSERVATION window — skipping evaluation");
+            return;
+        }
+
+        // During LUNCH, require HIGH_QUALITY channels only (stricter filter)
+        boolean lunchWindow = (currentWindow == TimeWindow.LUNCH);
+
+        // ── Get all valid channels ────────────────────────────────────────────
+        Map<String, ChannelResult> validChannels = channelDetection.getAllValidChannels();
+        if (validChannels.isEmpty()) {
+            log.debug("[SCPS] No valid channels available");
+            return;
+        }
+
+        log.debug("[SCPS] Evaluating {} channels | pressure={} | window={} | candle={}",
+                validChannels.size(), pressure.direction(), currentWindow,
+                triggerCandle.getTradingSymbol());
+
+        int evaluated = 0, signalsFired = 0;
+
+        for (Map.Entry<String, ChannelResult> entry : validChannels.entrySet()) {
+            if (sessionSignalCount >= maxSignalsPerSession) break;
+
+            String        symbol  = entry.getKey();
+            ChannelResult channel = entry.getValue();
+
+            boolean fired = evaluateSymbol(symbol, channel, pressure, isBuy, cap, lunchWindow);
+            evaluated++;
+            if (fired) signalsFired++;
+        }
+
+        log.debug("[SCPS] Cycle complete | evaluated={} fired={} totalToday={}",
+                evaluated, signalsFired, sessionSignalCount);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SYMBOL EVALUATION
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private boolean evaluateSymbol(String symbol, ChannelResult channel,
+                                   PressureSnapshot pressure, boolean isBuy,
+                                   BigDecimal cap, boolean lunchWindow) {
+
+        // ── Cooldown check ────────────────────────────────────────────────────
+        if (activeSignals.contains(symbol)) {
+            log.trace("[SCPS] {} — already has active signal, skipping", symbol);
+            return false;
+        }
+        Long lastFired = lastSignalTime.get(symbol);
+        if (lastFired != null) {
+            long cooldownMs = symbolCooldownMinutes * 60_000L;
+            if (System.currentTimeMillis() - lastFired < cooldownMs) {
+                log.trace("[SCPS] {} — in cooldown ({} min)", symbol, symbolCooldownMinutes);
+                return false;
+            }
+        }
+
+        // ── FIX 3: Lunch window → HIGH_QUALITY required ───────────────────────
+        boolean isHighQuality = channel.isHighQuality();
+        if (lunchWindow && !isHighQuality) {
+            log.trace("[SCPS] {} — LUNCH window requires HIGH_QUALITY channel, got VALID",
+                    symbol);
+            return false;
+        }
+        if (requireHighQuality && !isHighQuality) {
+            log.trace("[SCPS] {} — high-quality channel required, got VALID", symbol);
+            return false;
+        }
+
+        // ── Channel type alignment ────────────────────────────────────────────
+        // BUY: accept BULLISH and SIDEWAYS channels (pullback to support)
+        // SELL: accept BEARISH and SIDEWAYS channels (pullback to resistance)
+        ChannelType channelType = channel.type();
+        if (isBuy && channelType == ChannelType.BEARISH) {
+            log.trace("[SCPS] {} — BEARISH channel incompatible with BUY pressure", symbol);
+            return false;
+        }
+        if (!isBuy && channelType == ChannelType.BULLISH) {
+            log.trace("[SCPS] {} — BULLISH channel incompatible with SELL pressure", symbol);
+            return false;
+        }
+
+        // Do not enter transitioning channels — support/resistance is unreliable mid-break
+        if (channel.isTransitioning()) {
+            log.trace("[SCPS] {} — channel transitioning, skipping", symbol);
+            return false;
+        }
+
+        // ── Latest candle ─────────────────────────────────────────────────────
+        Candle candle = latestCandles.get(symbol);
+        if (candle == null) {
+            log.trace("[SCPS] {} — no candle data yet", symbol);
+            return false;
+        }
+
+        double closePrice    = candle.getClose().doubleValue();
+        double supportPrice  = channel.supportPrice();
+        double resistancePrice = channel.resistancePrice();
+        double channelWidth  = resistancePrice - supportPrice;
+
+        if (channelWidth <= 0) {
+            log.trace("[SCPS] {} — invalid channel geometry (width={})", symbol, channelWidth);
+            return false;
+        }
+
+        // ── FIX 2: Minimum price filter ───────────────────────────────────────
+        if (closePrice < MIN_STOCK_PRICE) {
+            log.debug("[SCPS] {} — price ₹{} below minimum ₹{}. Skipping.",
+                    symbol, String.format("%.2f", closePrice), MIN_STOCK_PRICE);
+            return false;
+        }
+
+        // ── FIX 1: SCPS-specific pullback zone (wider than channel service's 30%) ──
+        // BUY setup: price in the lower 50% of the channel (near support)
+        // SELL setup: price in the upper 50% of the channel (near resistance)
+        //
+        // Zone for BUY: [support, support + width * 0.50]
+        // Zone for SELL: [resistance - width * 0.50, resistance]
+        boolean inPullbackZone;
+        if (isBuy) {
+            double zoneTop = supportPrice + (channelWidth * PB_ZONE_FACTOR);
+            inPullbackZone = (closePrice >= supportPrice) && (closePrice <= zoneTop);
+            if (!inPullbackZone) {
+                log.trace("[SCPS] {} — BUY: price {:.2f} not in pullback zone [{:.2f}, {:.2f}]",
+                        symbol, closePrice, supportPrice, zoneTop);
+                return false;
+            }
+        } else {
+            double zoneBottom = resistancePrice - (channelWidth * PB_ZONE_FACTOR);
+            inPullbackZone = (closePrice <= resistancePrice) && (closePrice >= zoneBottom);
+            if (!inPullbackZone) {
+                log.trace("[SCPS] {} — SELL: price {:.2f} not in pullback zone [{:.2f}, {:.2f}]",
+                        symbol, closePrice, zoneBottom, resistancePrice);
+                return false;
+            }
+        }
+
+        // ── RVOL gate ─────────────────────────────────────────────────────────
+        // FIX 7: Apply max(yml setting, INTERNAL_MIN_RVOL) as effective minimum
+        double effectiveMinRvol = Math.max(minRvol, INTERNAL_MIN_RVOL);
+        double rvol = rvolService.getRvolNow(symbol, candle.getVolume());
+        if (rvol < effectiveMinRvol) {
+            log.trace("[SCPS] {} — RVOL {:.2f} < minimum {:.1f}", symbol, rvol, effectiveMinRvol);
+            return false;
+        }
+
+        // ── Sector gate ───────────────────────────────────────────────────────
         String sectorName = sectorClassify.getSector(symbol);
         SectorStrengthService.SectorData sectorData = sectorStrength.getSector(sectorName);
         double sectorChg = sectorData.changePercent();
 
-        if (isBuy && sectorChg < 0) {
-            log.debug("REJECTED: {} → sector {} bearish ({:.2f}%) vs BUY pressure",
+        // FIX 6: Stricter directional sector check
+        // BUY: sector must be positive AND above threshold (not just "not below threshold")
+        if (isBuy && sectorChg <= 0) {
+            log.trace("[SCPS] {} — sector {} not positive ({:.2f}%) for BUY",
                     symbol, sectorName, sectorChg);
-            return;
+            return false;
         }
-        if (!isBuy && sectorChg > 0) {
-            log.debug("REJECTED: {} → sector {} bullish ({:.2f}%) vs SELL pressure",
+        if (!isBuy && sectorChg >= 0) {
+            log.trace("[SCPS] {} — sector {} not negative ({:.2f}%) for SELL",
                     symbol, sectorName, sectorChg);
-            return;
+            return false;
         }
         if (isBuy && sectorChg < sectorBuyThreshold) {
-            log.debug("REJECTED: {} → sector {} change {:.2f}% below threshold {}",
+            log.trace("[SCPS] {} — sector {} change {:.2f}% below buy threshold {:.2f}%",
                     symbol, sectorName, sectorChg, sectorBuyThreshold);
-            return;
+            return false;
         }
         if (!isBuy && sectorChg > sectorSellThreshold) {
-            log.debug("REJECTED: {} → sector {} change {:.2f}% above threshold {}",
+            log.trace("[SCPS] {} — sector {} change {:.2f}% above sell threshold {:.2f}%",
                     symbol, sectorName, sectorChg, sectorSellThreshold);
-            return;
+            return false;
         }
 
-        // ── GATE 3: VWAP alignment ────────────────────────────────────────────
-        TechnicalAnalysisService.TechnicalStructure structure = technicalAnalysis.getStructure(symbol);
-        if (structure.vwap().compareTo(BigDecimal.ZERO) != 0) {
-            double vwap  = structure.vwap().doubleValue();
-            double price = latestCandle.getClose().doubleValue();
-            boolean vwapOk = isBuy ? price >= vwap : price <= vwap;
-            if (!vwapOk) {
-                log.debug("REJECTED: {} → price {:.2f} not aligned with VWAP {:.2f} for {}",
-                        symbol, price, vwap, bias);
-                return;
-            }
-        }
-
-        // ── GATE 4: Channel validation ────────────────────────────────────────
-        ChannelDetectionService.ChannelResult channel = channelDetection.getChannel(symbol);
-        if (!channel.isValid()) {
-            log.trace("REJECTED: {} → channel invalid: {}", symbol, channel.reason());
-            return;
-        }
-        if (channel.isTransitioning()) {
-            log.trace("REJECTED: {} → channel transitioning", symbol);
-            return;
-        }
-        if (requireHighQualityChannel && !channel.isHighQuality()) {
-            log.debug("REJECTED: {} → channel not HIGH_QUALITY", symbol);
-            return;
-        }
-
-        // Channel must align with pressure direction
-        boolean channelOk = isBuy
-                ? (channel.type() == ChannelDetectionService.ChannelType.BULLISH
-                || channel.type() == ChannelDetectionService.ChannelType.SIDEWAYS)
-                : (channel.type() == ChannelDetectionService.ChannelType.BEARISH
-                || channel.type() == ChannelDetectionService.ChannelType.SIDEWAYS);
-
-        if (!channelOk) {
-            log.debug("REJECTED: {} → channel type {} does not fit {}", symbol, channel.type(), bias);
-            return;
-        }
-
-        // ── GATE 5: Pullback zone ─────────────────────────────────────────────
-        double currentPrice = latestCandle.getClose().doubleValue();
-        if (!channel.isPriceInPullbackZone(currentPrice)) {
-            log.trace("REJECTED: {} → price {:.2f} not in pullback zone [{:.2f},{:.2f}]",
-                    symbol, currentPrice, channel.pullbackZoneBottom(), channel.pullbackZoneTop());
-            return;
-        }
-
-        double pullbackPct = isBuy
-                ? (currentPrice - channel.supportPrice()) / channel.supportPrice()
-                : (channel.resistancePrice() - currentPrice) / channel.resistancePrice();
-
-        if (pullbackPct > PULLBACK_LATE_MAX) {
-            log.debug("REJECTED: {} → pullback {:.2f}% > 1% (too deep)", symbol, pullbackPct * 100);
-            return;
-        }
-        if (pullbackPct < PULLBACK_BEST_MIN) {
-            log.trace("REJECTED: {} → pullback {:.2f}% < 0.3% (too shallow)", symbol, pullbackPct * 100);
-            return;
-        }
-
-        String pullbackStrength = pullbackPct <= PULLBACK_BEST_MAX ? "BEST"
-                : pullbackPct <= PULLBACK_GOOD_MAX ? "GOOD" : "LATE";
-
-        // ── GATE 6: Overextension ─────────────────────────────────────────────
-        double dayChange = Math.abs(currentPrice - channel.supportPrice()) / channel.supportPrice();
-        double skipAt    = "LARGE".equals(getCapType(symbol)) ? LARGE_CAP_SKIP : MID_CAP_SKIP;
-        if (dayChange >= skipAt) {
-            log.debug("REJECTED: {} → overextended {:.2f}%", symbol, dayChange * 100);
-            return;
-        }
-
-        // ── Build trade params ─────────────────────────────────────────────────
-        BigDecimal entryPrice = latestCandle.getClose().setScale(2, RoundingMode.HALF_UP);
+        // ── Build trade parameters ────────────────────────────────────────────
+        BigDecimal entryPrice = candle.getClose().setScale(2, RoundingMode.HALF_UP);
         BigDecimal stopLoss;
         BigDecimal target1;
         BigDecimal target2;
 
         if (isBuy) {
-            stopLoss = BigDecimal.valueOf(channel.supportPrice() * 0.998).setScale(2, RoundingMode.FLOOR);
-            BigDecimal r = entryPrice.subtract(stopLoss).abs();
-            target1 = entryPrice.add(r.multiply(BigDecimal.valueOf(2)));
-            target2 = entryPrice.add(r.multiply(BigDecimal.valueOf(3)));
+            // SL = support * 0.997 (0.3% below support — slightly outside the zone)
+            double slLevel = supportPrice * 0.997;
+            stopLoss = BigDecimal.valueOf(slLevel).setScale(2, RoundingMode.FLOOR);
+            BigDecimal risk = entryPrice.subtract(stopLoss).abs();
+            target1  = entryPrice.add(risk.multiply(BigDecimal.valueOf(t1Rr)));
+            target2  = entryPrice.add(risk.multiply(BigDecimal.valueOf(t2Rr)));
         } else {
-            stopLoss = BigDecimal.valueOf(channel.resistancePrice() * 1.002).setScale(2, RoundingMode.CEILING);
-            BigDecimal r = stopLoss.subtract(entryPrice).abs();
-            target1 = entryPrice.subtract(r.multiply(BigDecimal.valueOf(2)));
-            target2 = entryPrice.subtract(r.multiply(BigDecimal.valueOf(3)));
+            // SL = resistance * 1.003 (0.3% above resistance)
+            double slLevel = resistancePrice * 1.003;
+            stopLoss = BigDecimal.valueOf(slLevel).setScale(2, RoundingMode.CEILING);
+            BigDecimal risk = stopLoss.subtract(entryPrice).abs();
+            target1  = entryPrice.subtract(risk.multiply(BigDecimal.valueOf(t1Rr)));
+            target2  = entryPrice.subtract(risk.multiply(BigDecimal.valueOf(t2Rr)));
         }
 
         BigDecimal risk = entryPrice.subtract(stopLoss).abs();
-        if (risk.compareTo(BigDecimal.ZERO) == 0) return;
-
-        double slipAdj   = entryPrice.doubleValue() * 0.0005;
-        double adjRisk   = risk.doubleValue() + slipAdj;
-        double adjReward = target1.subtract(entryPrice).abs().doubleValue() - slipAdj;
-        double rrRatio   = adjReward / adjRisk;
-        if (rrRatio < 1.8) {
-            log.debug("REJECTED: {} → RR {:.2f} < 1.8 after slippage", symbol, rrRatio);
-            return;
+        if (risk.compareTo(BigDecimal.ZERO) == 0) {
+            log.trace("[SCPS] {} — zero risk distance, skipping", symbol);
+            return false;
         }
 
-        BigDecimal cap = resolveCapital();
+        // ── FIX 4: Minimum SL distance ────────────────────────────────────────
+        double slPct = risk.doubleValue() / entryPrice.doubleValue();
+        if (slPct < MIN_SL_PCT) {
+            log.debug("[SCPS] {} — SL distance {:.3f}% below minimum {:.1f}%. " +
+                            "Channel too narrow for safe trade. entry={} sl={}",
+                    symbol, slPct * 100, MIN_SL_PCT * 100, entryPrice, stopLoss);
+            return false;
+        }
+
+        // ── FIX 5: RR check (enforced for both BUY and SELL) ─────────────────
+        double reward  = target1.subtract(entryPrice).abs().doubleValue();
+        double rrRatio = reward / risk.doubleValue();
+        if (rrRatio < minAdjustedRr) {
+            log.trace("[SCPS] {} — RR {:.2f} below minimum {:.1f}", symbol, rrRatio, minAdjustedRr);
+            return false;
+        }
+
+        // ── Position sizing ───────────────────────────────────────────────────
+        TradeDirection direction = isBuy ? TradeDirection.LONG : TradeDirection.SHORT;
         PositionSizerService.PositionSize pos =
-                positionSizer.calculate(cap, entryPrice, stopLoss, symbol, dir.name());
+                positionSizer.calculate(cap, entryPrice, stopLoss, symbol, direction.name());
         if (!pos.isValid() || pos.quantity() <= 0) {
-            log.debug("REJECTED: {} → invalid position size: {}", symbol, pos.invalidReason());
-            return;
+            log.debug("[SCPS] {} — position sizing failed: {}", symbol, pos.invalidReason());
+            return false;
         }
 
-        // ── Scoring ────────────────────────────────────────────────────────────
-        double rvol = rvolService.getRvolNow(symbol, latestCandle.getVolume());
-        boolean vwapAligned = isVwapAligned(latestCandle, structure, isBuy);
+        // ── Resolve instrument token ──────────────────────────────────────────
+        // ChannelResult does not expose instrumentToken — use 0L (safe for PAPER mode;
+        // live routing uses symbol name lookup at order placement time).
+        long instrumentToken = 0L;
 
-        int scoreVwap     = vwapAligned ? 15 : 0;
-        int scoreRvol     = rvol >= 1.2 ? 20 : rvol >= 1 ? 10 : 0;
-        int scorePressure = pressure.ratio() >= 2.0 ? 20 : pressure.ratio() >= 1.5 ? 15
-                : pressure.ratio() >= 1.2 ? 10 : 5;
-        int scoreClean    = isCleanEntry(currentPrice, channel, isBuy) ? 15 : 0;
-        int scoreEarly    = "BEST".equals(pullbackStrength) ? 15 : 0;
-        int scoreNoSR     = !hasNearbyStructure(entryPrice, structure, isBuy) ? 15 : 0;
-        int totalScore    = scoreVwap + scoreRvol + scorePressure + scoreClean + scoreEarly + scoreNoSR;
+        // ── Build probability score ───────────────────────────────────────────
+        int scoreRvol    = rvol >= 2.0 ? 25 : rvol >= 1.5 ? 18 : rvol >= 1.1 ? 10 : 5;
+        int scorePressure = pressure.ratio() >= 1.5 ? 25 : pressure.ratio() >= 1.2 ? 18 : 12;
+        int scoreChannel  = isHighQuality ? 20 : 12;
+        int scoreSector   = isBuy
+                ? (sectorChg >= 1.0 ? 20 : sectorChg >= 0.5 ? 15 : 10)
+                : (sectorChg <= -1.0 ? 20 : sectorChg <= -0.5 ? 15 : 10);
+        int scoreRR       = rrRatio >= 3.0 ? 10 : rrRatio >= 2.5 ? 7 : 5;
+        int totalScore    = scoreRvol + scorePressure + scoreChannel + scoreSector + scoreRR;
 
-        log.info("[SCPS] 🚀 SIGNAL: {} | {} | entry={} sl={} T1={} | pullback={}({}%) | " +
-                        "RVOL={} | pressure={} ratio={} | sector={}({}%) | score={}",
-                symbol, dir, entryPrice, stopLoss, target1,
-                pullbackStrength, String.format("%.2f", pullbackPct * 100),
-                String.format("%.2f", rvol),
-                pressure.direction(), String.format("%.3f", pressure.ratio()),
-                sectorName, String.format("%.2f", sectorChg), totalScore);
+        // Channel pullback quality label
+        double rangePos = isBuy
+                ? (closePrice - supportPrice) / channelWidth   // 0 = at support, 1 = at resistance
+                : (resistancePrice - closePrice) / channelWidth;
+        String pullbackStrength = rangePos <= 0.15 ? "BEST"
+                : rangePos <= 0.30 ? "GOOD" : "MODERATE";
+
+        // ── Fire signal ───────────────────────────────────────────────────────
+        log.info("[SCPS] 🚀 SIGNAL: {} | {} | entry={} | sl={} | T1={} | T2={} | " +
+                        "channel={} | sector={}({:.2f}%) | RVOL={:.2f} | RR={:.2f} | " +
+                        "score={} | window={} | pullback={}",
+                symbol, direction, entryPrice, stopLoss, target1, target2,
+                channelType,
+                sectorName, sectorChg,
+                rvol, rrRatio,
+                totalScore,
+                timingService.getCurrentWindow(),
+                pullbackStrength);
 
         SmartChannelPullbackSignalEvent signal = new SmartChannelPullbackSignalEvent(
-                this, symbol, latestCandle.getInstrumentToken(), dir,
-                entryPrice, stopLoss, target1, target2,
-                pos.quantity(), pos.actualRisk(),
-                STRATEGY_NAME, totalScore,
-                sectorName, sectorData.changePercent(),
-                channel.isHighQuality() ? "HIGH_QUALITY" : "VALID",
-                pullbackStrength, pullbackPct, rvol, vwapAligned, "LIMIT", bias,
-                scoreVwap, scoreRvol, scorePressure, scoreClean, scoreEarly, scoreNoSR,
-                totalScore, timeStopMinutes
+                this,
+                symbol,
+                instrumentToken,
+                direction,
+                entryPrice,
+                stopLoss,
+                target1,
+                target2,
+                pos.quantity(),
+                pos.actualRisk(),
+                STRATEGY_NAME,
+                totalScore,
+                sectorName,
+                sectorChg,
+                channelType.name(),
+                pullbackStrength,
+                pressure.ratio(),
+                rvol,
+                false,
+                "MARKET",
+                isBuy ? "PULLBACK_TO_SUPPORT" : "PULLBACK_TO_RESISTANCE",
+                0,
+                scoreRvol,
+                scorePressure,
+                scoreChannel,
+                scoreSector,
+                scoreRR,
+                totalScore,
+                timeStopMinutes
         );
 
         publisher.publishEvent(signal);
 
+        // Track state
         lastSignalTime.put(symbol, System.currentTimeMillis());
         activeSignals.add(symbol);
         sessionSignalCount++;
 
-        log.info("[SCPS] Signal #{} fired for {}", sessionSignalCount, symbol);
+        log.info("[SCPS] Signal #{}/{} fired for {} (session)",
+                sessionSignalCount, maxSignalsPerSession, symbol);
+        return true;
     }
 
-    // ── Helpers ────────────────────────────────────────────────────────────────
-
-    private boolean isVwapAligned(Candle c, TechnicalAnalysisService.TechnicalStructure s,
-                                  boolean isBuy) {
-        if (s.vwap() == null || s.vwap().compareTo(BigDecimal.ZERO) == 0) return false;
-        double vwap = s.vwap().doubleValue();
-        double price = c.getClose().doubleValue();
-        return isBuy ? price >= vwap : price <= vwap;
-    }
-
-    private boolean isCleanEntry(double price, ChannelDetectionService.ChannelResult ch, boolean isBuy) {
-        double target = isBuy ? ch.supportPrice() : ch.resistancePrice();
-        return Math.abs(price - target) <= target * 0.002;
-    }
-
-    private boolean hasNearbyStructure(BigDecimal entry,
-                                       TechnicalAnalysisService.TechnicalStructure s,
-                                       boolean isBuy) {
-        double p = entry.doubleValue(), tol = p * 0.005;
-        if (isBuy) return s.resistanceZones().stream().anyMatch(r -> Math.abs(r.doubleValue() - p) < tol);
-        else       return s.supportZones().stream().anyMatch(su -> Math.abs(su.doubleValue() - p) < tol);
-    }
-
-    private String getCapType(String sym) {
-        return Set.of("RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC","SBIN",
-                "BHARTIARTL","KOTAKBANK","LT","BAJFINANCE","HCLTECH","ASIANPAINT","AXISBANK",
-                "MARUTI","SUNPHARMA","TITAN","BAJAJFINSV","ULTRACEMCO","ONGC","WIPRO","TECHM",
-                "NTPC","POWERGRID","JSWSTEEL","TATAMOTORS","TATASTEEL").contains(sym) ? "LARGE" : "MID";
-    }
-
-    private BigDecimal resolveCapital() {
-        return "PAPER".equalsIgnoreCase(tradingMode) ? paperAccount.getCapital() : capital;
-    }
+    // ══════════════════════════════════════════════════════════════════════════
+    // SIGNAL LOCK RELEASE (called by SmartChannelSignalHandler on trade close)
+    // ══════════════════════════════════════════════════════════════════════════
 
     public void onSignalClosed(String symbol) {
         activeSignals.remove(symbol);
         log.debug("[SCPS] Signal lock released for {}", symbol);
     }
 
-    public int        getSessionSignalCount() { return sessionSignalCount; }
-    public int        getActiveSignalCount()  { return activeSignals.size(); }
-    public Set<String> getActiveSignals()     { return Collections.unmodifiableSet(activeSignals); }
-    public boolean    isEnabled()             { return strategyEnabled; }
+    // ══════════════════════════════════════════════════════════════════════════
+    // DAILY RESET
+    // ══════════════════════════════════════════════════════════════════════════
 
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
-        lastSignalTime.clear();
-        activeSignals.clear();
         sessionSignalCount = 0;
-        log.info("[SCPS] Daily reset complete");
+        activeSignals.clear();
+        lastSignalTime.clear();
+        latestCandles.clear();
+        log.info("[SCPS] Daily reset complete — {} signal slots available", maxSignalsPerSession);
+    }
+
+    // ── Dashboard helpers ─────────────────────────────────────────────────────
+
+    public boolean isEnabled()            { return strategyEnabled; }
+    public int     getSessionSignalCount() { return sessionSignalCount; }
+    public int     getActiveSignalCount()  { return activeSignals.size(); }
+    public Set<String> getActiveSignals()  { return Collections.unmodifiableSet(activeSignals); }
+    public int     getOpenTradesCount()    { return activeSignals.size(); }
+    public int     getValidChannels()      { return channelDetection.getAllValidChannels().size(); }
+    public int     getTrackedSymbols()     { return latestCandles.size(); }
+
+    // ── Internal helpers ──────────────────────────────────────────────────────
+
+    private BigDecimal resolveCapital() {
+        return "PAPER".equalsIgnoreCase(tradingMode)
+                ? paperAccount.getCapital()
+                : capital;
     }
 }

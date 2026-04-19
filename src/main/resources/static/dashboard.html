@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>Trading Dashboard v8.0</title>
+    <title>Trading Dashboard v9.0</title>
     <style>
         :root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;
           --green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;
@@ -42,12 +42,14 @@
         @media(max-width:480px){.g4,.g3,.g2{grid-template-columns:1fr;}}
         .card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:11px;}
         .card.highlight{border-color:var(--blue);}
+        .card.highlight-green{border-color:var(--green);}
+        .card.highlight-gold{border-color:var(--gold);}
         .ct{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
           color:var(--muted);margin-bottom:7px;}
         .stat{font-size:21px;font-weight:700;}
         .sg{color:var(--green)!important;}.sr{color:var(--red)!important;}
         .sb{color:var(--blue)!important;}.sy{color:var(--yellow)!important;}
-        .so{color:var(--orange)!important;}
+        .so{color:var(--orange)!important;}.sgold{color:var(--gold)!important;}
         .sub{font-size:11px;color:var(--muted);margin-top:2px;}
         .ir{display:flex;justify-content:space-between;padding:4px 0;
           border-bottom:1px solid #1c2129;font-size:12px;}
@@ -98,17 +100,45 @@
         .metric-box{flex:1;background:#21262d;border-radius:6px;padding:6px 9px;text-align:center;}
         .metric-box .mv{font-size:16px;font-weight:700;}
         .metric-box .ml{font-size:10px;color:var(--muted);margin-top:2px;}
+        /* ORB specific */
+        .orb-setup-card{background:#0d1117;border:1px solid var(--border);border-radius:8px;
+          padding:10px;margin-bottom:7px;transition:border-color .2s;}
+        .orb-setup-card.selected{border-color:var(--gold);background:#1a1600;}
+        .orb-setup-card.triggered{border-color:var(--green);background:#0d1f0d;}
+        .orb-setup-card.cancelled{border-color:var(--red);opacity:.6;}
+        .orb-score-bar{height:6px;border-radius:3px;background:#21262d;overflow:hidden;margin-top:5px;}
+        .orb-score-fill{height:100%;border-radius:3px;transition:width .5s;}
+        .orb-stat-row{display:flex;gap:7px;margin-bottom:9px;flex-wrap:wrap;}
+        .orb-stat{background:#21262d;border-radius:8px;padding:8px 12px;flex:1;min-width:100px;}
+        .orb-stat .ov{font-size:20px;font-weight:700;}
+        .orb-stat .ol{font-size:10px;color:var(--muted);margin-top:2px;}
+        .timeline{display:flex;align-items:center;gap:0;margin:10px 0;overflow-x:auto;padding:4px 0;}
+        .tl-step{display:flex;flex-direction:column;align-items:center;min-width:80px;}
+        .tl-dot{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;
+          justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;}
+        .tl-done{background:#1a4220;color:var(--green);border:2px solid var(--green);}
+        .tl-active{background:#0d2544;color:var(--blue);border:2px solid var(--blue);
+          box-shadow:0 0 8px rgba(88,166,255,.4);}
+        .tl-wait{background:#21262d;color:var(--muted);border:2px solid var(--border);}
+        .tl-fail{background:#3d1a1a;color:var(--red);border:2px solid var(--red);}
+        .tl-label{font-size:9px;color:var(--muted);margin-top:3px;text-align:center;line-height:1.2;}
+        .tl-line{height:2px;flex:1;min-width:20px;}
+        .tl-line-done{background:var(--green);}
+        .tl-line-wait{background:var(--border);}
+        .tl-line-active{background:linear-gradient(90deg,var(--green),var(--blue));}
+        .gap-up{color:var(--green);font-weight:700;}
+        .gap-dn{color:var(--red);font-weight:700;}
     </style>
 </head>
 <body>
-<div id="loading">⚡ Loading Trading Dashboard v8.0…</div>
+<div id="loading">⚡ Loading Trading Dashboard v9.0…</div>
 
 <div id="stale-banner" class="stale-banner">
     ⚠ DATA STALE — No tick received for &gt;10s. All new entries BLOCKED until WebSocket recovers.
 </div>
 
 <div class="header">
-    <h1>⚡ Trading Dashboard v8.0</h1>
+    <h1>⚡ Trading Dashboard v9.0</h1>
     <span id="h-mode"  class="badge badge-blue">PAPER</span>
     <span id="h-phase" class="pc pp2">PRE_OPEN</span>
     <span id="h-dir"   class="badge badge-yellow">SIDEWAYS</span>
@@ -117,14 +147,16 @@
     <span id="ws-lbl"  style="font-size:11px;color:var(--muted)">WS:OFF</span>
     <span id="h-lat"   style="font-size:11px"></span>
     <span id="h-scps"  class="badge badge-orange" style="display:none">SCPS:0</span>
+    <span id="h-orb"   class="badge badge-gold"   style="display:none">ORB:0</span>
     <span class="rtime" id="rtime">—</span>
     <button class="btn" onclick="load()">↻</button>
 </div>
 
 <div class="tabs">
     <div class="tab active" onclick="switchTab('overview',this)">Overview</div>
+    <div class="tab" onclick="switchTab('orb',this)">ORB 🎯</div>
     <div class="tab" onclick="switchTab('trades',this)">Trades</div>
-    <div class="tab" onclick="switchTab('strategy',this)">Strategy 🎯</div>
+    <div class="tab" onclick="switchTab('strategy',this)">Strategy</div>
     <div class="tab" onclick="switchTab('channels',this)">Channels 📡</div>
     <div class="tab" onclick="switchTab('scanner',this)">Scanner</div>
     <div class="tab" onclick="switchTab('sectors',this)">Sectors</div>
@@ -132,7 +164,9 @@
     <div class="tab" onclick="switchTab('validation',this)">Validation</div>
 </div>
 
-<!-- OVERVIEW -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- OVERVIEW                                                          -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
 <div id="tc-overview" class="tc active">
     <div class="g g4">
         <div class="card"><div class="ct">Daily P&L</div><div class="stat" id="dpnl">—</div><div class="sub" id="dpct">—</div></div>
@@ -183,7 +217,6 @@
         <div class="card">
             <div class="ct">⚡ Circuit Breaker</div>
             <div class="stat" id="cb-stat">OK</div>
-            <!-- FIX: cbActive=true → CB healthy → OK. cbActive=false → TRIPPED -->
             <div class="sub">Daily: <span id="cb-d">—</span></div>
             <div class="sub">Weekly: <span id="cb-w">—</span></div>
             <div class="sub">Monthly: <span id="cb-mo">—</span></div>
@@ -197,9 +230,130 @@
             <div id="sec-exp" class="sub" style="margin-top:4px;font-size:10px"></div>
         </div>
     </div>
+    <!-- ORB Quick Summary in Overview -->
+    <div class="g" style="grid-template-columns:1fr;padding-top:0">
+        <div class="card highlight-gold">
+            <div class="ct">📈 ORB Quick Status</div>
+            <div style="display:flex;gap:9px;flex-wrap:wrap;align-items:center;">
+                <div class="orb-stat" style="min-width:90px">
+                    <div class="ov sgold" id="ov-orb-selected">—</div>
+                    <div class="ol">Selected Today</div>
+                </div>
+                <div class="orb-stat" style="min-width:90px">
+                    <div class="ov sb" id="ov-orb-shortlist">—</div>
+                    <div class="ol">Shortlisted</div>
+                </div>
+                <div class="orb-stat" style="min-width:90px">
+                    <div class="ov sg" id="ov-orb-valid">—</div>
+                    <div class="ol">Valid at 9:30</div>
+                </div>
+                <div class="orb-stat" style="min-width:90px">
+                    <div class="ov" id="ov-orb-triggered">—</div>
+                    <div class="ol">Triggered</div>
+                </div>
+                <div style="flex:2;min-width:200px">
+                    <div style="font-size:11px;color:var(--muted);margin-bottom:5px">Selected Symbols</div>
+                    <div id="ov-orb-symbols" class="sub">—</div>
+                    <div id="ov-orb-status" class="sub" style="margin-top:3px">—</div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
-<!-- TRADES -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- ORB TAB                                                            -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<div id="tc-orb" class="tc">
+
+    <!-- Summary metrics row -->
+    <div class="g" style="grid-template-columns:repeat(5,1fr);padding-bottom:0">
+        <div class="card highlight-gold">
+            <div class="ct">📌 Selected</div>
+            <div class="stat sgold" id="orb-selected-cnt">0</div>
+            <div class="sub">Top-2 for today</div>
+        </div>
+        <div class="card">
+            <div class="ct">🔍 Shortlisted</div>
+            <div class="stat sb" id="orb-shortlist-cnt">0</div>
+            <div class="sub">Gap ≥ 1% + Vol OK</div>
+        </div>
+        <div class="card">
+            <div class="ct">✅ Valid at 9:30</div>
+            <div class="stat sg" id="orb-valid-cnt">0</div>
+            <div class="sub">RVOL ≥ 1.5 passed</div>
+        </div>
+        <div class="card">
+            <div class="ct">⚡ Triggered</div>
+            <div class="stat" id="orb-triggered-cnt">0</div>
+            <div class="sub">Breakouts fired</div>
+        </div>
+        <div class="card">
+            <div class="ct">🔒 ORB State</div>
+            <div class="stat" id="orb-locked-stat">—</div>
+            <div class="sub" id="orb-prevclose-stat">—</div>
+        </div>
+    </div>
+
+    <!-- Pipeline timeline -->
+    <div class="card" style="margin:0 9px">
+        <div class="ct">⏱ Today's Pipeline</div>
+        <div class="timeline" id="orb-timeline">
+            <!-- populated by JS -->
+        </div>
+    </div>
+
+    <!-- Selected top-2 cards -->
+    <div class="g g2" style="padding-top:0">
+        <div class="card highlight-gold">
+            <div class="ct">🥇 Selected Setups (Top-2)</div>
+            <div id="orb-selected-body"><div class="sub">No stocks selected yet — waiting for 9:30 lock</div></div>
+        </div>
+        <div class="card">
+            <div class="ct">💹 ORB P&L Today</div>
+            <div class="ir"><span class="il">Realised P&L</span><span class="iv" id="orb-pnl">—</span></div>
+            <div class="ir"><span class="il">Open Trades</span><span class="iv" id="orb-open-trades">—</span></div>
+            <div class="ir"><span class="il">Target RR</span><span class="iv" id="orb-target-rr">1.5×</span></div>
+            <div class="ir"><span class="il">Time Stop</span><span class="iv">120 min from entry</span></div>
+            <div class="ir"><span class="il">Auto-Cancel</span><span class="iv">11:30 AM if no breakout</span></div>
+            <div class="ir"><span class="il">EOD Close</span><span class="iv">15:00 IST</span></div>
+            <div style="margin-top:8px">
+                <div class="ct">Active ORB Trades</div>
+                <div id="orb-active-trades"><div class="sub">No active ORB trades</div></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- All scored setups table -->
+    <div class="card" style="margin:0 9px 9px">
+        <div class="ct">📊 All Scored Setups at 9:30 (<span id="orb-all-cnt">0</span>)</div>
+        <div id="orb-all-empty" class="sub" style="padding:5px 0">No data yet — available after 9:30 AM lock</div>
+        <table id="orb-all-tbl" style="display:none">
+            <thead>
+            <tr>
+                <th></th>
+                <th>Symbol</th>
+                <th>Gap%</th>
+                <th>ORB High</th>
+                <th>ORB Low</th>
+                <th>Range%</th>
+                <th>RVOL</th>
+                <th>Score</th>
+                <th>Clean</th>
+                <th>Sector</th>
+                <th>Aligned</th>
+                <th>Near S/R</th>
+                <th>Status</th>
+            </tr>
+            </thead>
+            <tbody id="orb-all-body"></tbody>
+        </table>
+    </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- TRADES                                                             -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
 <div id="tc-trades" class="tc">
     <div class="g g2">
         <div class="card">
@@ -221,7 +375,9 @@
     </div>
 </div>
 
-<!-- STRATEGY TAB — SmartChannelPullback -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- STRATEGY (SCPS)                                                    -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
 <div id="tc-strategy" class="tc">
     <div class="g g4">
         <div class="card highlight">
@@ -245,8 +401,6 @@
             <div class="sub" id="scps-mode">—</div>
         </div>
     </div>
-
-    <!-- Strategy Metrics -->
     <div class="g g3">
         <div class="card">
             <div class="ct">📊 Today's Performance</div>
@@ -268,8 +422,6 @@
             <div id="scps-log"><div class="sub">No signals yet today</div></div>
         </div>
     </div>
-
-    <!-- All strategy P&L breakdown -->
     <div class="g g2">
         <div class="card">
             <div class="ct">💹 P&L by Strategy</div>
@@ -282,7 +434,9 @@
     </div>
 </div>
 
-<!-- CHANNELS TAB -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- CHANNELS                                                           -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
 <div id="tc-channels" class="tc">
     <div class="g g2">
         <div class="card">
@@ -307,7 +461,7 @@
             <div class="ir"><span class="il">Min Candles</span><span class="iv">8</span></div>
             <div class="ir"><span class="il">Touch Tolerance</span><span class="iv">0.3%</span></div>
             <div class="ir"><span class="il">Valid Touches</span><span class="iv">≥2 (VALID) / ≥3 (HQ)</span></div>
-            <div class="ir"><span class="il">Pullback Zone</span><span class="iv">30% of width</span></div>
+            <div class="ir"><span class="il">Pullback Zone</span><span class="iv">50% of width</span></div>
             <div class="ir"><span class="il">Swing Detection</span><span class="iv">2-candle lookback</span></div>
             <div class="ir"><span class="il">Max Channel Age</span><span class="iv">15 min (3 candles)</span></div>
         </div>
@@ -322,7 +476,9 @@
     </div>
 </div>
 
-<!-- SCANNER -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- SCANNER                                                            -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
 <div id="tc-scanner" class="tc">
     <div class="g g2">
         <div class="card">
@@ -346,7 +502,9 @@
     </div>
 </div>
 
-<!-- SECTORS -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- SECTORS                                                            -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
 <div id="tc-sectors" class="tc">
     <div class="card" style="margin:9px">
         <div class="ct">🏭 Sector Strength (sorted by change%)</div>
@@ -356,7 +514,9 @@
     </div>
 </div>
 
-<!-- RISK -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- RISK                                                               -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
 <div id="tc-risk" class="tc">
     <div class="g g3">
         <div class="card">
@@ -376,7 +536,6 @@
             <div class="ir"><span class="il">Daily %</span><span class="iv" id="r-dpct">—</span></div>
             <div class="ir"><span class="il">Weekly P&L</span><span class="iv" id="r-wk">—</span></div>
             <div class="ir"><span class="il">Monthly P&L</span><span class="iv" id="r-mo">—</span></div>
-            <!-- FIX: cbActive=true → ✅ OK (healthy). cbActive=false → ⚠ TRIPPED (blocked) -->
             <div class="ir"><span class="il">Circuit Breaker</span><span class="iv" id="r-cb">—</span></div>
         </div>
         <div class="card">
@@ -391,7 +550,9 @@
     </div>
 </div>
 
-<!-- VALIDATION -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+<!-- VALIDATION                                                         -->
+<!-- ═══════════════════════════════════════════════════════════════════ -->
 <div id="tc-validation" class="tc">
     <div style="padding:9px">
         <div style="display:flex;gap:7px;align-items:center;margin-bottom:9px;flex-wrap:wrap">
@@ -400,7 +561,8 @@
             <select id="vstr" style="background:var(--card);border:1px solid var(--border);
         color:var(--text);padding:5px 9px;border-radius:6px;font-size:12px">
                 <option value="">All Strategies</option>
-                <option value="SMART_CHANNEL_PULLBACK_V2">Smart Channel Pullback</option>
+                <option value="SMART_CHANNEL_PULLBACK_V3">Smart Channel Pullback</option>
+                <option value="ORB_BREAKOUT_V1">ORB Breakout</option>
             </select>
             <button class="btn" onclick="loadVal()">Filter</button>
             <span class="sub">Tracked: <span id="val-cnt">—</span></span>
@@ -418,12 +580,12 @@
     let D = {};
 
     function switchTab(name, el) {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.tc').forEach(t => t.classList.remove('active'));
-      el.classList.add('active');
-      const e = document.getElementById('tc-' + name);
-      if (e) e.classList.add('active');
-      if (name === 'validation') loadVal();
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tc').forEach(t => t.classList.remove('active'));
+        el.classList.add('active');
+        const e = document.getElementById('tc-' + name);
+        if (e) e.classList.add('active');
+        if (name === 'validation') loadVal();
     }
 
     const q   = id => document.getElementById(id);
@@ -431,455 +593,606 @@
     const html= (id, h) => { const e = q(id); if (e) e.innerHTML = h; };
     const fp  = v => { const n = parseFloat(v || 0); return (n >= 0 ? '+' : '') + '₹' + n.toFixed(2); };
     const pc  = v => { const n = parseFloat(v || 0); return n > 0 ? 'pp2c' : n < 0 ? 'np' : 'zp'; };
+    const f2  = v => parseFloat(v || 0).toFixed(2);
     const dpill = d => d === 'LONG'
-      ? '<span class="pill pg">LONG</span>'
-      : '<span class="pill pr">SHORT</span>';
+        ? '<span class="pill pg">LONG</span>'
+        : '<span class="pill pr">SHORT</span>';
     const phpill = p => {
-      const m = { 'Phase-1': 'py', 'Phase-3/2': 'pb', 'Phase-4': 'pp' };
-      return `<span class="pill ${m[p] || 'pm'}">${p || 'Phase-1'}</span>`;
+        const m = { 'Phase-1': 'py', 'Phase-3/2': 'pb', 'Phase-4': 'pp' };
+        return `<span class="pill ${m[p] || 'pm'}">${p || 'Phase-1'}</span>`;
     };
     const mclass = m => ({
-      TREND_DAY: 'badge-green', NON_TREND_DAY: 'badge-red',
-      NEUTRAL_DAY: 'badge-yellow', NORMAL_DAY: 'badge-blue',
-      NORMAL_VARIATION: 'badge-purple', DOUBLE_DISTRIBUTION: 'badge-gold'
+        TREND_DAY: 'badge-green', NON_TREND_DAY: 'badge-red',
+        NEUTRAL_DAY: 'badge-yellow', NORMAL_DAY: 'badge-blue',
+        NORMAL_VARIATION: 'badge-purple', DOUBLE_DISTRIBUTION: 'badge-gold'
     }[m] || 'badge-blue');
 
+    // Score → colour
+    const scoreColor = s => s >= 70 ? 'var(--green)' : s >= 50 ? 'var(--gold)' : s >= 30 ? 'var(--yellow)' : 'var(--red)';
+    const scorePill  = s => s >= 70 ? 'pg' : s >= 50 ? 'po' : s >= 30 ? 'py' : 'pr';
+
     async function load() {
-      try {
-        const r = await fetch(API + '/snapshot');
-        if (r.status === 401) { window.location.href = '/login'; return; }
-        D = await r.json();
-        render();
-        q('loading').style.display = 'none';
-        set('rtime', new Date().toLocaleTimeString('en-IN'));
-      } catch (e) { console.error('[DASH]', e); }
+        try {
+            const r = await fetch(API + '/snapshot');
+            if (r.status === 401) { window.location.href = '/login'; return; }
+            D = await r.json();
+            render();
+            q('loading').style.display = 'none';
+            set('rtime', new Date().toLocaleTimeString('en-IN'));
+        } catch (e) { console.error('[DASH]', e); }
     }
 
     function render() {
-      renderHdr(); renderOv(); renderTrades(); renderStrategy();
-      renderChannels(); renderScanner(); renderSectors(); renderRisk();
+        renderHdr(); renderOv(); renderOrb(); renderTrades(); renderStrategy();
+        renderChannels(); renderScanner(); renderSectors(); renderRisk();
     }
 
-    // ── HEADER ─────────────────────────────────────────────────────────────────
+    // ── HEADER ──────────────────────────────────────────────────────────────────
     function renderHdr() {
-      const mode = D.tradingMode || 'PAPER', phase = D.marketPhase || {},
-            mkt = D.market || {}, mm = D.marketMode || {},
-            lat = D.latency || {}, sys = D.system || {},
-            scps = (D.strategyStatus || {}).smartChannelPullback || {};
+        const mode = D.tradingMode || 'PAPER', phase = D.marketPhase || {},
+              mkt = D.market || {}, mm = D.marketMode || {},
+              lat = D.latency || {}, sys = D.system || {},
+              scps = (D.strategyStatus || {}).smartChannelPullback || {},
+              orb  = D.orbData || {};
 
-      set('h-mode', mode);
-      q('h-mode').className = 'badge ' + (mode === 'LIVE' ? 'badge-red' : 'badge-blue');
+        set('h-mode', mode);
+        q('h-mode').className = 'badge ' + (mode === 'LIVE' ? 'badge-red' : 'badge-blue');
 
-      const ph = phase.phase || 'PRE_OPEN';
-      set('h-phase', ph);
-      q('h-phase').className = 'pc ' + ({ EARLY: 'pe', CONFIRMED: 'pco' }[ph] || 'pp2');
+        const ph = phase.phase || 'PRE_OPEN';
+        set('h-phase', ph);
+        q('h-phase').className = 'pc ' + ({ EARLY: 'pe', CONFIRMED: 'pco' }[ph] || 'pp2');
 
-      const dir = mkt.direction || 'SIDEWAYS';
-      set('h-dir', dir);
-      q('h-dir').className = 'badge ' + (dir === 'BULLISH' ? 'badge-green' : dir === 'BEARISH' ? 'badge-red' : 'badge-yellow');
+        const dir = mkt.direction || 'SIDEWAYS';
+        set('h-dir', dir);
+        q('h-dir').className = 'badge ' + (dir === 'BULLISH' ? 'badge-green' : dir === 'BEARISH' ? 'badge-red' : 'badge-yellow');
 
-      set('h-mm', mm.mode || '—');
-      q('h-mm').className = 'badge ' + mclass(mm.mode);
+        set('h-mm', mm.mode || '—');
+        q('h-mm').className = 'badge ' + mclass(mm.mode);
 
-      const ws = sys.websocketConnected;
-      q('ws-dot').className = 'ws-dot ' + (ws ? 'ws-on' : 'ws-off');
-      set('ws-lbl', 'WS:' + (ws ? 'LIVE' : 'OFF'));
+        const ws = sys.websocketConnected;
+        q('ws-dot').className = 'ws-dot ' + (ws ? 'ws-on' : 'ws-off');
+        set('ws-lbl', 'WS:' + (ws ? 'LIVE' : 'OFF'));
 
-      const le = q('h-lat');
-      if (le) {
-        if (lat.isStale) { le.textContent = '⚠STALE'; le.style.color = 'var(--red)'; }
-        else { le.textContent = lat.lagMs > 0 ? lat.lagMs + 'ms' : 'OK'; le.style.color = lat.lagMs > 5000 ? 'var(--yellow)' : 'var(--green)'; }
-      }
+        const le = q('h-lat');
+        if (le) {
+            if (lat.isStale) { le.textContent = '⚠STALE'; le.style.color = 'var(--red)'; }
+            else { le.textContent = lat.lagMs > 0 ? lat.lagMs + 'ms' : 'OK'; le.style.color = lat.lagMs > 5000 ? 'var(--yellow)' : 'var(--green)'; }
+        }
+        q('stale-banner').style.display = lat.isStale ? 'block' : 'none';
 
-      q('stale-banner').style.display = lat.isStale ? 'block' : 'none';
+        // SCPS badge
+        const scpsCnt = scps.sessionSignalCount || 0;
+        const scpsEl = q('h-scps');
+        if (scpsEl) { scpsEl.textContent = 'SCPS:' + scpsCnt; scpsEl.style.display = scpsCnt > 0 ? 'inline-block' : 'none'; }
 
-      // SCPS badge in header
-      const cnt = scps.sessionSignalCount || 0;
-      const scpsEl = q('h-scps');
-      if (scpsEl) {
-        scpsEl.textContent = 'SCPS:' + cnt;
-        scpsEl.style.display = cnt > 0 ? 'inline-block' : 'none';
-      }
+        // ORB badge — shows selected count if > 0
+        const orbSel = orb.selectedCount || 0;
+        const orbEl = q('h-orb');
+        if (orbEl) {
+            orbEl.textContent = 'ORB:' + orbSel;
+            orbEl.style.display = orbSel > 0 ? 'inline-block' : 'none';
+        }
     }
 
     // ── OVERVIEW ────────────────────────────────────────────────────────────────
     function renderOv() {
-      const pnl = D.pnl || {}, phase = D.marketPhase || {}, mkt = D.market || {},
-            mm = D.marketMode || {}, bnf = D.bankNiftyMode || {},
-            lat = D.latency || {}, dir = D.marketDirection || {},
-            risk = D.riskSlots || {};
+        const pnl = D.pnl || {}, phase = D.marketPhase || {}, mkt = D.market || {},
+              mm = D.marketMode || {}, bnf = D.bankNiftyMode || {},
+              lat = D.latency || {}, dir = D.marketDirection || {},
+              risk = D.riskSlots || {}, orb = D.orbData || {};
 
-      const dp = parseFloat(pnl.dailyPnl || 0);
-      const de = q('dpnl');
-      if (de) { de.textContent = fp(dp); de.className = 'stat ' + pc(dp); }
-      set('dpct', (dp >= 0 ? '+' : '') + parseFloat(pnl.dailyPct || 0).toFixed(2) + '%');
-      set('trd', (pnl.tradesToday || 0) + ' / ' + (pnl.maxTradesPerDay || 10));
+        const dp = parseFloat(pnl.dailyPnl || 0);
+        const de = q('dpnl');
+        if (de) { de.textContent = fp(dp); de.className = 'stat ' + pc(dp); }
+        set('dpct', (dp >= 0 ? '+' : '') + f2(pnl.dailyPct) + '%');
+        set('trd', (pnl.tradesToday || 0) + ' / ' + (pnl.maxTradesPerDay || 10));
 
-      // ── CB FIX: cbActive=true → HEALTHY(OK). cbActive=false → TRIPPED ──────────
-      const cbOk = pnl.cbActive === true;
-      const csub = q('cb-sub');
-      if (csub) {
-        csub.textContent = cbOk ? 'Circuit breaker OK' : '⚠ CB TRIPPED — ' + (pnl.cbReason || '');
-        csub.style.color = cbOk ? 'var(--muted)' : 'var(--red)';
-      }
+        const cbOk = pnl.cbActive === true;
+        const csub = q('cb-sub');
+        if (csub) { csub.textContent = cbOk ? 'Circuit breaker OK' : '⚠ CB TRIPPED — ' + (pnl.cbReason || ''); csub.style.color = cbOk ? 'var(--muted)' : 'var(--red)'; }
 
-      const vx = parseFloat(mkt.vix || 0), ve = q('vix');
-      if (ve) { ve.textContent = vx.toFixed(2); ve.className = 'stat ' + (vx > 28 ? 'sr' : vx > 20 ? 'sy' : 'sg'); }
-      set('vreg', mkt.vixRegime || '—');
+        const vx = parseFloat(mkt.vix || 0), ve = q('vix');
+        if (ve) { ve.textContent = vx.toFixed(2); ve.className = 'stat ' + (vx > 28 ? 'sr' : vx > 20 ? 'sy' : 'sg'); }
+        set('vreg', mkt.vixRegime || '—');
 
-      const ls = q('latst');
-      if (ls) { ls.textContent = lat.isStale ? 'STALE' : (lat.lagMs > 0 ? lat.lagMs + 'ms' : 'OK'); ls.className = 'stat ' + (lat.isStale ? 'sr' : lat.lagMs > 5000 ? 'sy' : 'sg'); }
-      set('latsub', lat.status || '—');
+        const ls = q('latst');
+        if (ls) { ls.textContent = lat.isStale ? 'STALE' : (lat.lagMs > 0 ? lat.lagMs + 'ms' : 'OK'); ls.className = 'stat ' + (lat.isStale ? 'sr' : lat.lagMs > 5000 ? 'sy' : 'sg'); }
+        set('latsub', lat.status || '—');
 
-      const ph = phase.phase || 'PRE_OPEN', phEl = q('phase-big');
-      if (phEl) { phEl.textContent = ph; phEl.className = 'pc ' + ({ EARLY: 'pe', CONFIRMED: 'pco' }[ph] || 'pp2'); }
-      set('phase-desc', phase.description || '—');
-      const op = q('orb-pill');
-      if (op) { op.textContent = 'ORB:' + (phase.isOrbAllowed ? 'ALLOWED' : 'BLOCKED'); op.className = 'pill ' + (phase.isOrbAllowed ? 'pg' : 'pr'); }
-      const thr = phase.isEarlyPhase ? 58 : (mm.minProbability || 60);
-      const tp = q('thr-pill');
-      if (tp) { tp.textContent = 'Thr:' + thr; tp.className = 'pill ' + (phase.isEarlyPhase ? 'po' : 'pb'); }
-      const prog = Math.max(0, Math.min(100, (new Date().getHours() * 60 + new Date().getMinutes() - 9 * 60 - 15) / (6 * 60) * 100));
-      const pp = q('phase-prog');
-      if (pp) { pp.style.width = prog + '%'; pp.style.background = ph === 'EARLY' ? 'var(--gold)' : ph === 'CONFIRMED' ? 'var(--blue)' : 'var(--muted)'; }
+        const ph = phase.phase || 'PRE_OPEN', phEl = q('phase-big');
+        if (phEl) { phEl.textContent = ph; phEl.className = 'pc ' + ({ EARLY: 'pe', CONFIRMED: 'pco' }[ph] || 'pp2'); }
+        set('phase-desc', phase.description || '—');
+        const op = q('orb-pill');
+        if (op) { op.textContent = 'ORB:' + (phase.isOrbAllowed ? 'ALLOWED' : 'BLOCKED'); op.className = 'pill ' + (phase.isOrbAllowed ? 'pg' : 'pr'); }
+        const thr = phase.isEarlyPhase ? 58 : (mm.minProbability || 60);
+        const tp = q('thr-pill');
+        if (tp) { tp.textContent = 'Thr:' + thr; tp.className = 'pill ' + (phase.isEarlyPhase ? 'po' : 'pb'); }
+        const prog = Math.max(0, Math.min(100, (new Date().getHours() * 60 + new Date().getMinutes() - 9 * 60 - 15) / (6 * 60) * 100));
+        const pp = q('phase-prog');
+        if (pp) { pp.style.width = prog + '%'; pp.style.background = ph === 'EARLY' ? 'var(--gold)' : ph === 'CONFIRMED' ? 'var(--blue)' : 'var(--muted)'; }
 
-      const me = q('mode-big');
-      if (me) { me.textContent = mm.mode || '—'; me.className = 'badge ' + mclass(mm.mode); }
-      set('mode-rat', mm.rationale || '—');
-      set('ib-hl', mm.ibHigh ? '₹' + mm.ibHigh.toFixed(0) + ' / ₹' + mm.ibLow.toFixed(0) : 'Waiting…');
-      set('ib-rv', (mm.ibRangePct || 0).toFixed(2) + '% / ' + (mm.niftyRvol || 1).toFixed(1) + '×');
-      set('act-st', mm.activeStrategies || '—');
-      set('minp', mm.minProbability || '—');
+        const me = q('mode-big');
+        if (me) { me.textContent = mm.mode || '—'; me.className = 'badge ' + mclass(mm.mode); }
+        set('mode-rat', mm.rationale || '—');
+        set('ib-hl', mm.ibHigh ? '₹' + mm.ibHigh.toFixed(0) + ' / ₹' + mm.ibLow.toFixed(0) : 'Waiting…');
+        set('ib-rv', f2(mm.ibRangePct) + '% / ' + f2(mm.niftyRvol) + '×');
+        set('act-st', mm.activeStrategies || '—');
+        set('minp', mm.minProbability || '—');
 
-      set('dir-lbl', mkt.label || '—');
-      q('dir-lbl').className = 'stat ' + (mkt.direction === 'BULLISH' ? 'sg' : mkt.direction === 'BEARISH' ? 'sr' : 'sy');
-      set('e20', dir.niftyEma20 || '—'); set('e50', dir.niftyEma50 || '—'); set('e200', dir.niftyEma200 || '—');
-      set('dfail', dir.failReason || '');
+        set('dir-lbl', mkt.label || '—');
+        q('dir-lbl').className = 'stat ' + (mkt.direction === 'BULLISH' ? 'sg' : mkt.direction === 'BEARISH' ? 'sr' : 'sy');
+        set('e20', dir.niftyEma20 || '—'); set('e50', dir.niftyEma50 || '—'); set('e200', dir.niftyEma200 || '—');
+        set('dfail', dir.failReason || '');
 
-      set('bnf-m', bnf.mode || '—');
-      set('bnf-ib', bnf.ibHigh ? bnf.ibHigh.toFixed(0) + '/' + bnf.ibLow.toFixed(0) : '—');
-      set('bnf-p', bnf.minProbability || '—'); set('bnf-s', bnf.activeStrategies || '—');
+        set('bnf-m', bnf.mode || '—');
+        set('bnf-ib', bnf.ibHigh ? bnf.ibHigh.toFixed(0) + '/' + bnf.ibLow.toFixed(0) : '—');
+        set('bnf-p', bnf.minProbability || '—'); set('bnf-s', bnf.activeStrategies || '—');
 
-      // CB card
-      const cs = q('cb-stat');
-      if (cs) { cs.textContent = cbOk ? 'OK' : 'BLOCKED'; cs.className = 'stat ' + (cbOk ? 'sg' : 'sr'); }
-      set('cb-d', parseFloat(pnl.dailyPct || 0).toFixed(2) + '%');
-      set('cb-w', fp(pnl.weeklyPnl || 0)); set('cb-mo', fp(pnl.monthlyPnl || 0));
-      const cr = q('cb-rsn');
-      if (cr) { cr.textContent = !cbOk ? (pnl.cbReason || 'CB tripped') : ''; cr.style.display = !cbOk ? 'block' : 'none'; }
+        const cs = q('cb-stat');
+        if (cs) { cs.textContent = cbOk ? 'OK' : 'BLOCKED'; cs.className = 'stat ' + (cbOk ? 'sg' : 'sr'); }
+        set('cb-d', f2(pnl.dailyPct) + '%');
+        set('cb-w', fp(pnl.weeklyPnl || 0)); set('cb-mo', fp(pnl.monthlyPnl || 0));
+        const cr = q('cb-rsn');
+        if (cr) { cr.textContent = !cbOk ? (pnl.cbReason || 'CB tripped') : ''; cr.style.display = !cbOk ? 'block' : 'none'; }
 
-      const p1 = risk.phase1Count || 0, mx = risk.maxPhase1 || 3;
-      html('slot-dots', Array.from({ length: mx }, (_, i) =>
-        `<div style="width:15px;height:15px;border-radius:50%;background:${i < p1 ? 'var(--blue)' : '#21262d'};border:1px solid var(--border)"></div>`).join(''));
-      set('p1c', p1 + ' / ' + mx);
-      set('any-be', risk.anyAtBreakeven ? '✅ Yes' : '—');
-      const se = risk.sectorExposure || {};
-      set('sec-exp', 'Sectors: ' + (Object.entries(se).filter(([, v]) => v > 0).map(([k, v]) => k + ':' + v).join(', ') || 'None'));
+        const p1 = risk.phase1Count || 0, mx = risk.maxPhase1 || 3;
+        html('slot-dots', Array.from({ length: mx }, (_, i) =>
+            `<div style="width:15px;height:15px;border-radius:50%;background:${i < p1 ? 'var(--blue)' : '#21262d'};border:1px solid var(--border)"></div>`).join(''));
+        set('p1c', p1 + ' / ' + mx);
+        set('any-be', risk.anyAtBreakeven ? '✅ Yes' : '—');
+        const se = risk.sectorExposure || {};
+        set('sec-exp', 'Sectors: ' + (Object.entries(se).filter(([, v]) => v > 0).map(([k, v]) => k + ':' + v).join(', ') || 'None'));
+
+        // ORB quick summary
+        const selSyms = orb.selectedSymbols || [];
+        const sel = orb.selectedCount || 0;
+        const e = q('ov-orb-selected'); if (e) { e.textContent = sel; e.className = 'ov ' + (sel > 0 ? 'sgold' : 'sr'); }
+        set('ov-orb-shortlist', orb.shortlistCount || 0);
+        set('ov-orb-valid', orb.validOrbCount || 0);
+        const trig = orb.triggeredCount || 0;
+        const te = q('ov-orb-triggered'); if (te) { te.textContent = trig; te.className = 'ov ' + (trig > 0 ? 'sg' : 'sb'); }
+        set('ov-orb-symbols', selSyms.length ? selSyms.join(' · ') : (orb.orbLocked ? 'None selected' : 'Waiting for 9:30 lock'));
+        const prevOk = orb.prevCloseAvailable;
+        set('ov-orb-status', prevOk === false ? '⚠ No prev-close data — first deployment, silent today' : (orb.orbLocked ? '🔒 ORB Locked' : 'Pre-lock phase'));
+    }
+
+    // ── ORB TAB ─────────────────────────────────────────────────────────────────
+    function renderOrb() {
+        const orb = D.orbData || {};
+        const setups = orb.setups || {};
+        const selSyms = orb.selectedSymbols || [];
+        const locked = orb.orbLocked === true;
+        const prevOk = orb.prevCloseAvailable !== false;
+
+        // Metrics
+        set('orb-selected-cnt', orb.selectedCount || 0);
+        set('orb-shortlist-cnt', orb.shortlistCount || 0);
+        set('orb-valid-cnt', orb.validOrbCount || 0);
+        set('orb-triggered-cnt', orb.triggeredCount || 0);
+
+        const ls = q('orb-locked-stat');
+        if (ls) { ls.textContent = locked ? '🔒 LOCKED' : '⏳ WAITING'; ls.className = 'stat ' + (locked ? 'sgold' : 'sy'); }
+        set('orb-prevclose-stat', !prevOk ? '⚠ No prev-close (first run)' : 'Prev-close data ✅');
+
+        // Pipeline timeline
+        const now = new Date();
+        const h = now.getHours(), m = now.getMinutes();
+        const mins = h * 60 + m;
+        const steps = [
+            { label: '9:00\nReset',      time: 9*60,      done: mins >= 9*60 },
+            { label: '9:15\nOpen',       time: 9*60+15,   done: mins >= 9*60+15 },
+            { label: '9:15:30\nShortlist',time: 9*60+15,  done: (orb.shortlistCount || 0) > 0 },
+            { label: '9:30\nLock+Score', time: 9*60+30,   done: locked },
+            { label: '9:30:05\nCache',   time: 9*60+30,   done: locked && (orb.selectedCount || 0) > 0 },
+            { label: '9:30-11:30\nMonitor',time: 9*60+30, done: (orb.triggeredCount || 0) > 0 },
+            { label: '11:30\nAutoCancel',time: 11*60+30,  done: mins >= 11*60+30 },
+            { label: '15:00\nEOD Close', time: 15*60,     done: mins >= 15*60 },
+        ];
+        const tlEl = q('orb-timeline');
+        if (tlEl) {
+            let html = '';
+            steps.forEach((s, i) => {
+                const active = !s.done && (i === 0 || steps[i-1].done);
+                const cls = s.done ? 'tl-done' : active ? 'tl-active' : 'tl-wait';
+                const icon = s.done ? '✓' : active ? '●' : (i+1);
+                html += `<div class="tl-step"><div class="tl-dot ${cls}">${icon}</div><div class="tl-label">${s.label.replace('\n','<br>')}</div></div>`;
+                if (i < steps.length - 1) {
+                    const lc = s.done ? 'tl-line-done' : active ? 'tl-line-active' : 'tl-line-wait';
+                    html += `<div class="tl-line ${lc}"></div>`;
+                }
+            });
+            tlEl.innerHTML = html;
+        }
+
+        // Selected setups
+        const pnlMap = (D.strategyStatus || {}).perStrategyPnl || {};
+        const orbPnl = pnlMap['ORB_BREAKOUT_V1'] || {};
+        set('orb-pnl', fp(orbPnl.pnl || 0));
+        q('orb-pnl').className = 'iv ' + pc(orbPnl.pnl || 0);
+
+        const orbTrades = (D.paperTrades || []).filter(t => t.strategyName === 'ORB_BREAKOUT_V1');
+        set('orb-open-trades', orbTrades.length);
+
+        // Active ORB trades
+        html('orb-active-trades', orbTrades.length
+            ? orbTrades.map(t => {
+                const pnlVal = parseFloat(t.unrealPnl || 0);
+                return `<div class="signal-card ${t.direction === 'SHORT' ? 'short' : ''}" style="margin-top:7px">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                    <b>${t.tradingSymbol}</b> ${dpill(t.direction)}
+                    <span class="${pc(pnlVal)}">${fp(pnlVal)}</span>
+                  </div>
+                  <div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px">
+                    <span class="pill pm">Entry:₹${f2(t.entryPrice)}</span>
+                    <span class="pill pr">SL:₹${f2(t.stopLoss)}</span>
+                    <span class="pill pg">T1:₹${f2(t.target)}</span>
+                    <span class="pill pb">${t.rMultiple || '—'}</span>
+                    ${phpill(t.phase)}
+                  </div>
+                </div>`;
+              }).join('')
+            : '<div class="sub">No active ORB trades</div>');
+
+        // Selected setups cards
+        if (!locked || selSyms.length === 0) {
+            html('orb-selected-body', `<div class="sub">${locked ? 'No stocks passed scoring today' : 'Waiting for 9:30 ORB lock…'}</div>`);
+        } else {
+            html('orb-selected-body', selSyms.map((sym, idx) => {
+                const s = setups[sym] || {};
+                const gapUp = (s.gapPct || 0) > 0;
+                const gapColor = gapUp ? 'gap-up' : 'gap-dn';
+                const gapArrow = gapUp ? '▲' : '▼';
+                const triggered = s.triggered === true;
+                const range = s.orbHigh && s.orbLow ? (s.orbHigh - s.orbLow) : 0;
+                const rangePct = s.orbLow > 0 ? (range / s.orbLow * 100) : 0;
+                const medal = idx === 0 ? '🥇' : '🥈';
+                return `<div class="orb-setup-card ${triggered ? 'triggered' : 'selected'}">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                    <div style="display:flex;align-items:center;gap:7px">
+                      <span style="font-size:16px">${medal}</span>
+                      <b style="font-size:14px">${sym}</b>
+                      <span class="pill ${gapUp ? 'pg' : 'pr'}">${gapArrow} GAP ${Math.abs((s.gapPct||0)*100).toFixed(2)}%</span>
+                      ${triggered ? '<span class="pill pg">✅ TRIGGERED</span>' : '<span class="pill py">⏳ WATCHING</span>'}
+                    </div>
+                    <span class="pill ${scorePill(s.score || 0)}" style="font-size:12px">${s.score || 0}/85</span>
+                  </div>
+                  <div style="display:flex;gap:9px;flex-wrap:wrap;margin-bottom:6px">
+                    <div style="flex:1;min-width:140px">
+                      <div class="ir"><span class="il">ORB High</span><span class="iv sg">₹${f2(s.orbHigh)}</span></div>
+                      <div class="ir"><span class="il">ORB Low</span><span class="iv sr">₹${f2(s.orbLow)}</span></div>
+                      <div class="ir"><span class="il">ORB Range</span><span class="iv">₹${f2(range)} (${rangePct.toFixed(2)}%)</span></div>
+                    </div>
+                    <div style="flex:1;min-width:140px">
+                      <div class="ir"><span class="il">RVOL</span><span class="iv ${(s.rvol||0) >= 2 ? 'sg' : (s.rvol||0) >= 1.5 ? 'sy' : 'sr'}">${f2(s.rvol)}×</span></div>
+                      <div class="ir"><span class="il">Clean Candles</span><span class="iv">${s.cleanCandleCount || 0}</span></div>
+                      <div class="ir"><span class="il">Sector</span><span class="iv">${s.sectorName || '—'} ${s.sectorAligned ? '✅' : ''}</span></div>
+                    </div>
+                  </div>
+                  <div style="font-size:10px;color:var(--muted);margin-bottom:3px">Score progress (${s.score||0}/85)</div>
+                  <div class="orb-score-bar">
+                    <div class="orb-score-fill" style="width:${Math.min(100,(s.score||0)/85*100)}%;background:${scoreColor(s.score||0)}"></div>
+                  </div>
+                </div>`;
+            }).join(''));
+        }
+
+        // All setups table
+        const allSetups = Object.values(setups);
+        set('orb-all-cnt', allSetups.length);
+        if (!allSetups.length) {
+            q('orb-all-empty').style.display = 'block';
+            q('orb-all-tbl').style.display = 'none';
+        } else {
+            q('orb-all-empty').style.display = 'none';
+            q('orb-all-tbl').style.display = 'table';
+            const sorted = [...allSetups].sort((a, b) => (b.score || 0) - (a.score || 0));
+            html('orb-all-body', sorted.map((s, idx) => {
+                const isSelected = selSyms.includes(s.symbol);
+                const gapUp = (s.gapPct || 0) > 0;
+                const rangePct = s.orbLow > 0 ? ((s.orbHigh - s.orbLow) / s.orbLow * 100) : 0;
+                const statusPill = s.triggered ? '<span class="pill pg">TRIGGERED</span>'
+                    : isSelected ? '<span class="pill po">SELECTED</span>'
+                    : !s.valid ? '<span class="pill pr">FILTERED</span>'
+                    : '<span class="pill pm">SCORED</span>';
+                const rankDot = isSelected ? (selSyms.indexOf(s.symbol) === 0 ? '🥇' : '🥈') : (idx < 5 ? `<span class="rn rb">${idx+1}</span>` : '');
+                return `<tr style="${isSelected ? 'background:#1a1600' : ''}">
+                  <td>${rankDot}</td>
+                  <td><b>${s.symbol}</b></td>
+                  <td class="${gapUp ? 'sg' : 'sr'}">${gapUp ? '▲' : '▼'}${Math.abs((s.gapPct||0)*100).toFixed(2)}%</td>
+                  <td>₹${f2(s.orbHigh)}</td>
+                  <td>₹${f2(s.orbLow)}</td>
+                  <td>${rangePct.toFixed(2)}%</td>
+                  <td class="${(s.rvol||0)>=2?'sg':(s.rvol||0)>=1.5?'sy':'sr'}">${f2(s.rvol)}×</td>
+                  <td><span class="pill ${scorePill(s.score||0)}">${s.score||0}</span></td>
+                  <td>${s.cleanCandleCount || 0}</td>
+                  <td style="font-size:11px">${s.sectorName || '—'}</td>
+                  <td>${s.sectorAligned ? '<span class="pill pg">✅</span>' : '<span class="pill pm">No</span>'}</td>
+                  <td>${s.nearSR ? '<span class="pill pr">⚠ Near</span>' : '<span class="pill pg">Clear</span>'}</td>
+                  <td>${statusPill}</td>
+                </tr>`;
+            }).join(''));
+        }
     }
 
     // ── TRADES ───────────────────────────────────────────────────────────────────
     function renderTrades() {
-      const paper = D.paperTrades || [], closed = (D.todayTrades || []).filter(t => t.status === 'CLOSED');
+        const paper = D.paperTrades || [], closed = (D.todayTrades || []).filter(t => t.status === 'CLOSED');
 
-      if (!paper.length) { q('pt-empty').style.display = 'block'; q('pt-tbl').style.display = 'none'; }
-      else {
-        q('pt-empty').style.display = 'none'; q('pt-tbl').style.display = 'table';
-        html('pt-body', paper.map(t => {
-          const p = parseFloat(t.unrealPnl || 0);
-          return `<tr>
-            <td><b>${t.tradingSymbol}</b></td><td>${dpill(t.direction)}</td>
-            <td>${t.remainingQty}/${t.quantity}</td>
-            <td>₹${parseFloat(t.entryPrice || 0).toFixed(2)}</td>
-            <td>₹${parseFloat(t.ltp || 0).toFixed(2)}</td>
-            <td>₹${parseFloat(t.stopLoss || 0).toFixed(2)}</td>
-            <td>₹${parseFloat(t.target || 0).toFixed(2)}</td>
-            <td class="${pc(p)}">${fp(p)}</td>
-            <td>${t.rMultiple || '—'}</td>
-            <td>${phpill(t.phase)}</td></tr>`;
-        }).join(''));
-      }
+        if (!paper.length) { q('pt-empty').style.display = 'block'; q('pt-tbl').style.display = 'none'; }
+        else {
+            q('pt-empty').style.display = 'none'; q('pt-tbl').style.display = 'table';
+            html('pt-body', paper.map(t => {
+                const p = parseFloat(t.unrealPnl || 0);
+                return `<tr>
+                  <td><b>${t.tradingSymbol}</b></td><td>${dpill(t.direction)}</td>
+                  <td>${t.remainingQty}/${t.quantity}</td>
+                  <td>₹${f2(t.entryPrice)}</td>
+                  <td>₹${f2(t.ltp)}</td>
+                  <td>₹${f2(t.stopLoss)}</td>
+                  <td>₹${f2(t.target)}</td>
+                  <td class="${pc(p)}">${fp(p)}</td>
+                  <td>${t.rMultiple || '—'}</td>
+                  <td>${phpill(t.phase)}</td></tr>`;
+            }).join(''));
+        }
 
-      if (!closed.length) { q('ct-empty').style.display = 'block'; q('ct-tbl').style.display = 'none'; }
-      else {
-        q('ct-empty').style.display = 'none'; q('ct-tbl').style.display = 'table';
-        html('ct-body', closed.map(t => {
-          const p = parseFloat(t.netPnl || 0);
-          const risk1 = t.entryPrice && t.stopLoss
-            ? Math.abs(parseFloat(t.entryPrice) - parseFloat(t.stopLoss))
-            : 0;
-          const rMult = risk1 > 0 && t.exitPrice
-            ? ((parseFloat(t.exitPrice) - parseFloat(t.entryPrice)) / risk1).toFixed(1) + 'R'
-            : '—';
-          return `<tr>
-            <td><b>${t.tradingSymbol}</b></td><td>${dpill(t.direction)}</td>
-            <td style="font-size:10px">${t.strategyName || '—'}</td>
-            <td>₹${parseFloat(t.entryPrice || 0).toFixed(2)}</td>
-            <td>₹${parseFloat(t.exitPrice || 0).toFixed(2)}</td>
-            <td class="${pc(p)}">${fp(p)}</td>
-            <td>${rMult}</td>
-            <td style="font-size:10px">${t.exitReason || '—'}</td></tr>`;
-        }).join(''));
-      }
+        if (!closed.length) { q('ct-empty').style.display = 'block'; q('ct-tbl').style.display = 'none'; }
+        else {
+            q('ct-empty').style.display = 'none'; q('ct-tbl').style.display = 'table';
+            html('ct-body', closed.map(t => {
+                const p = parseFloat(t.netPnl || 0);
+                const risk1 = t.entryPrice && t.stopLoss ? Math.abs(parseFloat(t.entryPrice) - parseFloat(t.stopLoss)) : 0;
+                const rMult = risk1 > 0 && t.exitPrice ? ((parseFloat(t.exitPrice) - parseFloat(t.entryPrice)) / risk1).toFixed(1) + 'R' : '—';
+                return `<tr>
+                  <td><b>${t.tradingSymbol}</b></td><td>${dpill(t.direction)}</td>
+                  <td style="font-size:10px">${t.strategyName || '—'}</td>
+                  <td>₹${f2(t.entryPrice)}</td>
+                  <td>₹${f2(t.exitPrice)}</td>
+                  <td class="${pc(p)}">${fp(p)}</td>
+                  <td>${rMult}</td>
+                  <td style="font-size:10px">${t.exitReason || '—'}</td></tr>`;
+            }).join(''));
+        }
     }
 
     // ── STRATEGY ─────────────────────────────────────────────────────────────────
     function renderStrategy() {
-      const ss = D.strategyStatus || {}, scps = ss.smartChannelPullback || {},
-            pnlMap = ss.perStrategyPnl || {}, frd = Array.from(ss.firedToday || []);
-      const chDet = D.channelDetection || {};
+        const ss = D.strategyStatus || {}, scps = ss.smartChannelPullback || {},
+              pnlMap = ss.perStrategyPnl || {}, frd = Array.from(ss.firedToday || []);
+        const chDet = D.channelDetection || {};
 
-      // Header metrics
-      set('scps-cnt', scps.sessionSignalCount || 0);
-      set('scps-active', 'Active: ' + (scps.activeSignalCount || 0));
-      set('ch-valid', chDet.validChannels || scps.validChannels || 0);
-      set('ch-tracked', 'Tracked: ' + (chDet.trackedSymbols || scps.trackedSymbols || 0));
+        set('scps-cnt', scps.sessionSignalCount || 0);
+        set('scps-active', 'Active: ' + (scps.activeSignalCount || 0));
+        set('ch-valid', chDet.validChannels || scps.validChannels || 0);
+        set('ch-tracked', 'Tracked: ' + (chDet.trackedSymbols || scps.trackedSymbols || 0));
 
-      const scpsPnl = pnlMap['SMART_CHANNEL_PULLBACK_V2'] || {};
-      const p = parseFloat(scpsPnl.pnl || 0);
-      const pnlEl = q('scps-pnl');
-      if (pnlEl) { pnlEl.textContent = fp(p); pnlEl.className = 'stat ' + pc(p); }
-      set('scps-wr', 'Win Rate: ' + (scpsPnl.winRate || '—'));
+        const scpsPnl = pnlMap['SMART_CHANNEL_PULLBACK_V3'] || pnlMap['SMART_CHANNEL_PULLBACK_V2'] || {};
+        const p = parseFloat(scpsPnl.pnl || 0);
+        const pnlEl = q('scps-pnl');
+        if (pnlEl) { pnlEl.textContent = fp(p); pnlEl.className = 'stat ' + pc(p); }
+        set('scps-wr', 'Win Rate: ' + (scpsPnl.winRate || '—'));
 
-      const enabled = scps.enabled !== false;
-      set('scps-status', enabled ? 'ENABLED' : 'DISABLED');
-      q('scps-status').className = 'stat ' + (enabled ? 'sg' : 'sr');
-      set('scps-mode', D.tradingMode || 'PAPER');
+        const enabled = scps.enabled !== false;
+        set('scps-status', enabled ? 'ENABLED' : 'DISABLED');
+        q('scps-status').className = 'stat ' + (enabled ? 'sg' : 'sr');
+        set('scps-mode', D.tradingMode || 'PAPER');
 
-      // Performance metrics
-      const wins   = parseInt(scpsPnl.wins  || 0);
-      const losses = parseInt(scpsPnl.losses || 0);
-      const total  = wins + losses;
-      set('sm-wins', wins); set('sm-loss', losses); set('sm-tot', total);
-      set('sm-wr',  total > 0 ? ((wins / total * 100).toFixed(1) + '%') : '—');
-      set('sm-pf',  scpsPnl.profitFactor || '—');
-      set('sm-avr', scpsPnl.avgRMultiple || '—');
+        const wins = parseInt(scpsPnl.wins || 0), losses = parseInt(scpsPnl.losses || 0), total = wins + losses;
+        set('sm-wins', wins); set('sm-loss', losses); set('sm-tot', total);
+        set('sm-wr',  total > 0 ? ((wins/total*100).toFixed(1) + '%') : '—');
+        set('sm-pf',  scpsPnl.profitFactor || '—');
+        set('sm-avr', scpsPnl.avgRMultiple || '—');
 
-      // Active signals
-      const active = Array.from(scps.activeSignals || []);
-      html('active-signals-body', active.length
-        ? active.map(sym => {
-            const trade = (D.paperTrades || []).find(t => t.tradingSymbol === sym);
-            if (!trade) return `<div class="channel-bar"><b>${sym}</b><span class="pill pora">Signal Pending</span></div>`;
-            const pnl = parseFloat(trade.unrealPnl || 0);
-            return `<div class="signal-card ${trade.direction === 'SHORT' ? 'short' : ''}">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
-                <b>${sym}</b> ${dpill(trade.direction)}
-                <span class="${pc(pnl)}">${fp(pnl)}</span>
-              </div>
-              <div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px">
-                <span class="pill pm">Entry:₹${parseFloat(trade.entryPrice||0).toFixed(2)}</span>
-                <span class="pill pr">SL:₹${parseFloat(trade.stopLoss||0).toFixed(2)}</span>
-                <span class="pill pg">T:₹${parseFloat(trade.target||0).toFixed(2)}</span>
-                <span class="pill pb">${trade.rMultiple||'—'}</span>
-                ${phpill(trade.phase)}
-              </div>
-            </div>`;
-          }).join('')
-        : '<div class="sub">No active signals</div>');
+        const active = Array.from(scps.activeSignals || []);
+        html('active-signals-body', active.length
+            ? active.map(sym => {
+                const trade = (D.paperTrades || []).find(t => t.tradingSymbol === sym);
+                if (!trade) return `<div class="channel-bar"><b>${sym}</b><span class="pill pora">Signal Pending</span></div>`;
+                const pv = parseFloat(trade.unrealPnl || 0);
+                return `<div class="signal-card ${trade.direction === 'SHORT' ? 'short' : ''}">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+                    <b>${sym}</b> ${dpill(trade.direction)}
+                    <span class="${pc(pv)}">${fp(pv)}</span>
+                  </div>
+                  <div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px">
+                    <span class="pill pm">Entry:₹${f2(trade.entryPrice)}</span>
+                    <span class="pill pr">SL:₹${f2(trade.stopLoss)}</span>
+                    <span class="pill pg">T:₹${f2(trade.target)}</span>
+                    <span class="pill pb">${trade.rMultiple||'—'}</span>
+                    ${phpill(trade.phase)}
+                  </div>
+                </div>`;
+              }).join('')
+            : '<div class="sub">No active signals</div>');
 
-      // Session log from closed trades
-      const scpsTrades = (D.todayTrades || []).filter(t =>
-        t.strategyName === 'SMART_CHANNEL_PULLBACK_V2' && t.status === 'CLOSED');
-      html('scps-log', scpsTrades.length
-        ? scpsTrades.map(t => {
-            const p = parseFloat(t.netPnl || 0);
-            return `<div class="ir">
-              <span class="il"><b>${t.tradingSymbol}</b> ${dpill(t.direction)}</span>
-              <span class="${pc(p)}">${fp(p)} · ${t.exitReason || '—'}</span>
-            </div>`;
-          }).join('')
-        : '<div class="sub">No closed signals yet</div>');
+        const scpsTrades = (D.todayTrades || []).filter(t =>
+            (t.strategyName === 'SMART_CHANNEL_PULLBACK_V3' || t.strategyName === 'SMART_CHANNEL_PULLBACK_V2') && t.status === 'CLOSED');
+        html('scps-log', scpsTrades.length
+            ? scpsTrades.map(t => {
+                const pv = parseFloat(t.netPnl || 0);
+                return `<div class="ir"><span class="il"><b>${t.tradingSymbol}</b> ${dpill(t.direction)}</span><span class="${pc(pv)}">${fp(pv)} · ${t.exitReason||'—'}</span></div>`;
+              }).join('')
+            : '<div class="sub">No closed signals yet</div>');
 
-      // All strategy P&L
-      html('str-pnl', !Object.keys(pnlMap).length
-        ? '<span class="sub">No trades yet</span>'
-        : Object.entries(pnlMap).map(([k, v]) => {
-            const pv = parseFloat(v.pnl || 0);
-            return `<div class="ir">
-              <span class="il" style="font-size:11px">${k}</span>
-              <span class="iv ${pc(pv)}">${fp(pv)} (${v.wins || 0}W/${v.losses || 0}L)</span>
-            </div>`;
-          }).join(''));
+        html('str-pnl', !Object.keys(pnlMap).length
+            ? '<span class="sub">No trades yet</span>'
+            : Object.entries(pnlMap).map(([k, v]) => {
+                const pv = parseFloat(v.pnl || 0);
+                return `<div class="ir"><span class="il" style="font-size:11px">${k}</span><span class="iv ${pc(pv)}">${fp(pv)} (${v.wins||0}W/${v.losses||0}L)</span></div>`;
+              }).join(''));
 
-      set('fired', frd.length ? frd.join(', ') : 'None yet');
+        set('fired', frd.length ? frd.join(', ') : 'None yet');
     }
 
     // ── CHANNELS ──────────────────────────────────────────────────────────────────
     function renderChannels() {
-      const chDet = D.channelDetection || {};
-      const allChannels = chDet.topChannels || [];
+        const chDet = D.channelDetection || {};
+        const allChannels = chDet.topChannels || [];
 
-      set('ch-total',  chDet.trackedSymbols || 0);
-      set('ch-valid2', chDet.validChannels  || 0);
+        set('ch-total',  chDet.trackedSymbols || 0);
+        set('ch-valid2', chDet.validChannels  || 0);
 
-      let bullCnt = 0, bearCnt = 0, hqCnt = 0;
-      allChannels.forEach(c => {
-        if (c.type === 'BULLISH') bullCnt++;
-        if (c.type === 'BEARISH') bearCnt++;
-        if (c.validity === 'HIGH_QUALITY') hqCnt++;
-      });
-      set('ch-hq',       hqCnt);
-      set('ch-bull-cnt', bullCnt + ' bullish');
-      set('ch-bear-cnt', bearCnt + ' bearish');
-      set('ch-list-cnt', allChannels.length);
+        let bullCnt = 0, bearCnt = 0, hqCnt = 0;
+        allChannels.forEach(c => {
+            if (c.type === 'BULLISH') bullCnt++;
+            if (c.type === 'BEARISH') bearCnt++;
+            if (c.validity === 'HIGH_QUALITY') hqCnt++;
+        });
+        set('ch-hq', hqCnt);
+        set('ch-bull-cnt', bullCnt + ' bullish');
+        set('ch-bear-cnt', bearCnt + ' bearish');
+        set('ch-list-cnt', allChannels.length);
 
-      if (!allChannels.length) {
-        q('ch-list-empty').style.display = 'block';
-        q('ch-tbl').style.display = 'none';
-      } else {
-        q('ch-list-empty').style.display = 'none';
-        q('ch-tbl').style.display = 'table';
-        html('ch-body', allChannels.map(c => {
-          const isBull = c.type === 'BULLISH';
-          const isHQ   = c.validity === 'HIGH_QUALITY';
-          const typeClass  = isBull ? 'ch-bull' : 'ch-bear';
-          const qualClass  = isHQ   ? 'po'      : 'pb';
-          return `<tr>
-            <td><b>${c.symbol}</b></td>
-            <td><span class="${typeClass}">${c.type}</span></td>
-            <td><span class="pill ${qualClass}">${c.validity}</span></td>
-            <td>₹${parseFloat(c.supportPrice || 0).toFixed(2)}</td>
-            <td>₹${parseFloat(c.resistancePrice || 0).toFixed(2)}</td>
-            <td>${parseFloat(c.widthPct || c.channelWidthPct || 0).toFixed(2)}%</td>
-            <td>${c.supportTouches || '—'}</td>
-            <td>${c.resistanceTouches || '—'}</td>
-            <td>${c.ageMinutes != null ? c.ageMinutes : '—'}</td>
-            <td>${c.inPullbackZone ? '<span class="pill pg">✅ YES</span>' : '<span class="pill pm">No</span>'}</td>
-          </tr>`;
-        }).join(''));
-      }
+        if (!allChannels.length) {
+            q('ch-list-empty').style.display = 'block';
+            q('ch-tbl').style.display = 'none';
+        } else {
+            q('ch-list-empty').style.display = 'none';
+            q('ch-tbl').style.display = 'table';
+            html('ch-body', allChannels.map(c => {
+                const isBull = c.type === 'BULLISH', isHQ = c.validity === 'HIGH_QUALITY';
+                return `<tr>
+                  <td><b>${c.symbol}</b></td>
+                  <td><span class="${isBull ? 'ch-bull' : 'ch-bear'}">${c.type}</span></td>
+                  <td><span class="pill ${isHQ ? 'po' : 'pb'}">${c.validity}</span></td>
+                  <td>₹${f2(c.supportPrice)}</td>
+                  <td>₹${f2(c.resistancePrice)}</td>
+                  <td>${f2(c.widthPct || c.channelWidthPct)}%</td>
+                  <td>${c.supportTouches || '—'}</td>
+                  <td>${c.resistanceTouches || '—'}</td>
+                  <td>${c.ageMinutes != null ? c.ageMinutes : '—'}</td>
+                  <td>${c.inPullbackZone ? '<span class="pill pg">✅ YES</span>' : '<span class="pill pm">No</span>'}</td>
+                </tr>`;
+            }).join(''));
+        }
     }
 
     // ── SCANNER ───────────────────────────────────────────────────────────────────
     function renderScanner() {
-      const ranks = D.stockRankings || [], lat = D.latency || {}, sys = D.system || {};
+        const ranks = D.stockRankings || [], lat = D.latency || {}, sys = D.system || {};
 
-      if (!ranks.length) { q('rank-empty').style.display = 'block'; html('rank-body', ''); }
-      else {
-        q('rank-empty').style.display = 'none';
-        html('rank-body', ranks.map(r => {
-          const rc = r.rank === 1 ? 'r1' : r.rank === 2 ? 'r2' : r.rank === 3 ? 'r3' : 'rn';
-          return `<div style="display:flex;align-items:center;gap:7px;padding:5px 0;border-bottom:1px solid var(--border)">
-            <div class="rb ${rc}">${r.rank}</div>
-            <div style="flex:1">
-              <div style="font-weight:700">${r.symbol} <span class="sub">${r.sector || ''}</span></div>
-              <div class="sub">Score: ${r.finalScore}</div>
-            </div>
-            ${r.inTop3 ? '<span class="pill po">TOP-3</span>' : ''}
-          </div>`;
-        }).join(''));
-      }
+        if (!ranks.length) { q('rank-empty').style.display = 'block'; html('rank-body', ''); }
+        else {
+            q('rank-empty').style.display = 'none';
+            html('rank-body', ranks.map(r => {
+                const rc = r.rank === 1 ? 'r1' : r.rank === 2 ? 'r2' : r.rank === 3 ? 'r3' : 'rn';
+                return `<div style="display:flex;align-items:center;gap:7px;padding:5px 0;border-bottom:1px solid var(--border)">
+                  <div class="rb ${rc}">${r.rank}</div>
+                  <div style="flex:1"><div style="font-weight:700">${r.symbol} <span class="sub">${r.sector||''}</span></div><div class="sub">Score: ${r.finalScore}</div></div>
+                  ${r.inTop3 ? '<span class="pill po">TOP-3</span>' : ''}
+                </div>`;
+            }).join(''));
+        }
 
-      set('s-ws',    sys.websocketConnected ? '✅ Connected' : '❌ Disconnected');
-      set('s-rc',    sys.reconnectCount || 0);
-      set('s-lag',   lat.lagMs > 0 ? lat.lagMs + 'ms' : '< 1ms');
-      set('s-tick',  lat.lastTickTime || lat.lastCandleTime || '—');
-      set('s-ticks', lat.ticksReceived != null ? lat.ticksReceived.toLocaleString() : '—');
-      set('s-cand',  lat.candlesProcessed ? lat.candlesProcessed.toLocaleString() : '—');
-      set('s-stat',  lat.status || '—');
-      set('s-mode',  D.tradingMode || '—');
-      set('s-ent',   sys.entryAllowed ? '✅ Yes' : '❌ No');
-      set('s-win',   sys.currentWindow || '—');
+        set('s-ws',   sys.websocketConnected ? '✅ Connected' : '❌ Disconnected');
+        set('s-rc',   sys.reconnectCount || 0);
+        set('s-lag',  lat.lagMs > 0 ? lat.lagMs + 'ms' : '< 1ms');
+        set('s-tick', lat.lastTickTime || lat.lastCandleTime || '—');
+        set('s-ticks',lat.ticksReceived != null ? lat.ticksReceived.toLocaleString() : '—');
+        set('s-cand', lat.candlesProcessed ? lat.candlesProcessed.toLocaleString() : '—');
+        set('s-stat', lat.status || '—');
+        set('s-mode', D.tradingMode || '—');
+        set('s-ent',  sys.entryAllowed ? '✅ Yes' : '❌ No');
+        set('s-win',  sys.currentWindow || '—');
     }
 
     // ── SECTORS ───────────────────────────────────────────────────────────────────
     function renderSectors() {
-      const secs = (D.sectors || []).sort((a, b) => b.changePercent - a.changePercent);
-      html('sec-body', secs.map(s => {
-        const c = parseFloat(s.changePercent || 0), g = parseFloat(s.greenPct || 0);
-        const st = s.isTopSector    ? '<span class="pill pg">TOP</span>'
-                 : s.isBottomSector ? '<span class="pill pr">BOTTOM</span>'
-                 : s.alignedBullish ? '<span class="pill pg">BULL</span>'
-                 : s.alignedBearish ? '<span class="pill pr">BEAR</span>'
-                 : '<span class="pill pm">NEUT</span>';
-        return `<tr>
-          <td><b>${s.name}</b></td><td>${st}</td>
-          <td class="${pc(c)}">${c >= 0 ? '+' : ''}${c.toFixed(2)}%</td>
-          <td>
-            <div class="sub">${g.toFixed(0)}% (${s.greenStocks || 0}G/${s.redStocks || 0}R)</div>
-            <div class="bt"><div class="bf" style="width:${g}%;background:var(--green)"></div></div>
-          </td>
-          <td>${parseFloat(s.relativeStrength || 0).toFixed(2)}</td>
-          <td>${s.totalStocks || 0}</td>
-          <td>${s.alignedBullish ? '✅ Bull' : s.alignedBearish ? '❌ Bear' : '—'}</td>
-        </tr>`;
-      }).join(''));
+        const secs = (D.sectors || []).sort((a, b) => b.changePercent - a.changePercent);
+        html('sec-body', secs.map(s => {
+            const c = parseFloat(s.changePercent || 0), g = parseFloat(s.greenPct || 0);
+            const st = s.isTopSector    ? '<span class="pill pg">TOP</span>'
+                     : s.isBottomSector ? '<span class="pill pr">BOTTOM</span>'
+                     : s.alignedBullish ? '<span class="pill pg">BULL</span>'
+                     : s.alignedBearish ? '<span class="pill pr">BEAR</span>'
+                     : '<span class="pill pm">NEUT</span>';
+            return `<tr>
+              <td><b>${s.name}</b></td><td>${st}</td>
+              <td class="${pc(c)}">${c >= 0 ? '+' : ''}${c.toFixed(2)}%</td>
+              <td>
+                <div class="sub">${g.toFixed(0)}% (${s.greenStocks||0}G/${s.redStocks||0}R)</div>
+                <div class="bt"><div class="bf" style="width:${g}%;background:var(--green)"></div></div>
+              </td>
+              <td>${f2(s.relativeStrength)}</td>
+              <td>${s.totalStocks || 0}</td>
+              <td>${s.alignedBullish ? '✅ Bull' : s.alignedBearish ? '❌ Bear' : '—'}</td>
+            </tr>`;
+        }).join(''));
     }
 
     // ── RISK ──────────────────────────────────────────────────────────────────────
     function renderRisk() {
-      const risk = D.riskSlots || {}, pnl = D.pnl || {}, phase = D.marketPhase || {},
-            mm = D.marketMode || {}, mkt = D.market || {}, lat = D.latency || {};
+        const risk = D.riskSlots || {}, pnl = D.pnl || {}, phase = D.marketPhase || {},
+              mm = D.marketMode || {}, mkt = D.market || {}, lat = D.latency || {};
 
-      set('r-p1',  (risk.phase1Count || 0) + ' / ' + (risk.maxPhase1 || 3));
-      set('r-max', risk.maxPhase1 || 3);
-      set('r-be',  risk.anyAtBreakeven ? '✅ Yes — 4th slot unlockable' : 'No');
-      set('r-cap', '₹' + parseFloat(pnl.capital || 0).toLocaleString());
-      set('r-daily', fp(pnl.dailyPnl || 0));
-      set('r-dpct',  parseFloat(pnl.dailyPct || 0).toFixed(2) + '%');
-      set('r-wk',  fp(pnl.weeklyPnl  || 0));
-      set('r-mo',  fp(pnl.monthlyPnl || 0));
+        set('r-p1',  (risk.phase1Count || 0) + ' / ' + (risk.maxPhase1 || 3));
+        set('r-max', risk.maxPhase1 || 3);
+        set('r-be',  risk.anyAtBreakeven ? '✅ Yes — 4th slot unlockable' : 'No');
+        set('r-cap', '₹' + parseFloat(pnl.capital || 0).toLocaleString());
+        set('r-daily', fp(pnl.dailyPnl || 0));
+        set('r-dpct', f2(pnl.dailyPct) + '%');
+        set('r-wk',  fp(pnl.weeklyPnl  || 0));
+        set('r-mo',  fp(pnl.monthlyPnl || 0));
 
-      // CB FIX: cbActive=true → ✅ OK (CB healthy). cbActive=false → ⚠ TRIPPED
-      const cbOk = pnl.cbActive === true;
-      const rce = q('r-cb');
-      if (rce) { rce.textContent = cbOk ? '✅ OK' : '⚠ TRIPPED — ' + (pnl.cbReason || ''); rce.style.color = cbOk ? 'var(--green)' : 'var(--red)'; }
+        const cbOk = pnl.cbActive === true;
+        const rce = q('r-cb');
+        if (rce) { rce.textContent = cbOk ? '✅ OK' : '⚠ TRIPPED — ' + (pnl.cbReason || ''); rce.style.color = cbOk ? 'var(--green)' : 'var(--red)'; }
 
-      set('r-vix',  parseFloat(mkt.vix || 0).toFixed(2));
-      set('r-vreg', mkt.vixRegime || '—');
-      set('r-thr',  phase.isEarlyPhase ? '58 (EARLY)' : (mm.minProbability || '—') + ' (CONFIRMED)');
-      set('r-ibf',  phase.ibForceNeeded ? '⚠ YES' : '✅ No');
-      set('r-orb',  phase.isOrbAllowed  ? '✅ Yes' : '❌ No');
-      set('r-dat',  lat.status || '—');
-      const rd = q('r-dat'); if (rd) rd.style.color = lat.isStale ? 'var(--red)' : 'var(--green)';
+        set('r-vix',  f2(mkt.vix));
+        set('r-vreg', mkt.vixRegime || '—');
+        set('r-thr',  phase.isEarlyPhase ? '58 (EARLY)' : (mm.minProbability || '—') + ' (CONFIRMED)');
+        set('r-ibf',  phase.ibForceNeeded ? '⚠ YES' : '✅ No');
+        set('r-orb',  phase.isOrbAllowed  ? '✅ Yes' : '❌ No');
+        set('r-dat',  lat.status || '—');
+        const rd = q('r-dat'); if (rd) rd.style.color = lat.isStale ? 'var(--red)' : 'var(--green)';
 
-      const se = risk.sectorExposure || {}, ste = risk.strategyExposure || {};
-      html('r-sexp',  Object.entries(se).filter(([, v]) => v > 0)
-        .map(([k, v]) => `<span class="pill pb" style="margin:2px">${k}:${v}</span>`).join('') || '<span class="sub">None</span>');
-      html('r-stexp', Object.entries(ste).filter(([, v]) => v > 0)
-        .map(([k, v]) => `<span class="pill pp" style="margin:2px">${k}:${v}</span>`).join('') || '<span class="sub">None</span>');
+        const se = risk.sectorExposure || {}, ste = risk.strategyExposure || {};
+        html('r-sexp',  Object.entries(se).filter(([, v]) => v > 0)
+            .map(([k, v]) => `<span class="pill pb" style="margin:2px">${k}:${v}</span>`).join('') || '<span class="sub">None</span>');
+        html('r-stexp', Object.entries(ste).filter(([, v]) => v > 0)
+            .map(([k, v]) => `<span class="pill pp" style="margin:2px">${k}:${v}</span>`).join('') || '<span class="sub">None</span>');
     }
 
     // ── VALIDATION ────────────────────────────────────────────────────────────────
     async function loadVal() {
-      const sym = q('vs').value.trim(), str = q('vstr').value;
-      let url = API + '/validation';
-      if (sym) url += '?symbol=' + encodeURIComponent(sym);
-      else if (str) url += '?strategy=' + encodeURIComponent(str);
-      try {
-        const res = await fetch(url), val = await res.json();
-        set('val-cnt', val.symbolsTracked || '—');
-        const freq = Object.entries(val.failureFrequency || {}).sort(([, a], [, b]) => b - a).slice(0, 10);
-        html('ffreq', !freq.length ? '<span class="sub">No failures yet</span>'
-          : freq.map(([k, v]) => `<div class="ir"><span class="il">${k}</span><span class="iv np">${v} fails</span></div>`).join(''));
-        const logs = val.results || [], all = val.allLogs || {};
-        const combined = logs.length ? logs : Object.values(all).flat().slice(0, 30);
-        html('vlog', !combined.length ? '<span class="sub">No data yet</span>'
-          : combined.map(l => {
-              if (!l) return '';
-              const ok = l.failedAtStep === 0, steps = l.steps || [];
-              return `<div style="margin-bottom:7px;padding:7px;background:#1c2129;border-radius:6px;border-left:3px solid ${ok ? 'var(--green)' : 'var(--red)'}">
-                <div style="display:flex;gap:5px;align-items:center;margin-bottom:5px;flex-wrap:wrap">
-                  <b>${l.symbol || '—'}</b>
-                  <span class="pill pm">${l.strategy || '—'}</span>
-                  <span class="pill pm">${l.direction || 'BOTH'}</span>
-                  <span class="pill ${ok ? 'pg' : 'pr'}">${ok ? 'ALL PASS' : 'FAIL@' + l.failedAtStep}</span>
-                  <span class="sub" style="margin-left:auto">${l.lastChecked || ''}</span>
-                </div>
-                ${steps.map(s => `<div style="display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid #1c2129">
-                  <div style="width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;background:${s.passed ? '#1a4220' : '#3d1a1a'};color:${s.passed ? 'var(--green)' : 'var(--red)'};">${s.stepNum}</div>
-                  <div style="flex:1;font-size:11px">${s.label || ''}</div>
-                  <div class="sub" style="max-width:150px;text-align:right;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${s.detail || ''}</div>
-                </div>`).join('')}
-              </div>`;
-            }).join(''));
-      } catch (e) { console.error(e); }
+        const sym = q('vs').value.trim(), str = q('vstr').value;
+        let url = API + '/validation';
+        if (sym) url += '?symbol=' + encodeURIComponent(sym);
+        else if (str) url += '?strategy=' + encodeURIComponent(str);
+        try {
+            const res = await fetch(url), val = await res.json();
+            set('val-cnt', val.symbolsTracked || '—');
+            const freq = Object.entries(val.failureFrequency || {}).sort(([, a], [, b]) => b - a).slice(0, 10);
+            html('ffreq', !freq.length ? '<span class="sub">No failures yet</span>'
+                : freq.map(([k, v]) => `<div class="ir"><span class="il">${k}</span><span class="iv np">${v} fails</span></div>`).join(''));
+            const logs = val.results || [], all = val.allLogs || {};
+            const combined = logs.length ? logs : Object.values(all).flat().slice(0, 30);
+            html('vlog', !combined.length ? '<span class="sub">No data yet</span>'
+                : combined.map(l => {
+                    if (!l) return '';
+                    const ok = l.failedAtStep === 0, steps = l.steps || [];
+                    return `<div style="margin-bottom:7px;padding:7px;background:#1c2129;border-radius:6px;border-left:3px solid ${ok ? 'var(--green)' : 'var(--red)'}">
+                      <div style="display:flex;gap:5px;align-items:center;margin-bottom:5px;flex-wrap:wrap">
+                        <b>${l.symbol || '—'}</b>
+                        <span class="pill pm">${l.strategy || '—'}</span>
+                        <span class="pill pm">${l.direction || 'BOTH'}</span>
+                        <span class="pill ${ok ? 'pg' : 'pr'}">${ok ? 'ALL PASS' : 'FAIL@' + l.failedAtStep}</span>
+                        <span class="sub" style="margin-left:auto">${l.lastChecked || ''}</span>
+                      </div>
+                      ${steps.map(s => `<div style="display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid #1c2129">
+                        <div style="width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;background:${s.passed ? '#1a4220' : '#3d1a1a'};color:${s.passed ? 'var(--green)' : 'var(--red)'};">${s.stepNum}</div>
+                        <div style="flex:1;font-size:11px">${s.label || ''}</div>
+                        <div class="sub" style="max-width:150px;text-align:right;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${s.detail || ''}</div>
+                      </div>`).join('')}
+                    </div>`;
+                  }).join(''));
+        } catch (e) { console.error(e); }
     }
 
     // ── Init ──────────────────────────────────────────────────────────────────────
     window.addEventListener('DOMContentLoaded', () => {
-      load();
-      setInterval(load, 3000); // refresh every 3 seconds
+        load();
+        setInterval(load, 3000);
     });
 </script>
 </body>
