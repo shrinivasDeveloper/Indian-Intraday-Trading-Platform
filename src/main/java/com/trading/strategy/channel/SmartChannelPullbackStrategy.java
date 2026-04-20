@@ -187,7 +187,7 @@ public class SmartChannelPullbackStrategy {
     @Value("${strategy.smart-channel-pullback.require-high-quality-channel:false}")
     private boolean requireHighQuality;
 
-    @Value("${strategy.smart-channel-pullback.time-stop-minutes:60}")
+    @Value("${strategy.smart-channel-pullback.time-stop-minutes:90}")
     private int timeStopMinutes;
 
     @Value("${strategy.smart-channel-pullback.min-rvol:1.0}")

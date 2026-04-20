@@ -426,6 +426,11 @@ public class HighRRStrategyEngine {
     public int     getRemainingSlots()      { return MAX_TRADES_PER_DAY - tradesExecutedToday; }
     public boolean isEnabled()              { return engineEnabled; }
     public boolean isDailyLimitReached()    { return tradesExecutedToday >= MAX_TRADES_PER_DAY; }
+    public int     getMaxTradesPerDay()     { return MAX_TRADES_PER_DAY; }
+    /** Dashboard: symbols that fired a signal today (may be closed or active). */
+    public Set<String> getFiredToday()      { return Collections.unmodifiableSet(firedToday); }
+    /** Dashboard: symbols with currently active (open) signals. */
+    public Set<String> getActiveSignals()   { return Collections.unmodifiableSet(activeSignals); }
 
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {

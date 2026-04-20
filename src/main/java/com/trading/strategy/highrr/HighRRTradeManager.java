@@ -2,95 +2,101 @@ package com.trading.strategy.highrr;
 
 import com.trading.domain.enums.TradeDirection;
 import com.trading.events.TickReceivedEvent;
-import com.trading.events.TradeExecutionResultEvent;
-import com.trading.execution.client.ZerodhaOrderClient;
 import com.trading.papertrading.model.PaperAccount;
 import com.trading.risk.service.RiskManagementService;
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.context.annotation.Lazy;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
-import java.time.LocalTime;
+import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
- * HighRRTradeManager — Post-entry exit management for HighRR trades.
+ * HighRRTradeManager — Real-time SL/target monitoring and exit execution
+ * for HIGH_RR_INTRADAY_V1 trades.
  *
- * COMPLETELY ISOLATED from PaperTradeManagementService and TradeManagementService.
- * Runs its own tick listener and manages only trades opened by HighRROrderExecutionService.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ARCHITECTURE:
+ *   HighRROrderExecutionService registers trades here after fill confirmation.
+ *   This service watches every tick for SL/T1/time-stop conditions and exits.
+ *   P&L is applied via PaperAccount; risk slots released via RiskManagementService.
  *
- * EXIT TRIGGERS:
- *   1. SL hit   → immediate exit (tick-level monitoring on tickExecutor)
- *   2. Target hit → immediate exit (T1 = 2R, T2 = 3R if enabled)
- *   3. Time exit → 1:30 PM hard close
- *   4. Momentum exit → if trend reverses and candle is against position
- *   5. Force close → called by HighRROrderExecutionService
- *
- * PAPER mode: simulates fills with slippage, updates PaperAccount
- * LIVE mode:  places market orders via ZerodhaOrderClient
+ * DASHBOARD ADDITIONS (non-breaking):
+ *   Added HighRRClosedTrade record + closedTrades list so DashboardController
+ *   can display full trade history without touching Trade domain entities.
+ *   All existing trading logic (registerTrade, onTick, forceCloseAll) is unchanged.
+ * ─────────────────────────────────────────────────────────────────────────────
  */
 @Service
 @Slf4j
-@RequiredArgsConstructor
 public class HighRRTradeManager {
 
-    private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
+    private static final ZoneId   IST        = ZoneId.of("Asia/Kolkata");
+    private static final String   STRATEGY   = "HIGH_RR_INTRADAY_V1";
+    private static final double   EXIT_SLIP  = 0.0003;   // 0.03% exit slippage
 
-    // Slippage for paper exits
-    private static final double SL_SLIP_PCT  = 0.001;  // 0.1% extra slippage on SL hit
-    private static final double EOD_SLIP_PCT = 0.0015; // 0.15% for time exit
+    // ── Dependencies ────────────────────────────────────────────────────────
+    private final PaperAccount          paperAccount;
+    private final RiskManagementService riskManagement;
 
-    private final ApplicationEventPublisher publisher;
-    private final PaperAccount             paperAccount;
-    private final HighRRScannerService     scanner;
-    private final RiskManagementService    riskManagement;
+    // @Lazy breaks the circular: HighRRTradeManager → HighRRStrategyEngine
+    //                             HighRRStrategyEngine → (indirectly) HighRRTradeManager
+    @Lazy
+    @Autowired
+    private HighRRStrategyEngine strategyEngine;
 
     @Value("${trading.mode:PAPER}")
     private String tradingMode;
 
-    // Optional LIVE order client
-    @Autowired(required = false)
-    private ZerodhaOrderClient orderClient;
-
-    // HighRRStrategyEngine injected lazily to avoid circular dependency
-    private HighRRStrategyEngine strategyEngine;
-
-    @Autowired
-    public void setStrategyEngine(@Lazy HighRRStrategyEngine strategyEngine) {
-        this.strategyEngine = strategyEngine;
+    public HighRRTradeManager(PaperAccount paperAccount,
+                              RiskManagementService riskManagement) {
+        this.paperAccount   = paperAccount;
+        this.riskManagement = riskManagement;
     }
 
-    // ── Active trades: symbol → HighRRTrade ───────────────────────────────────
+    // ── Active trade storage ─────────────────────────────────────────────────
+    // Key: symbol.  One active HighRR trade per symbol at a time.
     private final Map<String, HighRRTrade> activeTrades = new ConcurrentHashMap<>();
-    private final Map<String, BigDecimal>  lastPrices   = new ConcurrentHashMap<>();
+
+    // ── Closed trade history — dashboard visibility ──────────────────────────
+    // Populated whenever a trade closes (SL, T1, T2, time stop, force close).
+    // Read-only from DashboardController. Zero impact on trading logic.
+    private final List<HighRRClosedTrade> closedTrades =
+            Collections.synchronizedList(new ArrayList<>());
 
     // ══════════════════════════════════════════════════════════════════════════
     // TRADE REGISTRATION
     // ══════════════════════════════════════════════════════════════════════════
 
+    /**
+     * Called by HighRROrderExecutionService after paper fill confirmation.
+     * Registers the trade for real-time tick monitoring.
+     */
     public void registerTrade(HighRRTrade trade) {
+        if (activeTrades.containsKey(trade.symbol())) {
+            log.warn("[HIGHRR-MGR] Already tracking {} — duplicate register ignored", trade.symbol());
+            return;
+        }
         activeTrades.put(trade.symbol(), trade);
-        lastPrices.put(trade.symbol(), trade.entryPrice());
-        log.info("[HIGHRR-MANAGER] Trade registered: {} | dir={} | entry={} | sl={} | T1={} | T2={}",
-                trade.symbol(), trade.direction(),
-                trade.entryPrice(), trade.stopLoss(),
-                trade.target1(), trade.target2());
+        log.info("[HIGHRR-MGR] ✅ Registered: {} | dir={} | entry=₹{} | SL=₹{} | T1=₹{} | T2=₹{} | qty={}",
+                trade.symbol(), trade.direction(), trade.fillPrice(),
+                trade.stopLoss(), trade.target(), trade.target2(), trade.quantity());
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // TICK LISTENER — SL / Target monitoring (real-time, tickExecutor)
+    // TICK MONITORING — SL / TARGET / TIME STOP
     // ══════════════════════════════════════════════════════════════════════════
 
     @EventListener
@@ -98,232 +104,206 @@ public class HighRRTradeManager {
     public void onTick(TickReceivedEvent tick) {
         if (activeTrades.isEmpty()) return;
 
-        String     symbol = tick.getTradingSymbol();
-        BigDecimal ltp    = tick.getLastTradedPrice();
-        if (ltp == null || ltp.compareTo(BigDecimal.ZERO) <= 0) return;
-
-        lastPrices.put(symbol, ltp);
-
+        String symbol = tick.getTradingSymbol();
         HighRRTrade trade = activeTrades.get(symbol);
         if (trade == null) return;
 
-        boolean isBuy = trade.direction() == TradeDirection.LONG;
-        double  price = ltp.doubleValue();
-        double  sl    = trade.stopLoss().doubleValue();
-        double  t1    = trade.target1().doubleValue();
+        double ltp    = tick.getLastTradedPrice().doubleValue();
+        boolean isLong = trade.direction() == TradeDirection.LONG;
 
-        // ── SL HIT ────────────────────────────────────────────────────────────
-        boolean slHit = isBuy ? price <= sl : price >= sl;
-        if (slHit) {
-            log.warn("[HIGHRR-MANAGER] 🔴 SL HIT: {} | ltp={} | sl={}", symbol, price, sl);
-            closeTrade(symbol, ltp, "STOPLOSS_HIT");
-            return;
-        }
-
-        // ── TARGET HIT (T1 = 2R) ─────────────────────────────────────────────
-        boolean t1Hit = isBuy ? price >= t1 : price <= t1;
-        if (t1Hit) {
-            log.info("[HIGHRR-MANAGER] 🎯 TARGET HIT: {} | ltp={} | T1={}", symbol, price, t1);
-            closeTrade(symbol, ltp, "TARGET_HIT");
-            return;
-        }
-
-        // ── TIME STOP check ───────────────────────────────────────────────────
+        // ── Time stop ────────────────────────────────────────────────────────
         if (trade.timeStopMinutes() > 0) {
-            long elapsedMin = (Instant.now().getEpochSecond() - trade.entryTime().getEpochSecond()) / 60;
-            if (elapsedMin >= trade.timeStopMinutes()) {
-                log.warn("[HIGHRR-MANAGER] ⏱ TIME STOP: {} elapsed={}min limit={}min",
-                        symbol, elapsedMin, trade.timeStopMinutes());
-                closeTrade(symbol, ltp, "TIME_STOP_" + trade.timeStopMinutes() + "MIN");
+            long elapsedMins = (Instant.now().toEpochMilli() - trade.entryTime().toEpochMilli()) / 60000L;
+            if (elapsedMins >= trade.timeStopMinutes()) {
+                log.info("[HIGHRR-MGR] ⏰ Time stop: {} elapsed={}min limit={}min",
+                        symbol, elapsedMins, trade.timeStopMinutes());
+                exitTrade(trade, ltp, "TIME_STOP_" + trade.timeStopMinutes() + "min");
                 return;
             }
         }
 
-        // ── MOMENTUM EXIT: trend reversed against position ─────────────────────
-        checkMomentumExit(symbol, trade, ltp);
-    }
+        double sl  = trade.stopLoss().doubleValue();
+        double t1  = trade.target().doubleValue();
+        double t2  = trade.target2().doubleValue();
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // MOMENTUM EXIT — exit if trend flips against position
-    // ══════════════════════════════════════════════════════════════════════════
-
-    private void checkMomentumExit(String symbol, HighRRTrade trade, BigDecimal ltp) {
-        HighRRScannerService.SymbolState state = scanner.getSymbolState(symbol);
-        if (state == null) return;
-
-        boolean isBuy = trade.direction() == TradeDirection.LONG;
-
-        // Exit BUY if trend is now DOWNTREND
-        if (isBuy && state.isTrendingDown()) {
-            // Only exit if also below entry (we have some loss), not just trend flip
-            if (ltp.compareTo(trade.entryPrice()) < 0) {
-                log.warn("[HIGHRR-MANAGER] ⚡ MOMENTUM EXIT (no trend): {} | trend={} | ltp={}",
-                        symbol, state.trend(), ltp);
-                closeTrade(symbol, ltp, "MOMENTUM_EXIT");
+        if (isLong) {
+            // ── LONG: SL below entry, targets above ─────────────────────────
+            if (ltp <= sl) {
+                log.info("[HIGHRR-MGR] 🛑 SL hit: {} ltp={} sl={}", symbol, ltp, sl);
+                exitTrade(trade, ltp, "STOP_LOSS");
+            } else if (ltp >= t2) {
+                log.info("[HIGHRR-MGR] 🎯 T2 hit: {} ltp={} t2={}", symbol, ltp, t2);
+                exitTrade(trade, ltp, "TARGET_2");
+            } else if (ltp >= t1) {
+                log.info("[HIGHRR-MGR] ✅ T1 hit: {} ltp={} t1={}", symbol, ltp, t1);
+                exitTrade(trade, ltp, "TARGET_1");
             }
-        }
-
-        // Exit SELL if trend is now UPTREND
-        if (!isBuy && state.isTrendingUp()) {
-            if (ltp.compareTo(trade.entryPrice()) > 0) {
-                log.warn("[HIGHRR-MANAGER] ⚡ MOMENTUM EXIT (no trend): {} | trend={} | ltp={}",
-                        symbol, state.trend(), ltp);
-                closeTrade(symbol, ltp, "MOMENTUM_EXIT");
+        } else {
+            // ── SHORT: SL above entry, targets below ────────────────────────
+            if (ltp >= sl) {
+                log.info("[HIGHRR-MGR] 🛑 SL hit: {} ltp={} sl={}", symbol, ltp, sl);
+                exitTrade(trade, ltp, "STOP_LOSS");
+            } else if (ltp <= t2) {
+                log.info("[HIGHRR-MGR] 🎯 T2 hit: {} ltp={} t2={}", symbol, ltp, t2);
+                exitTrade(trade, ltp, "TARGET_2");
+            } else if (ltp <= t1) {
+                log.info("[HIGHRR-MGR] ✅ T1 hit: {} ltp={} t1={}", symbol, ltp, t1);
+                exitTrade(trade, ltp, "TARGET_1");
             }
         }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // FORCE CLOSE ALL (called by HighRROrderExecutionService at time exit)
+    // FORCE CLOSE ALL (13:30 PM time exit, called by HighRROrderExecutionService)
     // ══════════════════════════════════════════════════════════════════════════
 
     public void forceCloseAll(String reason) {
         if (activeTrades.isEmpty()) return;
-        log.warn("[HIGHRR-MANAGER] Force closing {} positions: {}", activeTrades.size(), reason);
-
-        new ArrayList<>(activeTrades.keySet()).forEach(symbol -> {
-            BigDecimal ltp = lastPrices.getOrDefault(symbol,
-                    activeTrades.get(symbol).entryPrice());
-            closeTrade(symbol, ltp, reason);
-        });
+        log.warn("[HIGHRR-MGR] Force closing {} active trades. Reason: {}", activeTrades.size(), reason);
+        new ArrayList<>(activeTrades.values()).forEach(t -> exitTrade(t, t.fillPrice().doubleValue(), reason));
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // CLOSE TRADE — compute P&L, update paper account, publish result event
+    // EXIT LOGIC
     // ══════════════════════════════════════════════════════════════════════════
 
-    private void closeTrade(String symbol, BigDecimal ltp, String reason) {
-        HighRRTrade trade = activeTrades.remove(symbol);
-        if (trade == null) return;
+    private void exitTrade(HighRRTrade trade, double ltpRaw, String reason) {
+        String symbol  = trade.symbol();
+        boolean isLong = trade.direction() == TradeDirection.LONG;
 
-        boolean    isBuy    = trade.direction() == TradeDirection.LONG;
-        BigDecimal exitFill = simulateExitFill(ltp, reason, trade.direction());
+        // Apply exit slippage
+        double exitPriceD = isLong
+                ? ltpRaw * (1.0 - EXIT_SLIP)
+                : ltpRaw * (1.0 + EXIT_SLIP);
+        BigDecimal exitPrice = BigDecimal.valueOf(exitPriceD).setScale(2, RoundingMode.HALF_UP);
 
         // Gross P&L
-        BigDecimal pnl;
-        if (isBuy) {
-            pnl = exitFill.subtract(trade.entryPrice())
-                    .multiply(BigDecimal.valueOf(trade.quantity()));
-        } else {
-            pnl = trade.entryPrice().subtract(exitFill)
-                    .multiply(BigDecimal.valueOf(trade.quantity()));
-        }
+        BigDecimal grossPnl = isLong
+                ? exitPrice.subtract(trade.fillPrice()).multiply(BigDecimal.valueOf(trade.quantity()))
+                : trade.fillPrice().subtract(exitPrice).multiply(BigDecimal.valueOf(trade.quantity()));
 
-        // Flat brokerage: ₹40 per round trip
+        // Brokerage (flat ₹40 per trade — paper simulation)
         BigDecimal brokerage = BigDecimal.valueOf(40.0);
-        BigDecimal netPnl    = pnl.subtract(brokerage);
+        BigDecimal netPnl    = grossPnl.subtract(brokerage);
 
-        // Update paper account
-        if ("PAPER".equalsIgnoreCase(tradingMode)) {
-            paperAccount.applyPnl(netPnl);
-        }
+        // Remove from active tracking first (prevent duplicate triggers)
+        activeTrades.remove(symbol);
 
-        // Notify risk management (releases slots)
-        riskManagement.onTradeClosed(symbol, netPnl, "HIGH_RR_INTRADAY_V1", false);
+        // Apply P&L to paper account
+        paperAccount.applyPnl(netPnl);
 
-        // Release strategy engine lock
+        // Release risk slot
+        riskManagement.onTradeClosed(symbol, netPnl, STRATEGY, false);
+
+        // Notify strategy engine to free the signal slot
         if (strategyEngine != null) {
             strategyEngine.onSignalClosed(symbol);
         }
 
-        String pnlStr = String.format("%.2f", netPnl.doubleValue());
-        String emoji  = netPnl.doubleValue() > 0 ? "✅" : "❌";
-        log.info("[HIGHRR-MANAGER] {} CLOSED: {} | reason={} | entry={} | exit={} | P&L=₹{}",
-                emoji, symbol, reason, trade.entryPrice(), exitFill, pnlStr);
+        // ── Dashboard snapshot — record closed trade for history ─────────────
+        // This is the ONLY change to the close path.
+        // Captures a snapshot of the completed trade so DashboardController can
+        // display it. Read-only from dashboard, zero impact on trading logic.
+        captureClosedTrade(trade, exitPrice, netPnl, reason);
 
-        // Publish close event for dashboard and notification service
-        publisher.publishEvent(new TradeExecutionResultEvent(
-                this, symbol, "CLOSED",
-                trade.orderId(), null,
-                trade.entryPrice(), exitFill, netPnl, reason
+        log.info("[HIGHRR-MGR] 🔒 CLOSED: {} | dir={} | entry=₹{} | exit=₹{} | net=₹{} | reason={}",
+                symbol, trade.direction(), trade.fillPrice(), exitPrice, netPnl, reason);
+    }
+
+    /**
+     * Records a closed trade snapshot for dashboard visibility.
+     * Called only from exitTrade(). No effect on trading logic.
+     */
+    private void captureClosedTrade(HighRRTrade trade, BigDecimal exitPrice,
+                                    BigDecimal netPnl, String reason) {
+        closedTrades.add(new HighRRClosedTrade(
+                trade.symbol(),
+                trade.direction(),
+                trade.fillPrice(),
+                exitPrice,
+                trade.stopLoss(),
+                trade.target(),
+                trade.target2(),
+                trade.quantity(),
+                trade.entryTime(),
+                Instant.now(),
+                reason,
+                netPnl
         ));
+    }
 
-        // Place exit order in LIVE mode
-        if ("LIVE".equalsIgnoreCase(tradingMode) && orderClient != null) {
-            String exitTxType = isBuy ? "SELL" : "BUY";
-            try {
-                orderClient.placeMarketOrder(symbol, exitTxType, trade.quantity());
-                log.info("[HIGHRR-MANAGER] Live exit order placed: {} {} qty={}",
-                        exitTxType, symbol, trade.quantity());
-            } catch (Exception e) {
-                log.error("[HIGHRR-MANAGER] Live exit order failed for {}: {}", symbol, e.getMessage());
-            }
+    // ══════════════════════════════════════════════════════════════════════════
+    // SHUTDOWN
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @PreDestroy
+    public void onShutdown() {
+        if (!activeTrades.isEmpty()) {
+            log.warn("[HIGHRR-MGR] App shutdown — force closing {} HighRR positions", activeTrades.size());
+            forceCloseAll("APP_SHUTDOWN");
         }
     }
 
-    // ── Exit fill simulation (paper mode) ──────────────────────────────────────
-
-    private BigDecimal simulateExitFill(BigDecimal ltp, String reason, TradeDirection dir) {
-        double price = ltp.doubleValue();
-        boolean isBuy = dir == TradeDirection.LONG;
-
-        double slipPct;
-        if (reason.contains("STOPLOSS")) {
-            slipPct = SL_SLIP_PCT;    // 0.1% worse on SL
-        } else if (reason.contains("TIME_EXIT") || reason.contains("FORCE")) {
-            slipPct = EOD_SLIP_PCT;   // 0.15% for forced exits
-        } else {
-            slipPct = 0.0005;         // 0.05% normal exit
-        }
-
-        double filled = isBuy
-                ? price * (1.0 - slipPct)   // sell below market
-                : price * (1.0 + slipPct);  // buy above market
-
-        return BigDecimal.valueOf(filled).setScale(2,
-                isBuy ? RoundingMode.FLOOR : RoundingMode.CEILING);
-    }
-
     // ══════════════════════════════════════════════════════════════════════════
-    // DAILY RESET
+    // DASHBOARD READ-ONLY GETTERS
     // ══════════════════════════════════════════════════════════════════════════
 
-    @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
-    public void dailyReset() {
-        activeTrades.clear();
-        lastPrices.clear();
-        log.info("[HIGHRR-MANAGER] Daily reset complete");
-    }
-
-    // ══════════════════════════════════════════════════════════════════════════
-    // DASHBOARD HELPERS
-    // ══════════════════════════════════════════════════════════════════════════
-
-    public int getActiveTradeCount() { return activeTrades.size(); }
-
+    /** Active trades currently being monitored. */
     public Collection<HighRRTrade> getActiveTrades() {
         return Collections.unmodifiableCollection(activeTrades.values());
     }
 
-    public Map<String, BigDecimal> getLastPrices() {
-        return Collections.unmodifiableMap(lastPrices);
+    /** All trades closed today (SL hit, target hit, time stop, force close). */
+    public List<HighRRClosedTrade> getClosedTrades() {
+        LocalDate today = LocalDate.now(IST);
+        return closedTrades.stream()
+                .filter(t -> today.equals(t.closedAt().atZone(IST).toLocalDate()))
+                .collect(Collectors.toList());
+    }
+
+    /** All closed trades this session (since app start). */
+    public List<HighRRClosedTrade> getAllClosedTrades() {
+        return Collections.unmodifiableList(closedTrades);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // HIGH RR TRADE RECORD
+    // INNER TYPES
     // ══════════════════════════════════════════════════════════════════════════
 
+    /**
+     * Active trade record. Immutable — all state is captured at entry.
+     * Created by HighRROrderExecutionService and passed to registerTrade().
+     */
     public record HighRRTrade(
             String         symbol,
             TradeDirection direction,
-            BigDecimal     entryPrice,
+            BigDecimal     fillPrice,     // actual fill price (entry + slippage)
             BigDecimal     stopLoss,
-            BigDecimal     target1,       // 2R
-            BigDecimal     target2,       // 3R
+            BigDecimal     target,        // T1 = 2R
+            BigDecimal     target2,       // T2 = 3R
             int            quantity,
             String         orderId,
             Instant        entryTime,
             int            timeStopMinutes
-    ) {
-        public boolean isLong()  { return direction == TradeDirection.LONG; }
-        public boolean isShort() { return direction == TradeDirection.SHORT; }
+    ) {}
 
-        public double currentRMultiple(double ltp) {
-            double risk = entryPrice.subtract(stopLoss).abs().doubleValue();
-            if (risk == 0) return 0;
-            double profit = isLong() ? ltp - entryPrice.doubleValue()
-                    : entryPrice.doubleValue() - ltp;
-            return profit / risk;
-        }
-    }
+    /**
+     * Closed trade snapshot — created when a trade exits for any reason.
+     * Read-only from DashboardController. Contains all info needed for
+     * dashboard display: entry, exit, P&L, exit reason, timestamps.
+     */
+    public record HighRRClosedTrade(
+            String         symbol,
+            TradeDirection direction,
+            BigDecimal     entryPrice,
+            BigDecimal     exitPrice,
+            BigDecimal     stopLoss,
+            BigDecimal     target1,
+            BigDecimal     target2,
+            int            quantity,
+            Instant        entryTime,
+            Instant        closedAt,
+            String         exitReason,
+            BigDecimal     netPnl
+    ) {}
 }

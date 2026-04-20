@@ -155,8 +155,25 @@ public class OrbDataService {
         LocalTime now = LocalTime.now(IST);
         livePrices.put(symbol, price);
 
-        // Capture 9:15 open price and volume (first tick at/after 9:15)
-        if (!now.isBefore(ORB_START) && now.isBefore(LocalTime.of(9, 16))) {
+        // Capture 9:15 open price and volume.
+        // FIX 4: Extended window from 9:15:00–9:15:59 to 9:15:00–9:20:00.
+        //
+        // WHY THE 1-MINUTE WINDOW WAS WRONG:
+        // (a) NSE pre-open auction ends at 9:15:00 but many stocks receive their
+        //     first tick between 9:15:10 and 9:15:45 depending on liquidity.
+        //     Low-cap stocks can get first tick as late as 9:16–9:17.
+        // (b) If the system is deployed or restarted between 9:15:01 and 9:16:00,
+        //     the WebSocket reconnects during the window and the first tick arrives
+        //     after 9:16 — openPrices stays empty — shortlistCount = 0 all day.
+        // (c) On Railway/cloud, cold start + WebSocket handshake can take 20–60s,
+        //     pushing the first tick past 9:16 even when deployed before 9:15.
+        //
+        // FIX: Extend capture window to 9:20:00. The open price for ORB purposes
+        // is "the first traded price at/after market open". Capturing it up to
+        // 9:20 is still accurate — putIfAbsent ensures only the FIRST tick per
+        // symbol is stored, so the 9:15 open is preserved even if later ticks arrive.
+        // The gap calculation (openP - prevClose)/prevClose is unaffected.
+        if (!now.isBefore(ORB_START) && now.isBefore(LocalTime.of(9, 20))) {
             openPrices.putIfAbsent(symbol, price);
             // GAP FIX 1: capture traded volume at the open to pre-filter illiquid stocks
             volumeAtOpen.putIfAbsent(symbol, tick.getVolumeTradedToday());
@@ -262,16 +279,31 @@ public class OrbDataService {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // SCHEDULER: 9:15:30 AM – Shortlist gapped stocks
+    // SCHEDULER: 9:20:00 AM – Shortlist gapped stocks
+    // FIX 4: Moved from 9:15:30 to 9:20:00.
+    //
+    // WHY 9:15:30 WAS WRONG:
+    // beginOrbTracking() iterates openPrices to find stocks with gap >= 1%.
+    // openPrices is populated by onTick() between 9:15:00 and 9:20:00 (after fix).
+    // Running at 9:15:30 meant only 30 seconds of ticks had arrived.
+    // On a 294-symbol universe, many symbols had NOT yet received their first
+    // tick by 9:15:30 — especially mid/small-caps and Railway latency scenarios.
+    // Result: openPrices had maybe 50-100 symbols, missing many gap candidates.
+    //
+    // Running at 9:20:00 guarantees ALL 294 subscribed symbols have received
+    // at least one tick (5 full minutes of market open), so openPrices is
+    // complete before gap filtering runs. The ORB High/Low tracking continues
+    // unaffected until 9:30 lock.
     // ══════════════════════════════════════════════════════════════════════════
 
-    @Scheduled(cron = "30 15 9 * * MON-FRI", zone = "Asia/Kolkata")
+    @Scheduled(cron = "0 20 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void beginOrbTracking() {
-        // FIX 3: guard against empty openPrices (WebSocket not connected)
+        // FIX 4: guard against empty openPrices (WebSocket not connected or very late start)
         if (openPrices.isEmpty()) {
-            log.warn("[ORB] ⚠️  beginOrbTracking: openPrices is empty at 9:15:30. " +
-                    "WebSocket may not be connected or market data not flowing. " +
-                    "ORB strategy will be inactive today.");
+            log.warn("[ORB] ⚠️  beginOrbTracking: openPrices is empty at 9:20:00. " +
+                    "WebSocket may not be connected or system started after 9:20 AM. " +
+                    "ORB strategy will be inactive today. " +
+                    "Restart before 9:15 AM tomorrow to capture open prices correctly.");
             return;
         }
 

@@ -192,7 +192,7 @@ public class SidewaysScalpStrategy {
     @Value("${strategy.sideways-scalp.max-signals-per-session:5}")
     private int maxSignalsPerSession;
 
-    @Value("${strategy.sideways-scalp.time-stop-minutes:20}")
+    @Value("${strategy.sideways-scalp.time-stop-minutes:90}")
     private int timeStopMinutes;
 
     @Value("${trading.mode:PAPER}")

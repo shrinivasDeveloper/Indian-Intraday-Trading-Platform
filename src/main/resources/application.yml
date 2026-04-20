@@ -164,7 +164,7 @@ strategy:
   smart-channel-pullback:
     enabled: ${SCPS_ENABLED:true}
     require-high-quality-channel: false
-    time-stop-minutes: 60
+    time-stop-minutes: 90
     # FIX: was 1.0 (average RVOL = no conviction). Internal floor is 1.1.
     min-rvol: 1.0
     max-signals-per-session: 3
@@ -191,7 +191,7 @@ strategy:
     enabled: ${SCALP_ENABLED:true}
     min-rvol: 1.1
     max-signals-per-session: 5
-    time-stop-minutes: 20
+    time-stop-minutes: 90
     # FIX: Strong pressure bypass ratio (see SidewaysScalpStrategy FIX 1)
     # When market pressure ratio >= this value, strict hammer/shooting-star
     # pattern is relaxed to any bullish/bearish candle direction.
