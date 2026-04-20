@@ -376,7 +376,7 @@ public class OrbDataService {
 
         validOrbCount.set(valid);
         log.info("[ORB] {} valid setups after scoring", valid);
-        selectTop2();
+        selectTop10();
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -428,10 +428,13 @@ public class OrbDataService {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // TOP-2 SELECTION
+    // TOP-10 SELECTION
+    // REQ 1: Select top 10 candidates by score for monitoring.
+    // REQ 2: Only 2 will actually execute trades (enforced in OrbStrategyEngine).
+    //        The remaining 8 are cancelled INSTANTLY once 2 trades fire.
     // ══════════════════════════════════════════════════════════════════════════
 
-    private void selectTop2() {
+    private void selectTop10() {
         List<OrbData> candidates = orbDataMap.values().stream()
                 .filter(od -> od.valid)
                 .sorted(Comparator
@@ -445,7 +448,7 @@ public class OrbDataService {
         clearRedisSelected();
 
         for (OrbData od : candidates) {
-            if (selectedToday.size() >= 2) break;
+            if (selectedToday.size() >= 10) break;
             boolean sectorConflict = usedSectors.contains(od.sectorName)
                     && (candidates.size() - candidates.indexOf(od)) > 1;
             if (sectorConflict) continue;
@@ -454,7 +457,7 @@ public class OrbDataService {
             usedSectors.add(od.sectorName);
             persistToRedisList(KEY_SELECTED, od.symbol);
 
-            log.info("[ORB] 📌 SELECTED #{}: {} | score={} rvol={:.2f} gap={:.2f}% " +
+            log.info("[ORB] 📌 SELECTED #{}/10: {} | score={} rvol={:.2f} gap={:.2f}% " +
                             "sector={} orbH={} orbL={} sectorAligned={}",
                     selectedToday.size(), od.symbol, od.score,
                     od.rvol, od.gapPct * 100, od.sectorName,
@@ -466,7 +469,8 @@ public class OrbDataService {
         if (selectedToday.isEmpty()) {
             log.warn("[ORB] No qualifying setups today (insufficient gap/RVOL/sector)");
         } else {
-            log.info("[ORB] Final selection for today: {}", selectedToday);
+            log.info("[ORB] Top-10 watchlist for today: {} (will execute max 2, cancel rest instantly)",
+                    selectedToday);
         }
     }
 

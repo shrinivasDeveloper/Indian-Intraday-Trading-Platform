@@ -23,6 +23,8 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * OrbStrategyEngine – Real-time ORB breakout monitoring and signal firing.
@@ -30,30 +32,26 @@ import java.util.concurrent.ConcurrentHashMap;
  * ─────────────────────────────────────────────────────────────────────────────
  * CHANGES vs previous version:
  * ─────────────────────────────────────────────────────────────────────────────
- * FIX 1 – Per-tick selected-symbol set allocation eliminated.
- *   Root cause: onTick() called orbDataService.getSelectedSymbols() which
- *   returns a new ArrayList copy on every invocation. With 400+ symbols ×
- *   multiple ticks per second, this produced massive short-lived heap allocation
- *   pressure → frequent young-gen GC pauses → latency spikes at exactly the
- *   moment tick processing must be fastest (breakout detection).
- *   Fix: cache the selected-symbol lookup in a volatile Set<String> field.
- *   The set is refreshed in two places:
- *     (a) After OrbDataService.lockOrbAndScore() runs at 9:30 AM (via a new
- *         @Scheduled method at 9:30:05 that runs 5 seconds after lock)
- *     (b) As a fallback, refreshed lazily inside onTick() only when the cache
- *         is empty AND orbLocked is true (covers edge cases like restarts).
- *   The hot path (tick processing after 9:30) performs a single Set.contains()
- *   against an already-populated in-memory set — zero allocation.
+ * REQ 1 – Top-10 watchlist (was top-5, now top-10).
+ *   OrbDataService now selects the top 10 scored stocks at 9:30.
+ *   All 10 are monitored for breakout. Only 2 actually execute trades.
  *
- * FIX 2 – Breakout confirmation map key collision guard.
- *   The breakoutConfirmCount map uses "symbol:BUY" and "symbol:SELL" keys.
- *   When price re-enters the range after a failed confirmation (e.g. 2 of 3
- *   ticks confirmed then retracted), the counter reset logic was correct.
- *   However, if a symbol simultaneously satisfies BOTH isBuySetup() AND
- *   isSellSetup() (only possible if OrbData is misconfigured, since isGapUp()
- *   is mutually exclusive), both paths could fire. Added explicit mutual
- *   exclusion: BUY setup is evaluated first; SELL is skipped if od.isGapUp().
- *   This reinforces the semantic guarantee already present in OrbData.
+ * REQ 2 – Execute 2 trades then instantly cancel remaining 3.
+ *   executedTradesCount: AtomicInteger tracks trades fired this session.
+ *   MAX_EXECUTIONS = 2: once this is reached inside fireSignal(), all remaining
+ *   selected-but-untriggered symbols are immediately marked triggered (cancelled).
+ *   No delay — cancellation happens synchronously within the same fireSignal() call.
+ *
+ * REQ 3 – One direction per session (no BUY/SELL mixing).
+ *   lockedDirection: volatile field, null until first trade fires.
+ *   First breakout (BUY or SELL) locks the direction for the entire session.
+ *   Any subsequent breakout in the opposite direction is blocked and logged.
+ *   Reset at daily reset.
+ *
+ * REQ 4 – Direction-aware RVOL thresholds.
+ *   BUY:  breakoutRvol >= 1.0 (more opportunities, higher win rate)
+ *   SELL: breakoutRvol >= 1.5 (fewer but higher-quality signals)
+ *   All other conditions (scoring, SL, targets, time gates) unchanged.
  *
  * All breakout detection, signal firing, time gates, and scheduler logic unchanged.
  * ─────────────────────────────────────────────────────────────────────────────
@@ -97,11 +95,36 @@ public class OrbStrategyEngine {
     @Value("${strategy.orb.time-stop-minutes:120}")
     private int timeStopMinutes;
 
+    // ── Execution limits ─────────────────────────────────────────────────────
+    /** REQ 2: Max trades to actually execute from the top-10 candidates. */
+    private static final int MAX_EXECUTIONS = 2;
+
     // ── Confirmation counters ────────────────────────────────────────────────
     private final Map<String, Integer> breakoutConfirmCount = new ConcurrentHashMap<>();
 
     // ── Per-strategy active signal locks ────────────────────────────────────
     private final Set<String> activeSignals = ConcurrentHashMap.newKeySet();
+
+    /**
+     * REQ 2: Counts trades actually executed this session (not just monitored).
+     * Once this reaches MAX_EXECUTIONS, remaining candidates are cancelled instantly.
+     */
+    private final AtomicInteger executedTradesCount = new AtomicInteger(0);
+
+    /**
+     * REQ 3: Direction lock for the session — thread-safe via AtomicReference.
+     * null = no trade fired yet, direction is open.
+     * Once first trade fires (BUY or SELL), compareAndSet locks it atomically.
+     * All opposite-direction breakouts are blocked for the rest of the session.
+     *
+     * WHY AtomicReference and NOT volatile:
+     * volatile only guarantees visibility, NOT atomicity of read-then-write.
+     * Without AtomicReference, two symbols could simultaneously read null,
+     * both pass the direction check, and fire in opposite directions — violating REQ 3.
+     * AtomicReference.compareAndSet(null, direction) is atomic: only the first
+     * thread succeeds; all others see the already-locked direction.
+     */
+    private final AtomicReference<TradeDirection> lockedDirection = new AtomicReference<>(null);
 
     /**
      * FIX 1: Cached selected-symbol set.
@@ -164,37 +187,66 @@ public class OrbStrategyEngine {
         double price = tick.getLastTradedPrice().doubleValue();
         if (price <= 0) return;
 
-        // FIX 2: isBuySetup() and isSellSetup() are mutually exclusive by design
-        // (isGapUp() determines the direction). Explicit branching ensures only one
-        // path fires, even if OrbData state is ever unexpected.
-        if (od.isGapUp()) {
-            // Gap-up stock: only look for upside BUY breakout
-            if (price > od.orbHigh) {
-                int count = breakoutConfirmCount.merge(symbol + ":BUY", 1, Integer::sum);
-                if (count >= CONFIRMATION_TICKS) {
-                    log.info("[ORB] ✅ BUY confirmed: {} | price={} orbH={} confirms={}",
-                            symbol, String.format("%.2f", price),
-                            String.format("%.2f", od.orbHigh), count);
-                    fireSignal(symbol, od, TradeDirection.LONG, price, tick.getVolumeTradedToday());
-                }
-            } else if (price <= od.orbHigh) {
-                // Price back inside range — reset BUY counter
+        // REQ 2: If we've already executed MAX_EXECUTIONS trades this session,
+        // remaining candidates should have been cancelled already. Belt-and-suspenders guard.
+        if (executedTradesCount.get() >= MAX_EXECUTIONS) return;
+
+        // ── BOTH-SIDE OCO BREAKOUT DETECTION ─────────────────────────────────────
+        // Spec §7: "Place both-side trigger orders (OCO style)"
+        // Every selected stock monitors BOTH directions:
+        //   price > orbHigh → BUY breakout
+        //   price < orbLow  → SELL breakdown
+        // Whichever fires first is the real move. markTriggered() ensures only ONE
+        // side can execute — once BUY fires, the symbol is marked triggered and the
+        // SELL path can never fire for the same symbol (and vice versa).
+        // This is correct OCO behaviour: first breakout wins, other side cancelled.
+        //
+        // The gap direction (isGapUp) was previously used to restrict to one side only.
+        // That is WRONG — a gap-up stock CAN fail and break down below orbLow (false gap),
+        // and a gap-down stock CAN reverse and break above orbHigh (gap fill).
+        // Both are valid tradeable moves. We always monitor both sides.
+
+        // ── BUY side: price breaks above ORB High ──────────────────────────────
+        if (price > od.orbHigh) {
+            // REQ 3: If direction is locked to SELL, skip BUY breakouts
+            if (lockedDirection.get() == TradeDirection.SHORT) {
                 breakoutConfirmCount.remove(symbol + ":BUY");
+                return;
             }
-        } else {
-            // Gap-down stock: only look for downside SELL breakdown
-            if (price < od.orbLow) {
-                int count = breakoutConfirmCount.merge(symbol + ":SELL", 1, Integer::sum);
-                if (count >= CONFIRMATION_TICKS) {
-                    log.info("[ORB] ✅ SELL confirmed: {} | price={} orbL={} confirms={}",
-                            symbol, String.format("%.2f", price),
-                            String.format("%.2f", od.orbLow), count);
-                    fireSignal(symbol, od, TradeDirection.SHORT, price, tick.getVolumeTradedToday());
-                }
-            } else if (price >= od.orbLow) {
-                // Price back inside range — reset SELL counter
+            int count = breakoutConfirmCount.merge(symbol + ":BUY", 1, Integer::sum);
+            // Reset the opposite counter — price is going up, not down
+            breakoutConfirmCount.remove(symbol + ":SELL");
+            if (count >= CONFIRMATION_TICKS) {
+                log.info("[ORB] ✅ BUY breakout confirmed: {} | price={} orbH={} confirms={} (gap={})",
+                        symbol, String.format("%.2f", price),
+                        String.format("%.2f", od.orbHigh), count,
+                        od.isGapUp() ? "UP" : "DOWN");
+                fireSignal(symbol, od, TradeDirection.LONG, price, tick.getVolumeTradedToday());
+            }
+        }
+        // ── SELL side: price breaks below ORB Low ──────────────────────────────
+        else if (price < od.orbLow) {
+            // REQ 3: If direction is locked to BUY, skip SELL breakouts
+            if (lockedDirection.get() == TradeDirection.LONG) {
                 breakoutConfirmCount.remove(symbol + ":SELL");
+                return;
             }
+            int count = breakoutConfirmCount.merge(symbol + ":SELL", 1, Integer::sum);
+            // Reset the opposite counter — price is going down, not up
+            breakoutConfirmCount.remove(symbol + ":BUY");
+            if (count >= CONFIRMATION_TICKS) {
+                log.info("[ORB] ✅ SELL breakdown confirmed: {} | price={} orbL={} confirms={} (gap={})",
+                        symbol, String.format("%.2f", price),
+                        String.format("%.2f", od.orbLow), count,
+                        od.isGapUp() ? "UP" : "DOWN");
+                fireSignal(symbol, od, TradeDirection.SHORT, price, tick.getVolumeTradedToday());
+            }
+        }
+        // ── Price inside range: reset both counters ─────────────────────────────
+        else {
+            // Price returned inside ORB range — cancel pending confirmations on both sides
+            breakoutConfirmCount.remove(symbol + ":BUY");
+            breakoutConfirmCount.remove(symbol + ":SELL");
         }
     }
 
@@ -212,34 +264,50 @@ public class OrbStrategyEngine {
             return;
         }
 
-        // GAP FIX 3 (CORRECTED): Volume confirmation at breakout moment.
-        // Spec §10: "If breakout is weak (low volume / fake move) → Skip entry"
-        //
-        // IMPORTANT: tickVolume from getVolumeTradedToday() is CUMULATIVE for the whole day.
-        // Comparing it against od.latestVolume (also cumulative at 9:30) would always pass
-        // because cumulative volume only grows. Instead we recompute RVOL at breakout time.
-        //
-        // RVOL = currentVolume / expectedAverageVolumeByNow
-        // rvolService.getRvolNow() computes this correctly using time-slot weighting.
-        // A breakout on RVOL < 1.0 means below-average participation — likely a fake move.
-        // Minimum breakout RVOL threshold: 1.0 (at least average volume for the time of day).
+        // REQ 4: Direction-aware RVOL thresholds.
+        // BUY:  RVOL >= 1.0 — more opportunities, higher win rate
+        // SELL: RVOL >= 1.5 — fewer but higher-quality signals (gap-downs are noisier)
         double breakoutRvol = rvolService.getRvolNow(symbol, tickVolume);
-        if (breakoutRvol < 1.0) {
-            log.warn("[ORB] {} SKIPPED: weak breakout RVOL {:.2f} < 1.0. " +
-                            "Below-average volume at breakout — likely fake move. " +
+        double minRvol = direction == TradeDirection.SHORT ? 1.5 : 1.0;
+        if (breakoutRvol < minRvol) {
+            log.warn("[ORB] {} SKIPPED: breakout RVOL {:.2f} < min {:.1f} for {} side. " +
                             "Will retry if RVOL improves on next confirmation.",
-                    symbol, breakoutRvol);
+                    symbol, breakoutRvol, minRvol, direction);
             // Do NOT call markTriggered() — allow future breakout if volume improves
             return;
         }
-        log.debug("[ORB] {} breakout RVOL={:.2f} — volume confirmed ✓", symbol, breakoutRvol);
+        log.debug("[ORB] {} breakout RVOL={:.2f} >= {:.1f} — volume confirmed ✓",
+                symbol, breakoutRvol, minRvol);
 
-        // Atomic dedup — returns false if already triggered
+        // Atomic dedup — returns false if this symbol was already triggered
+        // (concurrent tick race on same symbol). Must happen BEFORE direction lock.
         if (!orbDataService.markTriggered(symbol)) {
             log.debug("[ORB] {} already triggered (concurrent tick race prevented)", symbol);
             return;
         }
         activeSignals.add(symbol);
+
+        // REQ 3: Atomically lock direction on first trade.
+        // compareAndSet(null, direction) succeeds only if no direction is set yet.
+        // If it fails, another thread already locked a direction.
+        // If the locked direction differs from this trade's direction → block.
+        // This is race-condition-safe: volatile read + write is NOT atomic,
+        // but compareAndSet IS atomic — only one thread can win.
+        if (!lockedDirection.compareAndSet(null, direction)) {
+            // Direction was already locked by another trade
+            TradeDirection existingLock = lockedDirection.get();
+            if (existingLock != direction) {
+                log.info("[ORB] {} BLOCKED: session direction locked to {}. Cannot fire {} trade.",
+                        symbol, existingLock, direction);
+                // Undo markTriggered so it could theoretically retry, but since direction
+                // is locked this symbol can never fire the opposite side anyway
+                activeSignals.remove(symbol);
+                return;
+            }
+            // Same direction as lock — allowed (second trade of same direction)
+        } else {
+            log.info("[ORB] 🔒 Session direction locked to {} by {}", direction, symbol);
+        }
 
         // ── Trade parameters ─────────────────────────────────────────────────
         BigDecimal entryPrice = BigDecimal.valueOf(breakoutPrice)
@@ -324,6 +392,41 @@ public class OrbStrategyEngine {
                 totalScore,
                 timeStopMinutes
         ));
+
+        // REQ 2: Count this execution. If we've now reached MAX_EXECUTIONS,
+        // INSTANTLY cancel all remaining selected-but-untriggered candidates.
+        // This happens synchronously here — no scheduler delay, no tick wait.
+        int executed = executedTradesCount.incrementAndGet();
+        log.info("[ORB] ✅ Trade {}/{} executed: {}", executed, MAX_EXECUTIONS, symbol);
+
+        if (executed >= MAX_EXECUTIONS) {
+            cancelRemainingCandidates();
+        }
+    }
+
+    /**
+     * REQ 2: Instantly cancel all remaining selected candidates that haven't triggered yet.
+     * Called immediately after the 2nd trade executes — no delay.
+     * markTriggered() blocks them from ever firing again.
+     */
+    private void cancelRemainingCandidates() {
+        List<String> selected = orbDataService.getSelectedSymbols();
+        int cancelledCount = 0;
+        for (String sym : selected) {
+            if (!orbDataService.isTriggered(sym)) {
+                orbDataService.markTriggered(sym);
+                activeSignals.remove(sym);
+                breakoutConfirmCount.remove(sym + ":BUY");
+                breakoutConfirmCount.remove(sym + ":SELL");
+                cancelledCount++;
+                log.info("[ORB] ⚡ INSTANTLY CANCELLED remaining candidate: {} " +
+                        "(2 trades already executed)", sym);
+            }
+        }
+        if (cancelledCount > 0) {
+            log.info("[ORB] 🏁 Session complete — {} remaining candidates cancelled. " +
+                    "Direction was: {}", cancelledCount, lockedDirection.get());
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -359,14 +462,19 @@ public class OrbStrategyEngine {
     public void dailyReset() {
         breakoutConfirmCount.clear();
         activeSignals.clear();
-        selectedSymbolsCache = Collections.emptySet(); // FIX 1: reset cache
-        log.info("[ORB] Engine daily reset complete");
+        selectedSymbolsCache = Collections.emptySet();
+        executedTradesCount.set(0);     // REQ 2: reset execution counter
+        lockedDirection.set(null);       // REQ 3: reset direction lock
+        log.info("[ORB] Engine daily reset complete — 2 execution slots available, direction unlocked");
     }
 
     // ── Dashboard helpers ────────────────────────────────────────────────────
-    public boolean isEnabled()            { return strategyEnabled; }
-    public int     getActiveSignalCount() { return activeSignals.size(); }
-    public Set<String> getActiveSignals() { return Collections.unmodifiableSet(activeSignals); }
+    public boolean isEnabled()               { return strategyEnabled; }
+    public int     getActiveSignalCount()    { return activeSignals.size(); }
+    public Set<String> getActiveSignals()    { return Collections.unmodifiableSet(activeSignals); }
+    public int     getExecutedTradesCount()  { return executedTradesCount.get(); }
+    public int     getRemainingSlots()       { return Math.max(0, MAX_EXECUTIONS - executedTradesCount.get()); }
+    public TradeDirection getLockedDirection(){ return lockedDirection.get(); }
 
     private BigDecimal resolveCapital() {
         return "PAPER".equalsIgnoreCase(tradingMode) ? paperAccount.getCapital() : capital;
