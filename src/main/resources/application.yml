@@ -169,8 +169,8 @@ strategy:
     min-rvol: 1.0
     max-signals-per-session: 3
     # FIX: sector must be strictly positive for BUY, strictly negative for SELL
-    sector-buy-threshold: 0.05
-    sector-sell-threshold: -0.05
+    sector-buy-threshold: 0.0  # IMPROVED: was 0.05 — rejecting valid +0.03% sectors. Now: any positive = BUY valid
+    sector-sell-threshold: 0.0  # IMPROVED: was -0.05 — any negative = SELL valid
     min-adjusted-rr: 1.8
     symbol-cooldown-minutes: 60
     max-channel-width-pct: 5.0
@@ -217,7 +217,10 @@ strategy:
   market-pressure:
     enabled: ${PRESSURE_ENABLED:true}
     time-stop-minutes: 30
-    max-signals-per-session: 6
+    # IMPROVED: Reduced from 6 → 4 signals/session.
+    # 6 signals consumed all 10 daily slots, starving ORB and HighRR.
+    # Slot priority: ORB(2) + HighRR(2) + MarketPressure(4) + SCPS(2) = 10
+    max-signals-per-session: 4
 
   # ================================
   # ORB (OPENING RANGE BREAKOUT) STRATEGY
@@ -229,7 +232,7 @@ strategy:
     # Reward:risk multiplier for T1 target.
     # T1 = entry ± (orbRange × target-rr)
     # T2 = entry ± (orbRange × target-rr × 1.5)
-    target-rr: 1.5
+    target-rr: 2.5  # IMPROVED: was 1.5 — ORB trend days run 3-5x range, T1=2.5x gives real profits
     # Auto-cancel breakout watch if no breakout by 11:30 AM.
     # Time-stop for active trades: 120 minutes from entry (≈ 1:30 PM exit).
     # Note: forced exit at 1:30 PM is also enforced by HighRROrderExecutionService

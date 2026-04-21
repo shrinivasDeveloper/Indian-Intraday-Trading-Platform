@@ -196,10 +196,15 @@ public class SmartChannelPullbackStrategy {
     @Value("${strategy.smart-channel-pullback.max-signals-per-session:3}")
     private int maxSignalsPerSession;
 
-    @Value("${strategy.smart-channel-pullback.sector-buy-threshold:0.05}")
+    // IMPROVEMENT: Sector threshold lowered from 0.05% → 0.0%.
+    // The original 0.05% rejected valid trades where a broadly bullish sector was
+    // at +0.03% — still positive, still aligned, but below threshold.
+    // The existing strict check (sectorChg > 0 required) is sufficient directional filter.
+    // Threshold is now 0.0 so any positive sector = valid BUY, any negative = valid SELL.
+    @Value("${strategy.smart-channel-pullback.sector-buy-threshold:0.0}")
     private double sectorBuyThreshold;
 
-    @Value("${strategy.smart-channel-pullback.sector-sell-threshold:-0.05}")
+    @Value("${strategy.smart-channel-pullback.sector-sell-threshold:0.0}")
     private double sectorSellThreshold;
 
     @Value("${strategy.smart-channel-pullback.min-adjusted-rr:1.8}")

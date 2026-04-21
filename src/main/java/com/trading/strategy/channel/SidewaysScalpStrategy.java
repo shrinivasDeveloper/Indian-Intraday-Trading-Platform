@@ -144,7 +144,11 @@ public class SidewaysScalpStrategy {
 
     // ── Channel width bounds for scalp (SIDEWAYS channels only) ──────────────
     // Only trade narrow channels suitable for scalp targets.
-    private static final double MIN_WIDTH_PCT = 0.6;   // skip if channel < 0.6% wide
+    // IMPROVEMENT: Raised MIN_WIDTH_PCT from 0.6% → 0.8%.
+    // A 0.6% channel on a ₹100 stock = ₹0.60 reward. After ₹40 brokerage on both legs
+    // and slippage, net profit per trade is near zero or negative at ₹1L capital.
+    // 0.8% channel = ₹0.80 reward minimum — after costs, still meaningful.
+    private static final double MIN_WIDTH_PCT = 0.8;   // skip if channel < 0.8% wide (was 0.6)
     private static final double MAX_WIDTH_PCT = 1.8;   // skip if channel > 1.8% wide
 
     // ── FIX 2: Minimum stock price ────────────────────────────────────────────

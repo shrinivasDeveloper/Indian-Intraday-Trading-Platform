@@ -5,6 +5,7 @@ import com.trading.domain.enums.TradeDirection;
 import com.trading.events.SmartChannelPullbackSignalEvent;
 import com.trading.events.TickReceivedEvent;
 import com.trading.marketdata.service.LatencyMonitor;
+import com.trading.regime.service.MarketDirectionService;
 import com.trading.papertrading.model.PaperAccount;
 import com.trading.position.service.PositionSizerService;
 import com.trading.risk.service.CircuitBreakerService;
@@ -77,8 +78,8 @@ public class OrbStrategyEngine {
     private final PositionSizerService      positionSizer;
     private final PaperAccount             paperAccount;
     private final LatencyMonitor           latencyMonitor;
-    // GAP FIX 3: needed for real-time RVOL check at breakout moment
     private final RvolService              rvolService;
+    private final MarketDirectionService   marketDirection; // ORB regime gate
 
     @Value("${trading.mode:PAPER}")
     private String tradingMode;
@@ -89,7 +90,8 @@ public class OrbStrategyEngine {
     @Value("${strategy.orb.enabled:true}")
     private boolean strategyEnabled;
 
-    @Value("${strategy.orb.target-rr:1.5}")
+    @Value("${strategy.orb.target-rr:2.5}")  // Raised from 1.5 → 2.5. On real trend days ORB runs 3-5x range.
+    // 1.5 was leaving massive profit on the table. T1=2.5x orbRange, T2=4.0x orbRange.
     private double targetRR;
 
     @Value("${strategy.orb.time-stop-minutes:120}")
@@ -161,6 +163,16 @@ public class OrbStrategyEngine {
         LocalTime now = LocalTime.now(IST);
         if (now.isBefore(BREAKOUT_START) || now.isAfter(BREAKOUT_END)) return;
         if (!orbDataService.isOrbLocked()) return;
+
+        // ── ORB REGIME GATE ──────────────────────────────────────────────────
+        // ORB is a gap + momentum breakout strategy. It needs:
+        //  1. Nifty ATR ≥ 0.30% — frozen days produce false breakouts
+        //  2. Market NOT SIDEWAYS — a directionless market kills gap follow-through
+        // Check is done once per tick but the MarketDirectionService caches results,
+        // so this is effectively O(1). On SIDEWAYS/frozen days, skip all processing.
+        MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
+        if (dir.niftyAtrPct() < 0.30) return;
+        if (dir.direction() == MarketDirectionService.Direction.SIDEWAYS) return;
 
         String symbol = tick.getTradingSymbol();
         if (symbol == null || symbol.isBlank()) return;
@@ -316,16 +328,21 @@ public class OrbStrategyEngine {
 
         BigDecimal stopLoss, target1, target2;
         if (direction == TradeDirection.LONG) {
-            stopLoss = BigDecimal.valueOf(od.orbLow * 0.999).setScale(2, RoundingMode.FLOOR);
+            // SL: below orbLow with 0.1% buffer (tighter than 0.1% but min 1 tick away)
+            // IMPROVEMENT: use max(orbLow * 0.999, orbLow - 0.5*orbRange) as SL floor
+            // so SL distance is never less than 0.5x ORB range — avoids noise-level SL
+            double slLevel = Math.max(od.orbLow * 0.999, od.orbLow - orbRange * 0.5);
+            stopLoss = BigDecimal.valueOf(slLevel).setScale(2, RoundingMode.FLOOR);
             target1  = entryPrice.add(BigDecimal.valueOf(orbRange * targetRR))
                     .setScale(2, RoundingMode.HALF_UP);
-            target2  = entryPrice.add(BigDecimal.valueOf(orbRange * targetRR * 1.5))
+            target2  = entryPrice.add(BigDecimal.valueOf(orbRange * targetRR * 1.6))
                     .setScale(2, RoundingMode.HALF_UP);
         } else {
-            stopLoss = BigDecimal.valueOf(od.orbHigh * 1.001).setScale(2, RoundingMode.CEILING);
+            double slLevel = Math.min(od.orbHigh * 1.001, od.orbHigh + orbRange * 0.5);
+            stopLoss = BigDecimal.valueOf(slLevel).setScale(2, RoundingMode.CEILING);
             target1  = entryPrice.subtract(BigDecimal.valueOf(orbRange * targetRR))
                     .setScale(2, RoundingMode.HALF_UP);
-            target2  = entryPrice.subtract(BigDecimal.valueOf(orbRange * targetRR * 1.5))
+            target2  = entryPrice.subtract(BigDecimal.valueOf(orbRange * targetRR * 1.6))
                     .setScale(2, RoundingMode.HALF_UP);
         }
 
@@ -333,6 +350,17 @@ public class OrbStrategyEngine {
         if (risk.compareTo(BigDecimal.ZERO) == 0) {
             log.warn("[ORB] {} zero SL distance – ORB range too small. Skipping.", symbol);
             orbDataService.markTriggered(symbol); // prevent retry
+            activeSignals.remove(symbol);
+            return;
+        }
+
+        // IMPROVEMENT: Minimum SL distance check — SL must be at least 0.4% of entry.
+        // Prevents trading when ORB range is so tight the SL is inside market noise.
+        double slPct = risk.doubleValue() / entryPrice.doubleValue();
+        if (slPct < 0.004) {
+            log.info("[ORB] {} SL distance {:.3f}% below minimum 0.4% — ORB range too narrow. Skipping.",
+                    symbol, slPct * 100);
+            orbDataService.markTriggered(symbol);
             activeSignals.remove(symbol);
             return;
         }

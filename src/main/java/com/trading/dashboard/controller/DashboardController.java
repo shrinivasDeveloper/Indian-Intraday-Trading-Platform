@@ -942,25 +942,40 @@ public class DashboardController {
 
         // ── 1. Collect all trades (closed + active) into a flat list ──────────
         List<Map<String, Object>> allTrades = new ArrayList<>();
+        // Track symbols already added as OPEN to prevent duplicates.
+        // PRESTIGE and SKFINDIA appeared twice on 2026-04-21 because
+        // paperManagement.getActiveTrades() and domain Trade list both contain them.
+        Set<String> addedOpenSymbols = new java.util.HashSet<>();
 
-        // Closed standard trades (ORB, SCPS, SIDEWAYS, etc.) — domain Trade entity
+        // Closed standard trades (ORB, SCPS, SIDEWAYS, MarketPressure etc.)
         for (com.trading.domain.entity.Trade t : paperExecution.getTodayTrades(LocalDate.now())) {
+            if ("OPEN".equals(t.getStatus())) {
+                // Will be captured from paperManagement.getActiveTrades() with live P&L
+                continue;
+            }
             allTrades.add(portfolioTradeRow(t, prices));
         }
 
-        // Closed HighRR trades — HighRRClosedTrade record
+        // Closed HighRR trades
         for (HighRRTradeManager.HighRRClosedTrade t : highRRTradeManager.getClosedTrades()) {
             allTrades.add(portfolioHighRRClosedRow(t));
         }
 
-        // Active standard trades — live unrealised P&L
+        // Active standard trades — live unrealised P&L (single source of truth for open)
         for (PaperTradeManagementService.ManagedTrade mt : paperManagement.getActiveTrades()) {
-            allTrades.add(portfolioActiveRow(mt, prices));
+            // FIX: ManagedTrade has no symbol()/strategyName() — use the wrapped Trade entity
+            String key = mt.trade().getTradingSymbol() + "|" + mt.trade().getStrategyName();
+            if (addedOpenSymbols.add(key)) {
+                allTrades.add(portfolioActiveRow(mt, prices));
+            }
         }
 
         // Active HighRR trades — live unrealised P&L
         for (HighRRTradeManager.HighRRTrade t : highRRTradeManager.getActiveTrades()) {
-            allTrades.add(portfolioHighRRActiveRow(t, prices));
+            String key = t.symbol() + "|HIGH_RR_INTRADAY_V1";
+            if (addedOpenSymbols.add(key)) {
+                allTrades.add(portfolioHighRRActiveRow(t, prices));
+            }
         }
 
         // Sort by entry time ascending so the table reads chronologically
@@ -994,6 +1009,8 @@ public class DashboardController {
         allocationTargets.put("HIGH_RR_INTRADAY_V1",        new int[]{2});
         allocationTargets.put("SMART_CHANNEL_PULLBACK_V3",  new int[]{3});
         allocationTargets.put("SIDEWAYS_SCALP_V1",          new int[]{3});
+        allocationTargets.put("SCALP_PRESSURE_V2",          new int[]{3}); // actual STRATEGY_NAME in SidewaysScalpStrategy
+        allocationTargets.put("MARKET_PRESSURE_V1",         new int[]{4}); // FIX: was missing → showed allocationMax=0
 
         // Build from all seen strategies, plus ensure targets are shown even with 0 trades
         Set<String> allStrats = new LinkedHashSet<>(allocationTargets.keySet());
@@ -1026,8 +1043,8 @@ public class DashboardController {
             sb.put("closedTrades",   cnt);
             sb.put("activeTrades",   active);
             sb.put("totalTrades",    cnt + active);
-            sb.put("slotsUsed",      cnt + active);
-            sb.put("slotsRemaining", Math.max(0, target - cnt - active));
+            sb.put("slotsUsed",      active);  // FIX: slots = currently open, not total traded today
+            sb.put("slotsRemaining", Math.max(0, target - active));
             sb.put("wins",           wins);
             sb.put("losses",         cnt - wins);
             sb.put("winRate",        cnt > 0 ? String.format("%.1f%%", (double) wins / cnt * 100) : "—");

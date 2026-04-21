@@ -144,6 +144,17 @@ public class PaperTradeExecutionService {
             return;
         }
 
+        // ── Cross-strategy symbol conflict guard ────────────────────────────
+        // Prevents two different strategies from trading the same symbol at the
+        // same time. Proved necessary on 2026-04-21 when PRESTIGE appeared in
+        // both MARKET_PRESSURE channel scan and SCPS pullback zone simultaneously.
+        if (riskService.isSymbolAlreadyActive(sym)) {
+            String holdingStrategy = riskService.getActiveStrategyForSymbol(sym);
+            log.warn("[PAPER] Symbol {} already held by {} — rejecting {} signal to avoid double exposure",
+                    sym, holdingStrategy, strategyName);
+            return;
+        }
+
         log.info("[PAPER] Executing: {} dir={} qty={} entry={} sl={} target={} strategy={}",
                 sym, event.getDirection(), qty,
                 event.getEntryPrice(), event.getStopLoss(), event.getTarget(),

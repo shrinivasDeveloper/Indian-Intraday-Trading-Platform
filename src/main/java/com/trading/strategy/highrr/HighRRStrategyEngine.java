@@ -4,9 +4,11 @@ import com.trading.domain.enums.TradeDirection;
 import com.trading.events.SmartChannelPullbackSignalEvent;
 import com.trading.marketdata.service.InstrumentCacheService;
 import com.trading.marketdata.service.LatencyMonitor;
+import com.trading.marketdata.service.MarketTimingService;
 import com.trading.papertrading.model.PaperAccount;
 import com.trading.position.service.PositionSizerService;
 import com.trading.risk.service.CircuitBreakerService;
+import com.trading.regime.service.MarketDirectionService;
 import com.trading.strategy.highrr.HighRRScannerService.SymbolState;
 import com.zerodhatech.models.Instrument;
 import lombok.RequiredArgsConstructor;
@@ -59,13 +61,21 @@ public class HighRRStrategyEngine {
     private static final ZoneId IST           = ZoneId.of("Asia/Kolkata");
     private static final String STRATEGY_NAME = "HIGH_RR_INTRADAY_V1";
 
-    private static final LocalTime TRADE_START = LocalTime.of(9, 30);
-    private static final LocalTime TRADE_END   = LocalTime.of(13, 0);
+    private static final LocalTime TRADE_START  = LocalTime.of(9, 35);  // Gate: skip opening 5-min noise
+    private static final LocalTime TRADE_END    = LocalTime.of(13, 0);
+    private static final LocalTime LUNCH_START  = LocalTime.of(11, 0);  // Gate: skip lunch window
+    private static final LocalTime LUNCH_END    = LocalTime.of(12, 30);
+    private static final double    MIN_ATR_PCT  = 0.30;                 // Gate: frozen market guard
 
     // ── Limits ──────────────────────────────────────────────────────────────
     private static final int    MAX_TRADES_PER_DAY = 2;
     private static final int    TOP_N_CANDIDATES   = 2;
     private static final double MIN_RR_RATIO       = 2.0;
+    /** Minimum SL distance as % of entry price.
+     *  Prevents noise-level SLs on low-priced stocks like UCOBANK (₹26).
+     *  0.30% on ₹26 = ₹0.08 = 1-2 ticks → instant SL hit on opening noise.
+     *  Raising to 0.50% ensures SL represents a real structural level. */
+    private static final double MIN_SL_PCT         = 0.005;
     private static final double GOOD_RR_RATIO      = 3.0;
 
     // ── SL placement ────────────────────────────────────────────────────────
@@ -81,6 +91,8 @@ public class HighRRStrategyEngine {
     private final PositionSizerService        positionSizer;
     private final PaperAccount               paperAccount;
     private final LatencyMonitor             latencyMonitor;
+    private final MarketDirectionService     marketDirection; // Gate 1: ATR + regime
+    private final MarketTimingService        timingService;   // Gate 2: lunch window
     private final InstrumentCacheService     instrumentCache; // FIX 1: added for token resolution
 
     @Value("${trading.mode:PAPER}")
@@ -127,6 +139,42 @@ public class HighRRStrategyEngine {
             return;
         }
 
+        // ── GATE 1: Frozen market — Nifty ATR must be ≥ 0.30% ──────────────────
+        // On frozen days (ATR < 0.30%) individual stocks also lack range.
+        // A 0.30-0.34% SL gets hit by noise in 2-3 minutes. Proved by Apr-21:
+        // UCOBANK and REDINGTON both stopped out within 3 minutes.
+        MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
+        if (dir.niftyAtrPct() < MIN_ATR_PCT) {
+            log.debug("[HIGHRR] Gate 1 BLOCKED — Nifty ATR {:.2f}% < {:.2f}% minimum. Frozen market.",
+                    dir.niftyAtrPct(), MIN_ATR_PCT);
+            return;
+        }
+
+        // ── GATE 2: Lunch window (11:00–12:30) ────────────────────────────────
+        // Volume thins, spreads widen, momentum signals are unreliable.
+        // MARKET_PRESSURE proved this on Apr-17 and Apr-21.
+        if (!now.isBefore(LUNCH_START) && !now.isAfter(LUNCH_END)) {
+            log.debug("[HIGHRR] Gate 2 BLOCKED — Lunch window (11:00–12:30). Skipping cycle.");
+            return;
+        }
+
+        // ── GATE 3: Market must not be SIDEWAYS ───────────────────────────────
+        // HighRR is a momentum/trend strategy. Sideways markets produce
+        // false breakouts. On SIDEWAYS days ATR is often low anyway (Gate 1
+        // would also catch it), but this adds an explicit regime check.
+        if (dir.direction() == MarketDirectionService.Direction.SIDEWAYS) {
+            log.debug("[HIGHRR] Gate 3 BLOCKED — Market direction SIDEWAYS. HighRR needs trending market.");
+            return;
+        }
+
+        // ── GATE 4: Strategy must match market regime ──────────────────────────
+        // Only take LONGs in BULLISH regime, only take SHORTs in BEARISH regime.
+        // This gate is enforced at individual candidate level in the scoring loop
+        // below (isBuySetup filtered against dir.direction()). Logged here for
+        // cycle-level visibility.
+        log.debug("[HIGHRR] Market regime: {} | ATR: {:.2f}% — proceeding with evaluation",
+                dir.direction(), dir.niftyAtrPct());
+
         BigDecimal cap = resolveCapital();
         if (!circuitBreaker.checkPermission(cap).isAllowed()) {
             log.debug("[HIGHRR] Circuit breaker blocked evaluation cycle");
@@ -158,18 +206,28 @@ public class HighRRStrategyEngine {
             evaluated++;
 
             if (state.isBuySetup() && !state.hasExcessiveWick()) {
-                ScoredCandidate c = buildCandidate(symbol, state, true, cap);
-                if (c != null && c.rr() >= MIN_RR_RATIO) {
-                    candidates.add(c);
-                    buySetups++;
+                // Gate 4: Only take LONG in BULLISH regime
+                if (dir.direction() == MarketDirectionService.Direction.BEARISH) {
+                    log.trace("[HIGHRR] {} BUY setup skipped — market is BEARISH", symbol);
+                } else {
+                    ScoredCandidate c = buildCandidate(symbol, state, true, cap);
+                    if (c != null && c.rr() >= MIN_RR_RATIO) {
+                        candidates.add(c);
+                        buySetups++;
+                    }
                 }
             }
 
             if (state.isSellSetup() && !state.hasExcessiveWick()) {
-                ScoredCandidate c = buildCandidate(symbol, state, false, cap);
-                if (c != null && c.rr() >= MIN_RR_RATIO) {
-                    candidates.add(c);
-                    sellSetups++;
+                // Gate 4: Only take SHORT in BEARISH regime
+                if (dir.direction() == MarketDirectionService.Direction.BULLISH) {
+                    log.trace("[HIGHRR] {} SELL setup skipped — market is BULLISH", symbol);
+                } else {
+                    ScoredCandidate c = buildCandidate(symbol, state, false, cap);
+                    if (c != null && c.rr() >= MIN_RR_RATIO) {
+                        candidates.add(c);
+                        sellSetups++;
+                    }
                 }
             }
         }
@@ -226,6 +284,17 @@ public class HighRRStrategyEngine {
         if (risk.compareTo(BigDecimal.ZERO) == 0) return null;
 
         double riskD = risk.doubleValue();
+
+        // IMPROVEMENT: enforce BOTH max AND min SL distance.
+        // Max 5% prevents oversized risk (existing check).
+        // Min 0.5% prevents noise-level SL on low-priced stocks.
+        // Root cause of UCOBANK/REDINGTON Apr-21 losses: SL was 0.30-0.34%
+        // on stocks ₹26-₹228. Opening noise ate through SL in 2-3 minutes.
+        if (riskD / price < MIN_SL_PCT) {
+            log.debug("[HIGHRR] {} SL distance {:.3f}% below minimum {:.1f}% — structural level too tight.",
+                    symbol, riskD / price * 100, MIN_SL_PCT * 100);
+            return null;
+        }
         if (riskD / price > 0.05) {
             log.trace("[HIGHRR] {} SL too far: risk={}%", symbol,
                     String.format("%.2f", riskD / price * 100));

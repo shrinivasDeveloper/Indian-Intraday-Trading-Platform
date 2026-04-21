@@ -106,6 +106,12 @@ public class RiskManagementService {
      */
     private final Map<String, Integer> strategyExposure = new ConcurrentHashMap<>();
 
+    // ── Cross-strategy symbol deduplication ───────────────────────────────────
+    // Prevents two strategies from trading the same symbol simultaneously.
+    // PRESTIGE appeared in both MARKET_PRESSURE and SCPS channels on 2026-04-21.
+    // Key: symbol. Value: first strategy that opened a trade on it today.
+    private final Map<String, String> activeSymbolMap = new ConcurrentHashMap<>();
+
     // ── P&L tracking ──────────────────────────────────────────────────────────
     private volatile BigDecimal dailyPnl   = BigDecimal.ZERO;
     private volatile BigDecimal weeklyPnl  = BigDecimal.ZERO;
@@ -136,11 +142,10 @@ public class RiskManagementService {
             phase1Count.incrementAndGet();
         }
 
-        // Increment sector exposure
         sectorExposure.merge(sector, 1, Integer::sum);
-
-        // Increment strategy exposure
         strategyExposure.merge(strategyName, 1, Integer::sum);
+        // Register symbol as active under this strategy
+        activeSymbolMap.put(symbol, strategyName);
 
         log.info("[RISK] Trade OPENED: {} | strategy={} | sector={} | phase1={} | " +
                         "phase1Count={}/{} | sectorExp={} | stratExp={}",
@@ -148,6 +153,23 @@ public class RiskManagementService {
                 phase1Count.get(), maxPhase1,
                 sectorExposure.get(sector),
                 strategyExposure.get(strategyName));
+    }
+
+    /**
+     * Returns true if this symbol is already being traded by ANY other strategy.
+     * Use this in signal handlers before approving a new trade to prevent
+     * two strategies opening the same symbol simultaneously.
+     */
+    public boolean isSymbolAlreadyActive(String symbol) {
+        return activeSymbolMap.containsKey(symbol);
+    }
+
+    /**
+     * Returns the strategy currently holding an active trade on this symbol,
+     * or null if no active trade exists.
+     */
+    public String getActiveStrategyForSymbol(String symbol) {
+        return activeSymbolMap.get(symbol);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -191,6 +213,9 @@ public class RiskManagementService {
 
         strategyExposure.compute(strategyName,
                 (k, v) -> Math.max(0, (v == null ? 0 : v) - 1));
+
+        // Release cross-strategy symbol lock so other strategies can trade this symbol
+        activeSymbolMap.remove(symbol);
 
         // Phase-1 slot is released when trade closes, regardless of phase progression.
         // Note: HighRR trades manage their own phase1 slot via HighRRTradeManager
@@ -308,6 +333,7 @@ public class RiskManagementService {
         phase1Count.set(0);
         sectorExposure.clear();
         strategyExposure.clear();
+        activeSymbolMap.clear();
         anyAtBreakeven = false;
         log.info("[RISK] Daily reset complete | P&L cleared | slots cleared");
     }
