@@ -90,7 +90,14 @@ public class HighRRTradeManager {
             return;
         }
         activeTrades.put(trade.symbol(), trade);
-        log.info("[HIGHRR-MGR] ✅ Registered: {} | dir={} | entry=₹{} | SL=₹{} | T1=₹{} | T2=₹{} | qty={}",
+
+        // Register in cross-strategy symbol map so PaperTradeExecutionService
+        // rejects any other strategy that tries to trade this symbol simultaneously.
+        // Without this call, activeSymbolMap never knew HighRR was holding the symbol —
+        // riskService.isSymbolAlreadyActive() would return false even with an open HighRR trade.
+        riskManagement.onTradeOpened(trade.symbol(), STRATEGY, false);
+
+        log.info("[HIGHRR-MGR] \u2705 Registered: {} | dir={} | entry=\u20b9{} | SL=\u20b9{} | T1=\u20b9{} | T2=\u20b9{} | qty={}",
                 trade.symbol(), trade.direction(), trade.fillPrice(),
                 trade.stopLoss(), trade.target(), trade.target2(), trade.quantity());
     }
