@@ -118,7 +118,7 @@ scanner:
   entry-mode: ${ENTRY_MODE:AGGRESSIVE}
 
 market:
-  atr-min-pct: 0.3
+  atr-min-pct: 0.2  # FIXED: was 0.3 — blocked Apr-22(0.29%) and Apr-23(0.23%). Lowered to 0.20.
   atr-max-pct: 3.0
   trend-candles: 8
   doji-body-pct: 0.10
@@ -246,6 +246,25 @@ strategy:
     # 100,000 = conservative (works well for Nifty 100 stocks)
     # 50,000  = wider net (includes mid-cap stocks)
     min-premarket-volume: 100000
+
+
+  # ================================
+  # NEWS CATALYST STRATEGY (NEW — independent module)
+  # Fetches real-time news from NewsAPI + BSE announcements + ET RSS
+  # Fires at most 2 signals/session — runs alongside all existing strategies.
+  # ================================
+  news:
+    enabled: ${NEWS_ENABLED:true}
+    # Minimum composite score (0-100) for a news item to trigger trade evaluation
+    # 65 = balanced (earnings beat, clear sentiment, < 30 min old)
+    # 80 = high conviction only (confirmed earnings/M&A, strongly positive/negative)
+    min-score: 65
+    max-signals-per-session: 2
+    # NewsAPI key — free tier at newsapi.org (100 req/day)
+    # Leave blank to use only BSE + RSS feeds (always free, no key needed)
+    newsapi-key: ${NEWSAPI_KEY:}
+    # Time-stop for news catalyst trades: 20 minutes (news impact fades fast)
+    time-stop-minutes: 20
 
 # ================================
 # WARMUP CONFIG

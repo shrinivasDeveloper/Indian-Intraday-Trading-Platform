@@ -114,8 +114,11 @@ public class MarketPressureDecisionEngine {
     /** Minimum RVOL for pressure-based trades. */
     private static final double MIN_RVOL = 1.0;
 
-    /** GATE A: Minimum Nifty ATR% — below this the market is frozen. */
-    private static final double MIN_ATR_PCT = 0.30;
+    /** GATE A: Minimum Nifty ATR% — below this the market is frozen.
+     *  FIXED: was 0.30 — blocked Apr-22(0.29%) and Apr-23(0.23%).
+     *  MarketPressure is a momentum strategy and needs more range than SCPS.
+     *  0.25% still allows all days where individual stocks have meaningful moves. */
+    private static final double MIN_ATR_PCT = 0.25;
 
     // ── Dependencies ───────────────────────────────────────────────────────────
     private final MarketPressureService       pressureService;
@@ -207,9 +210,10 @@ public class MarketPressureDecisionEngine {
         // Proved by Apr-21: KNRCON (-₹143) and SAPPHIRE (-₹218) both on ATR=0.20% day.
         MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
         if (dir.niftyAtrPct() < MIN_ATR_PCT) {
-            log.debug("[PRESSURE-ENGINE] Gate A BLOCKED — Nifty ATR {:.2f}% < {:.2f}%. " +
+            log.debug("[PRESSURE-ENGINE] Gate A BLOCKED — Nifty ATR {}% < {}%. " +
                             "Frozen market, pressure signals unreliable.",
-                    dir.niftyAtrPct(), MIN_ATR_PCT);
+                    String.format("%.2f", dir.niftyAtrPct()),
+                    String.format("%.2f", MIN_ATR_PCT));
             return;
         }
 
@@ -246,7 +250,7 @@ public class MarketPressureDecisionEngine {
 
         if (!isActionableWithThreshold(pressure, requiredRatio)) {
             log.info("[PRESSURE-ENGINE] Cycle @{} | Pressure NOT actionable | dir={} ratio={} " +
-                            "required={} syms={} locked={} window={} atr={:.2f}%",
+                            "required={} syms={} locked={} window={} atr={}%",
                     now, pressure.direction(),
                     String.format("%.3f", pressure.ratio()),
                     requiredRatio,
@@ -273,7 +277,7 @@ public class MarketPressureDecisionEngine {
         }
 
         log.info("[PRESSURE-ENGINE] 🟢 Cycle @{} | {} DOMINANT | buy={} sell={} ratio={} " +
-                        "syms=(↑{}↓{}) window={} atr={:.2f}% regime={}",
+                        "syms=(↑{}↓{}) window={} atr={}% regime={}",
                 now,
                 pressure.direction(),
                 String.format("%.2f", pressure.buyStrength()),
@@ -364,7 +368,7 @@ public class MarketPressureDecisionEngine {
 
         // ── FIX 2: Minimum price filter ────────────────────────────────────────
         if (currentPrice < MIN_STOCK_PRICE) {
-            log.debug("REJECTED: {} → price {:.2f} below minimum {:.0f}",
+            log.debug("REJECTED: {} → price {} below minimum {}",
                     symbol, currentPrice, MIN_STOCK_PRICE);
             return null;
         }
@@ -374,14 +378,14 @@ public class MarketPressureDecisionEngine {
 
         // ── Pullback zone ──────────────────────────────────────────────────────
         if (!channel.isPriceInPullbackZone(currentPrice)) {
-            log.trace("REJECTED: {} → price {:.2f} not in pullback zone", symbol, currentPrice);
+            log.trace("REJECTED: {} → price {} not in pullback zone", symbol, currentPrice);
             return null;
         }
 
         // ── RVOL ───────────────────────────────────────────────────────────────
         double rvol = rvolService.getRvolNow(symbol, latestCandle.getVolume());
         if (rvol < MIN_RVOL) {
-            log.trace("REJECTED: {} → RVOL {:.2f} < {}", symbol, rvol, MIN_RVOL);
+            log.trace("REJECTED: {} → RVOL {} < {}", symbol, rvol, MIN_RVOL);
             return null;
         }
 
@@ -391,12 +395,12 @@ public class MarketPressureDecisionEngine {
         double sectorChg = sectorData.changePercent();
 
         if (isBuy && sectorChg < -0.5) {
-            log.trace("REJECTED: {} → sector {} strongly bearish ({:.2f}%) vs BUY pressure",
+            log.trace("REJECTED: {} → sector {} strongly bearish ({}%) vs BUY pressure",
                     symbol, sectorName, sectorChg);
             return null;
         }
         if (!isBuy && sectorChg > 0.5) {
-            log.trace("REJECTED: {} → sector {} strongly bullish ({:.2f}%) vs SELL pressure",
+            log.trace("REJECTED: {} → sector {} strongly bullish ({}%) vs SELL pressure",
                     symbol, sectorName, sectorChg);
             return null;
         }
@@ -404,11 +408,11 @@ public class MarketPressureDecisionEngine {
         // ── Symbol pct change gate ─────────────────────────────────────────────
         double symbolPctChange = pressureService.getSymbolPctChange(symbol);
         if (isBuy && symbolPctChange < -0.5) {
-            log.trace("REJECTED: {} → symbol change {:.2f}% fights BUY pressure", symbol, symbolPctChange);
+            log.trace("REJECTED: {} → symbol change {}% fights BUY pressure", symbol, symbolPctChange);
             return null;
         }
         if (!isBuy && symbolPctChange > 0.5) {
-            log.trace("REJECTED: {} → symbol change {:.2f}% fights SELL pressure", symbol, symbolPctChange);
+            log.trace("REJECTED: {} → symbol change {}% fights SELL pressure", symbol, symbolPctChange);
             return null;
         }
 
@@ -442,7 +446,7 @@ public class MarketPressureDecisionEngine {
         // ── FIX 3: Minimum SL distance ─────────────────────────────────────────
         double slPct = risk.doubleValue() / entryPrice.doubleValue();
         if (slPct < MIN_SL_PCT) {
-            log.debug("REJECTED: {} → SL distance {:.3f}% below minimum {:.1f}%. " +
+            log.debug("REJECTED: {} → SL distance {}% below minimum {}%. " +
                             "Channel too narrow for reliable SL placement. entry={} sl={}",
                     symbol, slPct * 100, MIN_SL_PCT * 100, entryPrice, stopLoss);
             return null;
@@ -452,7 +456,7 @@ public class MarketPressureDecisionEngine {
         double reward  = target1.subtract(entryPrice).abs().doubleValue();
         double rrRatio = reward / risk.doubleValue();
         if (rrRatio < MIN_RR_RATIO) {
-            log.debug("REJECTED: {} → RR {:.2f} < minimum {:.1f}", symbol, rrRatio, MIN_RR_RATIO);
+            log.debug("REJECTED: {} → RR {} < minimum {}", symbol, rrRatio, MIN_RR_RATIO);
             return null;
         }
 
@@ -505,7 +509,7 @@ public class MarketPressureDecisionEngine {
         int totalScore    = scoreRvol + scorePressure + scoreChannel + scoreSector + scoreRR;
 
         log.info("[PRESSURE-ENGINE] 🚀 SIGNAL: {} | dir={} | entry={} | sl={} | T1={} | " +
-                        "RVOL={} | pressure_ratio={} | sector={}({:.2f}%) | RR={:.2f} | score={}",
+                        "RVOL={} | pressure_ratio={} | sector={}({}%) | RR={} | score={}",
                 cand.symbol(), cand.direction(), cand.entryPrice(), cand.stopLoss(), cand.target1(),
                 String.format("%.2f", cand.rvol()),
                 String.format("%.3f", pressure.ratio()),

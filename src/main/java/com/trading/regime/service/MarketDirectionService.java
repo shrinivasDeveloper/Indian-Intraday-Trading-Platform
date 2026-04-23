@@ -1,88 +1,33 @@
 // FILE: src/main/java/com/trading/regime/service/MarketDirectionService.java
 //
-// ROOT CAUSE FIX — "Strong intraday BEARISH trend classified as SIDEWAYS"
+// FIXES APPLIED (2026-04-23):
 //
-// PROBLEM (observed 2026-04-22, also reproducible on any sharp gap-down day):
-//   Nifty opens gap-down and falls 200+ points in the first hour.
-//   EMA200 = 24025 (long-term bullish). Price = 24375.
-//   MTF result: tideUp=TRUE (price > EMA200), waveDown=TRUE (EMA20 < EMA50),
-//               rippleDown=TRUE (price < EMA20 * 0.999).
-//   allBull = FALSE (tideUp && waveDown conflict → not all-bull)
-//   allBear = FALSE (tideDown=FALSE because price > EMA200)
-//   → Direction = SIDEWAYS   ← WRONG. This is a clear intraday BEAR trend.
+// FIX 1 — ATR threshold lowered: 0.25% → 0.15% for "frozen market" label.
+//   ROOT CAUSE: Apr-22(ATR=0.29%) and Apr-23(ATR=0.23%) were both blocked.
+//   Nifty 15-min ATR of 0.20% = ~48 point candle range. Individual stocks
+//   move 2-5x Nifty. This is NOT a frozen market for stock-level trading.
+//   Ultra-frozen days (< 0.10% like Apr-21) are still blocked correctly.
 //
-//   ALL five momentum strategies gate on this direction:
-//     HighRRStrategyEngine:          if SIDEWAYS → return (Gate 3)
-//     MarketPressureDecisionEngine:  if SIDEWAYS → return (Gate B)
-//     OrbStrategyEngine:             if SIDEWAYS → return
-//     SmartChannelPullbackStrategy:  (indirect, via pressure check)
-//     SidewaysScalpStrategy:         (only active in SIDEWAYS — but wrong channel types present)
+// FIX 2 — Doji check made NON-BLOCKING.
+//   ROOT CAUSE: Two consecutive Nifty doji returned SIDEWAYS immediately,
+//   bypassing all EMA logic and the intraday override.
+//   On Apr-22: Nifty was doji at 10:55 AM but Energy +1.17%, Chemicals +1.40%
+//   were clearly trending. Zero trades captured.
+//   FIX: Doji is now informational (logged, flagged) but does NOT short-circuit.
+//   EMA allBull/allBear logic runs regardless of doji presence.
+//   Strategies that need direction can still trade when EMAs confirm direction.
 //
-//   Net effect: ZERO trades on a 200-point trending sell-off day.
+// FIX 3 — Intraday override ATR threshold: 0.25% → 0.18%.
+//   Apr-23 ATR=0.23% was above the frozen-market threshold (0.15%) but below
+//   the old override threshold (0.25%). Override never fired. Now 0.18% allows
+//   Apr-23 to trigger the override when wave+ripple+structure confirm direction.
 //
-// ROOT CAUSE (design flaw, not bug):
-//   The "full 3-tier alignment" rule (tide + wave + ripple all agree) was designed
-//   for swing-trading where you want the LONG-TERM tide to agree with the trade.
-//   For INTRADAY trading (9:15–15:00), the relevant horizon is hours, not months.
-//   On a gap-down day where:
-//     - Wave (EMA20 < EMA50) is bearish                    ← medium term bearish
-//     - Ripple (price << EMA20) is bearish                 ← short term bearish
-//     - Price is making lower highs and lower lows (LH/LL)
-//   ... the market IS bearish intraday, regardless of where EMA200 sits.
-//
-// FIX DESIGN (2-tier override):
-//   Keep the existing 3-tier logic as the primary path.
-//   Add an INTRADAY OVERRIDE that fires when wave + ripple both agree on direction,
-//   even if tide disagrees. Conditions (both must be true simultaneously):
-//
-//   INTRADAY BEARISH override:
-//     - EMA20 < EMA50 (wave bearish)
-//     - Price < EMA20 * 0.998 (ripple bearish, price at least 0.2% below EMA20)
-//     - LH/LL structure confirmed over last 8 candles (structural bearish)
-//     - ATR >= MIN_ATR_PCT (not frozen market)
-//     - Intraday drop from session high >= ATR * 1.5 (real selling, not noise)
-//
-//   INTRADAY BULLISH override:
-//     - EMA20 > EMA50 (wave bullish)
-//     - Price > EMA20 * 1.002 (ripple bullish, price at least 0.2% above EMA20)
-//     - HH/HL structure confirmed over last 8 candles
-//     - ATR >= MIN_ATR_PCT
-//     - Intraday rise from session low >= ATR * 1.5
-//
-//   The "tide" (EMA200 relationship) is demoted from a veto to a context signal.
-//   It is still reported on the dashboard (niftyBullish / niftyBearish fields) but
-//   no longer blocks BEARISH classification on a genuine intraday sell-off day.
-//
-// WHY THIS IS SAFE:
-//   - Original 3-tier allBull/allBear path is 100% preserved and fires FIRST.
-//   - Override only fires when the original path returns SIDEWAYS.
-//   - Override requires BOTH wave AND ripple bearish/bullish + structural confirmation.
-//   - Single condition (only wave or only ripple) is NOT enough — prevents false signals.
-//   - ATR guard prevents triggering on frozen/ultra-low-volatility days.
-//   - Intraday momentum requirement (ATR * 1.5 move) prevents triggering on normal
-//     intraday oscillations around the EMA — only genuine trending moves qualify.
-//   - failReason is updated to mention "INTRADAY_OVERRIDE" for full traceability.
-//
-// STRATEGY IMPACT AFTER FIX:
-//   On 2026-04-22 at 10:03 AM:
-//     - EMA20=24428 < EMA50=24381 ... wait, EMA20 > EMA50 on 15m at that point.
-//     - Actually: wave=UP (EMA20 > EMA50), ripple=DOWN (price < EMA20).
-//     - LH/LL over last 8 candles? YES (sharp selloff structure).
-//     - ATR ~0.6% (not frozen).
-//     - Drop from session high: > ATR * 1.5 easily.
-//     - INTRADAY BEARISH override fires → direction = BEARISH.
-//   HighRR, MarketPressure, ORB all unblock for SELL setups.
-//   SCPS unblocks for SELL pullbacks to channel resistance.
-//
-// BACKWARD COMPATIBILITY:
-//   - MarketDirectionResult record is UNCHANGED (same fields, same order).
-//   - isTradeable(), isTrendTradeable(), isSidewaysTradeable() unchanged.
-//   - preloadCandles() unchanged.
-//   - All callers compile without modification.
-//
-// NEW FIELDS IN MarketDirectionResult (appended, non-breaking):
-//   - intradayOverrideActive: boolean — true when override fired (dashboard badge)
-//   - intradayDropPct: double — magnitude of the intraday move that triggered override
+// UNCHANGED:
+//   - MarketDirectionResult record (same fields, same constructor order)
+//   - All 3-tier allBull/allBear logic
+//   - isTradeable(), isTrendTradeable(), isSidewaysTradeable()
+//   - preloadCandles(), all callers compile without modification
+//   - Session range tracking, EMA/ATR calculations
 //
 package com.trading.regime.service;
 
@@ -101,13 +46,13 @@ import java.util.*;
 /**
  * MarketDirectionService — Institutional MTF Tide Logic with Intraday Override.
  *
- * INTRADAY OVERRIDE (new in this version):
+ * INTRADAY OVERRIDE:
  *   When wave + ripple both agree on direction AND structural confirmation exists,
  *   direction is set to BULLISH or BEARISH even if tide (EMA200) disagrees.
- *   This correctly handles gap-down / gap-up trending days where the long-term
- *   trend is UP but the intraday session is strongly directional the other way.
+ *   This correctly handles gap-down/gap-up trending days where long-term trend
+ *   is UP but the intraday session is strongly directional the other way.
  *
- * THREE CHECKS (primary path, unchanged):
+ * THREE CHECKS (primary path):
  *   TIDE   (Long-term):  price vs EMA200
  *   WAVE   (Medium):     EMA20 vs EMA50
  *   RIPPLE (Immediate):  price vs EMA20 ± 0.1% buffer
@@ -129,21 +74,31 @@ public class MarketDirectionService {
 
     public enum Direction { BULLISH, BEARISH, SIDEWAYS }
 
+    // ── ATR bounds ──────────────────────────────────────────────────────────
+    /**
+     * Market labelled "frozen" below this threshold.
+     * FIXED: was 0.25 — blocked Apr-23(0.23%). Lowered to 0.15.
+     * Ultra-frozen days (Apr-21: 0.10%) are still blocked correctly.
+     */
+    private static final double MIN_ATR_PCT_FROZEN  = 0.15;
+
+    /** Market labelled "chaotic" above this threshold. */
+    private static final double MAX_ATR_PCT_CHAOTIC = 3.5;
+
     // ── Intraday override thresholds ────────────────────────────────────────
     /** Ripple must be at least this far from EMA20 to qualify for override. */
     private static final double RIPPLE_OVERRIDE_BUFFER = 0.002;  // 0.2%
 
     /**
-     * Intraday move (from session high/low to current price) must be at least
-     * this multiple of ATR to confirm genuine trending activity, not noise.
+     * Intraday move must be at least this multiple of ATR to confirm real trend.
      */
     private static final double INTRADAY_MOMENTUM_ATR_FACTOR = 1.5;
 
     /**
-     * Minimum ATR% required for the intraday override to be considered.
-     * Below this threshold the market is frozen — override would fire on noise.
+     * Minimum ATR% for the intraday override.
+     * FIXED: was 0.25% — Apr-23(0.23%) couldn't trigger override. Now 0.18%.
      */
-    private static final double MIN_ATR_PCT_FOR_OVERRIDE = 0.25;
+    private static final double MIN_ATR_PCT_FOR_OVERRIDE = 0.18;
 
     public record MarketDirectionResult(
             Direction direction,
@@ -157,14 +112,10 @@ public class MarketDirectionService {
             double    niftyEma50,
             double    niftyEma200,
             String    failReason,
-            // ── NEW non-breaking fields (appended) ─────────────────────────
             boolean   intradayOverrideActive,
             double    intradayMovePct
     ) {
-        /**
-         * Backward-compatible 11-param constructor.
-         * Preserves all existing callers — sets override fields to defaults.
-         */
+        /** Backward-compatible 11-param constructor (all existing callers unchanged). */
         public MarketDirectionResult(
                 Direction direction,
                 boolean niftyBullish, boolean niftyBearish,
@@ -179,37 +130,20 @@ public class MarketDirectionService {
                     failReason, false, 0.0);
         }
 
-        /**
-         * Returns true for ALL three directions when market is tradeable.
-         * MarketModeEngine decides which strategies are active per day type.
-         * Only returns false when market is truly frozen/chaotic.
-         */
         public boolean isTradeable() {
             if (failReason != null && failReason.contains("no trades")) return false;
             return true;
         }
-
-        /** True only for BULLISH or BEARISH — used by trend strategies. */
-        public boolean isTrendTradeable() {
-            return direction == Direction.BULLISH || direction == Direction.BEARISH;
-        }
-
-        /** True only for SIDEWAYS — used by mean-reversion strategies. */
-        public boolean isSidewaysTradeable() {
-            return direction == Direction.SIDEWAYS
-                    && (failReason == null || !failReason.contains("no trades"));
-        }
-
+        public boolean isTrendTradeable()   { return direction == Direction.BULLISH || direction == Direction.BEARISH; }
+        public boolean isSidewaysTradeable(){ return direction == Direction.SIDEWAYS && (failReason == null || !failReason.contains("no trades")); }
         public boolean isLong()     { return direction == Direction.BULLISH; }
         public boolean isShort()    { return direction == Direction.BEARISH; }
         public boolean isSideways() { return direction == Direction.SIDEWAYS; }
     }
 
-    // ── Session high/low tracking for intraday momentum calculation ─────────
-    // Reset daily at 9:10 (before recalculate() can fire).
-    // Updated on every Nifty 15m candle.
-    private volatile double sessionHigh = 0;
-    private volatile double sessionLow  = Double.MAX_VALUE;
+    // ── Session range tracking ──────────────────────────────────────────────
+    private volatile double  sessionHigh        = 0;
+    private volatile double  sessionLow         = Double.MAX_VALUE;
     private volatile boolean sessionInitialized = false;
 
     private final Deque<Candle> niftyBuffer = new ArrayDeque<>();
@@ -229,7 +163,6 @@ public class MarketDirectionService {
             for (Candle c : historicalCandles) {
                 niftyBuffer.addFirst(c);
                 if (niftyBuffer.size() > 300) ((ArrayDeque<Candle>) niftyBuffer).removeLast();
-                // Rebuild session high/low from historical data
                 updateSessionRange(c.getHigh().doubleValue(), c.getLow().doubleValue());
             }
             log.info("[MDS] Pre-loaded {} Nifty 15-min candles. SessionH={} SessionL={}",
@@ -281,26 +214,32 @@ public class MarketDirectionService {
         double price  = candles.get(0).getClose().doubleValue();
         double atrPct = price > 0 ? atr / price * 100 : 0;
 
-        // ATR health guard — frozen or chaotic market
-        if (atrPct < 0.25) {
+        // ── ATR health guard ───────────────────────────────────────────────
+        // FIXED: threshold was 0.25 — now 0.15. Apr-23(0.23%) now passes this gate.
+        if (atrPct < MIN_ATR_PCT_FROZEN) {
             setResult(Direction.SIDEWAYS, false, false, atrPct, atrPct, ema20, ema50, ema200,
                     "ATR too low: " + f2(atrPct) + "% (frozen market — no trades today)",
                     false, 0.0);
             return;
         }
-        if (atrPct > 3.5) {
+        if (atrPct > MAX_ATR_PCT_CHAOTIC) {
             setResult(Direction.SIDEWAYS, false, false, atrPct, atrPct, ema20, ema50, ema200,
                     "ATR too high: " + f2(atrPct) + "% (chaotic market — no trades today)",
                     false, 0.0);
             return;
         }
 
-        // Doji check
-        if (isDoji(candles.get(0)) && isDoji(candles.get(1))) {
-            setResult(Direction.SIDEWAYS, false, false, atrPct, atrPct, ema20, ema50, ema200,
-                    "Doji/spinning top on Nifty — awaiting directional candle",
-                    false, 0.0);
-            return;
+        // ── Doji check — INFORMATIONAL ONLY (non-blocking) ────────────────
+        // FIXED: previously two consecutive doji returned SIDEWAYS immediately,
+        // bypassing all EMA checks. On Apr-22, Nifty was doji but sectors
+        // Energy +1.17%, Chemicals +1.40% were trending — zero trades were captured.
+        // Fix: doji is now a flag. EMA logic still runs. Strategies can trade
+        // when sector/EMA confirmation exists even on a doji-Nifty day.
+        boolean dojiCandle0 = isDoji(candles.get(0));
+        boolean dojiCandle1 = isDoji(candles.get(1));
+        boolean consecutiveDoji = dojiCandle0 && dojiCandle1;
+        if (consecutiveDoji) {
+            log.debug("[MDS] Consecutive doji detected — noted but not blocking EMA analysis");
         }
 
         // ── PRIMARY MTF checks (original logic, unchanged) ─────────────────
@@ -315,43 +254,37 @@ public class MarketDirectionService {
         boolean allBear = tideDown && waveDown && rippleDown;
 
         if (allBull) {
-            String reason = hhhl(candles, 8) ? null : "MTF fully bullish, HH/HL structure forming";
+            String reason = consecutiveDoji ? "MTF fully bullish (Nifty doji noted — sectors may differ)" : null;
             setResult(Direction.BULLISH, true, false, atrPct, atrPct, ema20, ema50, ema200,
                     reason, false, 0.0);
-            logDirection(Direction.BULLISH, price, ema20, ema50, ema200, atrPct,
-                    tideUp, waveUp, rippleUp, reason);
+            log.info("[MDS] Dir=BULLISH price={} EMA20={} EMA50={} EMA200={} ATR={}%{}",
+                    f0(price), f0(ema20), f0(ema50), f0(ema200), f2(atrPct),
+                    consecutiveDoji ? " [doji noted]" : "");
             return;
         }
 
         if (allBear) {
-            String reason = lhll(candles, 8) ? null : "MTF fully bearish, LH/LL structure forming";
+            String reason = consecutiveDoji ? "MTF fully bearish (Nifty doji noted — sectors may differ)" : null;
             setResult(Direction.BEARISH, false, true, atrPct, atrPct, ema20, ema50, ema200,
                     reason, false, 0.0);
-            logDirection(Direction.BEARISH, price, ema20, ema50, ema200, atrPct,
-                    tideUp, waveUp, rippleUp, reason);
+            log.info("[MDS] Dir=BEARISH price={} EMA20={} EMA50={} EMA200={} ATR={}%{}",
+                    f0(price), f0(ema20), f0(ema50), f0(ema200), f2(atrPct),
+                    consecutiveDoji ? " [doji noted]" : "");
             return;
         }
 
         // ── INTRADAY OVERRIDE CHECK ────────────────────────────────────────
-        // Fires only when primary path returned SIDEWAYS.
+        // Fires only when primary path returns SIDEWAYS.
         // Requires wave + ripple agreement AND structural confirmation.
+        // FIXED: MIN_ATR threshold was 0.25 (Apr-23=0.23% couldn't trigger). Now 0.18.
         if (atrPct >= MIN_ATR_PCT_FOR_OVERRIDE && sessionInitialized) {
 
-            // INTRADAY BEARISH: wave AND ripple both bearish, structural LH/LL
             boolean intradayBearishRipple = price < ema20 * (1.0 - RIPPLE_OVERRIDE_BUFFER);
             boolean intradayBearishWave   = waveDown;
-            // Also catches: wave UP (EMA20 > EMA50) but price has crashed far below EMA20
-            // This is today's exact scenario (Apr-22): EMA20 > EMA50 but price << EMA20
             boolean rippleCrashedBelowEma = (price < ema20 * (1.0 - RIPPLE_OVERRIDE_BUFFER * 2));
-
-            boolean intradayBearishStructure = lhll(candles, 6); // 6 candles = 90 min structure
-
-            // Intraday drop: price fell from session high by >= ATR * factor
+            boolean intradayBearishStructure = lhll(candles, 6);
             double dropFromHigh = sessionHigh > 0 ? (sessionHigh - price) / sessionHigh * 100 : 0;
             boolean strongIntradayDrop = dropFromHigh >= (atrPct * INTRADAY_MOMENTUM_ATR_FACTOR);
-
-            // Wave up but price crashed below EMA20 significantly
-            // (Today's scenario: EMA20 > EMA50 but price is well below EMA20 after gap-down)
             boolean waveBullishButPriceCrashed =
                     waveUp && rippleCrashedBelowEma && intradayBearishStructure && strongIntradayDrop;
 
@@ -360,37 +293,26 @@ public class MarketDirectionService {
 
                 String overrideReason = String.format(
                         "INTRADAY_OVERRIDE→BEARISH: wave=%s ripple=%.2f%%below ema20, " +
-                                "drop=%.2f%% from sessionH=%.0f, LH/LL confirmed, ATR=%.2f%%. " +
-                                "Long-term tide=%s (not blocking intraday short)",
-                        waveDown ? "DOWN" : "UP(but crashed)",
-                        (1.0 - price / ema20) * 100,
-                        dropFromHigh,
-                        sessionHigh,
-                        atrPct,
-                        tideUp ? "BULLISH" : "BEARISH");
+                                "drop=%.2f%% from sessionH=%.0f, LH/LL confirmed, ATR=%.2f%%.",
+                        waveDown ? "DOWN" : "UP(crashed)", (1.0 - price / ema20) * 100,
+                        dropFromHigh, sessionHigh, atrPct);
 
-                log.warn("[MDS] ⚡ INTRADAY OVERRIDE BEARISH: {} | drop={}% from H={} | " +
-                                "price={} ema20={} ema50={} | wave={} ripple=DOWN",
-                        overrideReason.substring(0, Math.min(80, overrideReason.length())),
-                        f2(dropFromHigh), f0(sessionHigh), f0(price), f0(ema20), f0(ema50),
-                        waveDown ? "DOWN" : "UP");
+                log.warn("[MDS] ⚡ INTRADAY OVERRIDE BEARISH: drop={}% from H={} | " +
+                                "price={} ema20={} ema50={}",
+                        f2(dropFromHigh), f0(sessionHigh), f0(price), f0(ema20), f0(ema50));
 
                 setResult(Direction.BEARISH, false, true, atrPct, atrPct, ema20, ema50, ema200,
                         overrideReason, true, dropFromHigh);
                 return;
             }
 
-            // INTRADAY BULLISH: wave AND ripple both bullish, structural HH/HL
             boolean intradayBullishRipple = price > ema20 * (1.0 + RIPPLE_OVERRIDE_BUFFER);
             boolean intradayBullishWave   = waveUp;
             boolean rocketAboveEma        = (price > ema20 * (1.0 + RIPPLE_OVERRIDE_BUFFER * 2));
-
             boolean intradayBullishStructure = hhhl(candles, 6);
-
             double riseFromLow = sessionLow < Double.MAX_VALUE && sessionLow > 0
                     ? (price - sessionLow) / sessionLow * 100 : 0;
             boolean strongIntradayRise = riseFromLow >= (atrPct * INTRADAY_MOMENTUM_ATR_FACTOR);
-
             boolean waveBearishButPriceRocketed =
                     waveDown && rocketAboveEma && intradayBullishStructure && strongIntradayRise;
 
@@ -399,21 +321,15 @@ public class MarketDirectionService {
 
                 String overrideReason = String.format(
                         "INTRADAY_OVERRIDE→BULLISH: wave=%s ripple=%.2f%%above ema20, " +
-                                "rise=%.2f%% from sessionL=%.0f, HH/HL confirmed, ATR=%.2f%%. " +
-                                "Long-term tide=%s (not blocking intraday long)",
-                        waveUp ? "UP" : "DOWN(but rocketed)",
-                        (price / ema20 - 1.0) * 100,
-                        riseFromLow,
-                        sessionLow < Double.MAX_VALUE ? sessionLow : 0,
-                        atrPct,
-                        tideUp ? "BULLISH" : "BEARISH");
+                                "rise=%.2f%% from sessionL=%.0f, HH/HL confirmed, ATR=%.2f%%.",
+                        waveUp ? "UP" : "DOWN(rocketed)", (price / ema20 - 1.0) * 100,
+                        riseFromLow, sessionLow < Double.MAX_VALUE ? sessionLow : 0, atrPct);
 
                 log.warn("[MDS] ⚡ INTRADAY OVERRIDE BULLISH: rise={}% from L={} | " +
-                                "price={} ema20={} ema50={} | wave={} ripple=UP",
+                                "price={} ema20={} ema50={}",
                         f2(riseFromLow),
                         sessionLow < Double.MAX_VALUE ? f0(sessionLow) : "n/a",
-                        f0(price), f0(ema20), f0(ema50),
-                        waveUp ? "UP" : "DOWN");
+                        f0(price), f0(ema20), f0(ema50));
 
                 setResult(Direction.BULLISH, true, false, atrPct, atrPct, ema20, ema50, ema200,
                         overrideReason, true, riseFromLow);
@@ -421,31 +337,34 @@ public class MarketDirectionService {
             }
         }
 
-        // ── Original SIDEWAYS path ─────────────────────────────────────────
+        // ── SIDEWAYS — with contextual reason ─────────────────────────────
         String reason;
-        if (tideUp && waveUp && !rippleUp)
-            reason = "Tide+Wave bullish but price below EMA20 — SIDEWAYS: VAP_Pullback+RangeBreakout active";
+        if (consecutiveDoji)
+            reason = String.format("Doji/spinning top on Nifty — EMA analysis inconclusive | " +
+                            "price=%.0f EMA20=%.0f EMA50=%.0f EMA200=%.0f ATR=%.2f%%",
+                    price, ema20, ema50, ema200, atrPct);
+        else if (tideUp && waveUp && !rippleUp)
+            reason = "Tide+Wave bullish but price below EMA20 — SIDEWAYS: range strategies active";
         else if (tideDown && waveDown && !rippleDown)
-            reason = "Tide+Wave bearish but price above EMA20 — SIDEWAYS: VAP_Pullback+RangeBreakout active";
+            reason = "Tide+Wave bearish but price above EMA20 — SIDEWAYS: range strategies active";
         else if (tideUp && !waveUp)
-            reason = "Above EMA200, recovery in progress — SIDEWAYS: VAP_Pullback+RangeBreakout active";
+            reason = "Above EMA200, recovery in progress — SIDEWAYS: range strategies active";
         else if (tideDown && !waveDown)
-            reason = "Below EMA200, dead-cat bounce — SIDEWAYS: VAP_Pullback+RangeBreakout active";
+            reason = "Below EMA200, dead-cat bounce — SIDEWAYS: range strategies active";
         else
-            reason = String.format("Mixed signals — SIDEWAYS: VAP_Pullback+RangeBreakout active | " +
-                            "price=%.0f EMA20=%.0f EMA50=%.0f EMA200=%.0f",
-                    price, ema20, ema50, ema200);
+            reason = String.format("Mixed signals — SIDEWAYS | " +
+                            "price=%.0f EMA20=%.0f EMA50=%.0f EMA200=%.0f ATR=%.2f%%",
+                    price, ema20, ema50, ema200, atrPct);
 
         setResult(Direction.SIDEWAYS, false, false, atrPct, atrPct, ema20, ema50, ema200,
                 reason, false, 0.0);
 
         log.info("[MDS] Dir=SIDEWAYS price={} EMA20={} EMA50={} EMA200={} ATR={}% " +
-                        "tide={} wave={} ripple={} | {}",
+                        "tide={} wave={} ripple={}",
                 f0(price), f0(ema20), f0(ema50), f0(ema200), f2(atrPct),
                 tideUp ? "↑" : tideDown ? "↓" : "—",
                 waveUp ? "↑" : waveDown ? "↓" : "—",
-                rippleUp ? "↑" : rippleDown ? "↓" : "—",
-                reason);
+                rippleUp ? "↑" : rippleDown ? "↓" : "—");
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
@@ -459,20 +378,6 @@ public class MarketDirectionService {
                 dir, bull, bear, bull, bear,
                 atr1, atr2, ema20, ema50, ema200, reason,
                 overrideActive, movePct);
-    }
-
-    private void logDirection(Direction dir, double price,
-                              double ema20, double ema50, double ema200,
-                              double atrPct,
-                              boolean tideUp, boolean waveUp, boolean rippleUp,
-                              String reason) {
-        log.info("[MDS] Dir={} price={} EMA20={} EMA50={} EMA200={} ATR={}% " +
-                        "tide={} wave={} ripple={}{}",
-                dir, f0(price), f0(ema20), f0(ema50), f0(ema200), f2(atrPct),
-                tideUp ? "↑" : "↓",
-                waveUp ? "↑" : "↓",
-                rippleUp ? "↑" : "↓",
-                reason != null ? " | " + reason : "");
     }
 
     private boolean hhhl(List<Candle> c, int n) {
@@ -529,7 +434,6 @@ public class MarketDirectionService {
         return sum / n;
     }
 
-    // ── Daily reset for session range ─────────────────────────────────────
     @org.springframework.scheduling.annotation.Scheduled(
             cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {

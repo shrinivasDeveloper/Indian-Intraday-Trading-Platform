@@ -65,7 +65,9 @@ public class HighRRStrategyEngine {
     private static final LocalTime TRADE_END    = LocalTime.of(13, 0);
     private static final LocalTime LUNCH_START  = LocalTime.of(11, 0);  // Gate: skip lunch window
     private static final LocalTime LUNCH_END    = LocalTime.of(12, 30);
-    private static final double    MIN_ATR_PCT  = 0.30;                 // Gate: frozen market guard
+    private static final double    MIN_ATR_PCT  = 0.20;                 // FIXED: was 0.30 — blocked Apr-22(0.29%) and Apr-23(0.23%).
+    // Indian Nifty 15-min ATR of 0.20% = ~48 point candle range. Individual stocks still move 3-5x Nifty.
+    // Ultra-frozen days (ATR < 0.10% like Apr-21) are still blocked. Apr-22/23 now allowed.
 
     // ── Limits ──────────────────────────────────────────────────────────────
     private static final int    MAX_TRADES_PER_DAY = 2;
@@ -145,8 +147,9 @@ public class HighRRStrategyEngine {
         // UCOBANK and REDINGTON both stopped out within 3 minutes.
         MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
         if (dir.niftyAtrPct() < MIN_ATR_PCT) {
-            log.debug("[HIGHRR] Gate 1 BLOCKED — Nifty ATR {:.2f}% < {:.2f}% minimum. Frozen market.",
-                    dir.niftyAtrPct(), MIN_ATR_PCT);
+            log.debug("[HIGHRR] Gate 1 BLOCKED — Nifty ATR {}% < {}% minimum. Frozen market.",
+                    String.format("%.2f", dir.niftyAtrPct()),
+                    String.format("%.2f", MIN_ATR_PCT));
             return;
         }
 
@@ -172,8 +175,8 @@ public class HighRRStrategyEngine {
         // This gate is enforced at individual candidate level in the scoring loop
         // below (isBuySetup filtered against dir.direction()). Logged here for
         // cycle-level visibility.
-        log.debug("[HIGHRR] Market regime: {} | ATR: {:.2f}% — proceeding with evaluation",
-                dir.direction(), dir.niftyAtrPct());
+        log.debug("[HIGHRR] Market regime: {} | ATR: {}% — proceeding with evaluation",
+                dir.direction(), String.format("%.2f", dir.niftyAtrPct()));
 
         BigDecimal cap = resolveCapital();
         if (!circuitBreaker.checkPermission(cap).isAllowed()) {
@@ -291,7 +294,7 @@ public class HighRRStrategyEngine {
         // Root cause of UCOBANK/REDINGTON Apr-21 losses: SL was 0.30-0.34%
         // on stocks ₹26-₹228. Opening noise ate through SL in 2-3 minutes.
         if (riskD / price < MIN_SL_PCT) {
-            log.debug("[HIGHRR] {} SL distance {:.3f}% below minimum {:.1f}% — structural level too tight.",
+            log.debug("[HIGHRR] {} SL distance {}% below minimum {}% — structural level too tight.",
                     symbol, riskD / price * 100, MIN_SL_PCT * 100);
             return null;
         }

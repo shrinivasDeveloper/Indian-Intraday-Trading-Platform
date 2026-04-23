@@ -9,6 +9,7 @@ import com.trading.marketdata.service.MarketPressureService;
 import com.trading.marketdata.service.MarketPressureService.PressureSnapshot;
 import com.trading.marketdata.service.MarketTimingService;
 import com.trading.marketdata.service.MarketTimingService.TimeWindow;
+import com.trading.regime.service.MarketDirectionService;
 import com.trading.papertrading.model.PaperAccount;
 import com.trading.position.service.PositionSizerService;
 import com.trading.risk.service.CircuitBreakerService;
@@ -172,6 +173,7 @@ public class SmartChannelPullbackStrategy {
     private final ChannelDetectionService     channelDetection;
     private final MarketPressureService       pressureService;
     private final MarketTimingService         timingService;
+    private final MarketDirectionService      marketDirection; // for ATR-aware pressure bypass
     private final RvolService                 rvolService;
     private final SectorStrengthService       sectorStrength;
     private final SectorClassificationService sectorClassify;
@@ -271,15 +273,48 @@ public class SmartChannelPullbackStrategy {
             return;
         }
 
-        // ── Get market pressure ───────────────────────────────────────────────
+        // ── Get market pressure + sector-aware fallback ───────────────────────
+        // PROBLEM (Apr-23): MarketPressureService had 0 tracked symbols all day
+        // ("No open prices yet" at 12:33 PM). pressure.isActionable() = false.
+        // Meanwhile: 18 valid channels, 4 HIGH_QUALITY BEARISH, Banking WEAK.
+        // FIX: If pressure is not actionable BUT we have HIGH_QUALITY channels
+        //      AND the sector for those channels is clearly aligned → use sector direction.
         PressureSnapshot pressure = pressureService.getSnapshot();
-        if (!pressure.isActionable()) {
-            log.debug("[SCPS] Pressure not actionable: dir={} ratio={} syms={}",
-                    pressure.direction(), String.format("%.3f", pressure.ratio()), pressure.totalSymbols());
-            return;
-        }
+        boolean pressureOk = pressure.isActionable();
+        boolean isBuy;
 
-        boolean isBuy = pressure.isBuy();
+        if (pressureOk) {
+            isBuy = pressure.isBuy();
+        } else {
+            // Pressure unavailable. Try sector-based fallback:
+            // Only fires when Nifty direction is non-SIDEWAYS OR when
+            // at least one strongly-aligned sector exists (>= 60% aligned).
+            MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
+            boolean hasStrongBullishSector = sectors(channelDetection.getAllValidChannels())
+                    .stream().anyMatch(s -> {
+                        var sd = sectorStrength.getSector(s);
+                        return sd != null && sd.alignedBullish() &&
+                                sd.changePercent() >= 0.30;
+                    });
+            boolean hasStrongBearishSector = sectors(channelDetection.getAllValidChannels())
+                    .stream().anyMatch(s -> {
+                        var sd = sectorStrength.getSector(s);
+                        return sd != null && sd.alignedBearish() &&
+                                sd.changePercent() <= -0.30;
+                    });
+
+            if (dir.direction() == MarketDirectionService.Direction.BULLISH || hasStrongBullishSector) {
+                isBuy = true;
+                log.info("[SCPS] Pressure unavailable — using sector fallback: BULLISH direction");
+            } else if (dir.direction() == MarketDirectionService.Direction.BEARISH || hasStrongBearishSector) {
+                isBuy = false;
+                log.info("[SCPS] Pressure unavailable — using sector fallback: BEARISH direction");
+            } else {
+                log.debug("[SCPS] Pressure not actionable and no clear sector alignment: dir={} ratio={} syms={}",
+                        pressure.direction(), String.format("%.3f", pressure.ratio()), pressure.totalSymbols());
+                return;
+            }
+        }
 
         // ── FIX 3: Time window handling ───────────────────────────────────────
         TimeWindow currentWindow = timingService.getCurrentWindow();
@@ -409,7 +444,7 @@ public class SmartChannelPullbackStrategy {
             double zoneTop = supportPrice + (channelWidth * PB_ZONE_FACTOR);
             inPullbackZone = (closePrice >= supportPrice) && (closePrice <= zoneTop);
             if (!inPullbackZone) {
-                log.trace("[SCPS] {} — BUY: price {:.2f} not in pullback zone [{:.2f}, {:.2f}]",
+                log.trace("[SCPS] {} — BUY: price {} not in pullback zone [{}, {}]",
                         symbol, closePrice, supportPrice, zoneTop);
                 return false;
             }
@@ -417,7 +452,7 @@ public class SmartChannelPullbackStrategy {
             double zoneBottom = resistancePrice - (channelWidth * PB_ZONE_FACTOR);
             inPullbackZone = (closePrice <= resistancePrice) && (closePrice >= zoneBottom);
             if (!inPullbackZone) {
-                log.trace("[SCPS] {} — SELL: price {:.2f} not in pullback zone [{:.2f}, {:.2f}]",
+                log.trace("[SCPS] {} — SELL: price {} not in pullback zone [{}, {}]",
                         symbol, closePrice, zoneBottom, resistancePrice);
                 return false;
             }
@@ -428,7 +463,7 @@ public class SmartChannelPullbackStrategy {
         double effectiveMinRvol = Math.max(minRvol, INTERNAL_MIN_RVOL);
         double rvol = rvolService.getRvolNow(symbol, candle.getVolume());
         if (rvol < effectiveMinRvol) {
-            log.trace("[SCPS] {} — RVOL {:.2f} < minimum {:.1f}", symbol, rvol, effectiveMinRvol);
+            log.trace("[SCPS] {} — RVOL {} < minimum {}", symbol, rvol, effectiveMinRvol);
             return false;
         }
 
@@ -440,22 +475,22 @@ public class SmartChannelPullbackStrategy {
         // FIX 6: Stricter directional sector check
         // BUY: sector must be positive AND above threshold (not just "not below threshold")
         if (isBuy && sectorChg <= 0) {
-            log.trace("[SCPS] {} — sector {} not positive ({:.2f}%) for BUY",
+            log.trace("[SCPS] {} — sector {} not positive ({}%) for BUY",
                     symbol, sectorName, sectorChg);
             return false;
         }
         if (!isBuy && sectorChg >= 0) {
-            log.trace("[SCPS] {} — sector {} not negative ({:.2f}%) for SELL",
+            log.trace("[SCPS] {} — sector {} not negative ({}%) for SELL",
                     symbol, sectorName, sectorChg);
             return false;
         }
         if (isBuy && sectorChg < sectorBuyThreshold) {
-            log.trace("[SCPS] {} — sector {} change {:.2f}% below buy threshold {:.2f}%",
+            log.trace("[SCPS] {} — sector {} change {}% below buy threshold {}%",
                     symbol, sectorName, sectorChg, sectorBuyThreshold);
             return false;
         }
         if (!isBuy && sectorChg > sectorSellThreshold) {
-            log.trace("[SCPS] {} — sector {} change {:.2f}% above sell threshold {:.2f}%",
+            log.trace("[SCPS] {} — sector {} change {}% above sell threshold {}%",
                     symbol, sectorName, sectorChg, sectorSellThreshold);
             return false;
         }
@@ -491,7 +526,7 @@ public class SmartChannelPullbackStrategy {
         // ── FIX 4: Minimum SL distance ────────────────────────────────────────
         double slPct = risk.doubleValue() / entryPrice.doubleValue();
         if (slPct < MIN_SL_PCT) {
-            log.debug("[SCPS] {} — SL distance {:.3f}% below minimum {:.1f}%. " +
+            log.debug("[SCPS] {} — SL distance {}% below minimum {}%. " +
                             "Channel too narrow for safe trade. entry={} sl={}",
                     symbol, slPct * 100, MIN_SL_PCT * 100, entryPrice, stopLoss);
             return false;
@@ -501,7 +536,7 @@ public class SmartChannelPullbackStrategy {
         double reward  = target1.subtract(entryPrice).abs().doubleValue();
         double rrRatio = reward / risk.doubleValue();
         if (rrRatio < minAdjustedRr) {
-            log.trace("[SCPS] {} — RR {:.2f} below minimum {:.1f}", symbol, rrRatio, minAdjustedRr);
+            log.trace("[SCPS] {} — RR {} below minimum {}", symbol, rrRatio, minAdjustedRr);
             return false;
         }
 
@@ -538,7 +573,7 @@ public class SmartChannelPullbackStrategy {
 
         // ── Fire signal ───────────────────────────────────────────────────────
         log.info("[SCPS] 🚀 SIGNAL: {} | {} | entry={} | sl={} | T1={} | T2={} | " +
-                        "channel={} | sector={}({:.2f}%) | RVOL={:.2f} | RR={:.2f} | " +
+                        "channel={} | sector={}({}%) | RVOL={} | RR={} | " +
                         "score={} | window={} | pullback={}",
                 symbol, direction, entryPrice, stopLoss, target1, target2,
                 channelType,
@@ -625,6 +660,16 @@ public class SmartChannelPullbackStrategy {
     public int     getTrackedSymbols()     { return latestCandles.size(); }
 
     // ── Internal helpers ──────────────────────────────────────────────────────
+
+    /** Returns distinct sector names for all symbols in the given channel map. */
+    private java.util.Set<String> sectors(java.util.Map<String, ChannelResult> channels) {
+        java.util.Set<String> result = new java.util.HashSet<>();
+        for (String sym : channels.keySet()) {
+            String sector = sectorClassify.getSector(sym);
+            if (sector != null && !sector.isBlank()) result.add(sector);
+        }
+        return result;
+    }
 
     private BigDecimal resolveCapital() {
         return "PAPER".equalsIgnoreCase(tradingMode)

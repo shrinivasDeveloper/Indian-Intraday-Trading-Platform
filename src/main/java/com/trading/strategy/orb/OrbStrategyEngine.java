@@ -166,12 +166,11 @@ public class OrbStrategyEngine {
 
         // ── ORB REGIME GATE ──────────────────────────────────────────────────
         // ORB is a gap + momentum breakout strategy. It needs:
-        //  1. Nifty ATR ≥ 0.30% — frozen days produce false breakouts
+        //  1. Nifty ATR ≥ 0.20% — FIXED: was 0.30, blocked Apr-22(0.29%) and Apr-23(0.23%)
+        //     Nifty 0.20% ATR = ~48pt candle range. Gap stocks move 3-5x Nifty on gap days.
         //  2. Market NOT SIDEWAYS — a directionless market kills gap follow-through
-        // Check is done once per tick but the MarketDirectionService caches results,
-        // so this is effectively O(1). On SIDEWAYS/frozen days, skip all processing.
         MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
-        if (dir.niftyAtrPct() < 0.30) return;
+        if (dir.niftyAtrPct() < 0.20) return;
         if (dir.direction() == MarketDirectionService.Direction.SIDEWAYS) return;
 
         String symbol = tick.getTradingSymbol();
@@ -282,13 +281,13 @@ public class OrbStrategyEngine {
         double breakoutRvol = rvolService.getRvolNow(symbol, tickVolume);
         double minRvol = direction == TradeDirection.SHORT ? 1.5 : 1.0;
         if (breakoutRvol < minRvol) {
-            log.warn("[ORB] {} SKIPPED: breakout RVOL {:.2f} < min {:.1f} for {} side. " +
+            log.warn("[ORB] {} SKIPPED: breakout RVOL {} < min {} for {} side. " +
                             "Will retry if RVOL improves on next confirmation.",
                     symbol, breakoutRvol, minRvol, direction);
             // Do NOT call markTriggered() — allow future breakout if volume improves
             return;
         }
-        log.debug("[ORB] {} breakout RVOL={:.2f} >= {:.1f} — volume confirmed ✓",
+        log.debug("[ORB] {} breakout RVOL={} >= {} — volume confirmed ✓",
                 symbol, breakoutRvol, minRvol);
 
         // Atomic dedup — returns false if this symbol was already triggered
@@ -358,7 +357,7 @@ public class OrbStrategyEngine {
         // Prevents trading when ORB range is so tight the SL is inside market noise.
         double slPct = risk.doubleValue() / entryPrice.doubleValue();
         if (slPct < 0.004) {
-            log.info("[ORB] {} SL distance {:.3f}% below minimum 0.4% — ORB range too narrow. Skipping.",
+            log.info("[ORB] {} SL distance {}% below minimum 0.4% — ORB range too narrow. Skipping.",
                     symbol, slPct * 100);
             orbDataService.markTriggered(symbol);
             activeSignals.remove(symbol);
@@ -384,7 +383,7 @@ public class OrbStrategyEngine {
         long instrumentToken = orbDataService.resolveInstrumentToken(symbol);
 
         log.info("[ORB] 🚀 SIGNAL FIRED: {} | {} | entry={} sl={} T1={} T2={} | " +
-                        "gap={:.2f}% rvol={:.2f} score={} qty={} risk=₹{} token={}",
+                        "gap={}% rvol={} score={} qty={} risk=₹{} token={}",
                 symbol, direction, entryPrice, stopLoss, target1, target2,
                 od.gapPct * 100, od.rvol, totalScore, pos.quantity(), pos.actualRisk(),
                 instrumentToken);
