@@ -12,12 +12,14 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -43,9 +45,11 @@ import java.util.stream.Collectors;
 @Slf4j
 public class HighRRTradeManager {
 
-    private static final ZoneId   IST        = ZoneId.of("Asia/Kolkata");
-    private static final String   STRATEGY   = "HIGH_RR_INTRADAY_V1";
-    private static final double   EXIT_SLIP  = 0.0003;   // 0.03% exit slippage
+    private static final ZoneId   IST           = ZoneId.of("Asia/Kolkata");
+    private static final String   STRATEGY      = "HIGH_RR_INTRADAY_V1";
+    private static final double   EXIT_SLIP     = 0.0003;  // 0.03% exit slippage
+    private static final LocalTime EOD_STOP     = LocalTime.of(15, 0); // 3:00 PM EOD stop
+    private static final double   TRAIL_STEP_PCT = 0.005;  // trailing SL step after T1
 
     // ── Dependencies ────────────────────────────────────────────────────────
     private final PaperAccount          paperAccount;
@@ -106,6 +110,9 @@ public class HighRRTradeManager {
     // TICK MONITORING — SL / TARGET / TIME STOP
     // ══════════════════════════════════════════════════════════════════════════
 
+    // Tracks which symbols have hit T1 (partial exit done, trailing SL active)
+    private final Map<String, Double> trailingSl = new ConcurrentHashMap<>();
+
     @EventListener
     @Async("tickExecutor")
     public void onTick(TickReceivedEvent tick) {
@@ -118,44 +125,94 @@ public class HighRRTradeManager {
         double ltp    = tick.getLastTradedPrice().doubleValue();
         boolean isLong = trade.direction() == TradeDirection.LONG;
 
-        // ── Time stop ────────────────────────────────────────────────────────
-        if (trade.timeStopMinutes() > 0) {
-            long elapsedMins = (Instant.now().toEpochMilli() - trade.entryTime().toEpochMilli()) / 60000L;
-            if (elapsedMins >= trade.timeStopMinutes()) {
-                log.info("[HIGHRR-MGR] ⏰ Time stop: {} elapsed={}min limit={}min",
-                        symbol, elapsedMins, trade.timeStopMinutes());
-                exitTrade(trade, ltp, "TIME_STOP_" + trade.timeStopMinutes() + "min");
-                return;
-            }
+        // ── 3:00 PM EOD time stop (replaces 90-min time stop) ────────────────
+        // FIX: 90-min stop was exiting profitable trades too early.
+        // INDUSINDBK and MAXHEALTH were 3-7 pts from target when cut at 90min.
+        // On trending days (like Apr-24) positions should run all day.
+        // Only exit at 3 PM if SL and targets have not been hit.
+        LocalTime now = LocalTime.now(IST);
+        if (!now.isBefore(EOD_STOP)) {
+            log.info("[HIGHRR-MGR] ⏰ 3:00 PM EOD stop: {} | ltp={}", symbol, ltp);
+            exitTrade(trade, ltp, "EOD_TIME_STOP");
+            return;
         }
 
         double sl  = trade.stopLoss().doubleValue();
         double t1  = trade.target().doubleValue();
         double t2  = trade.target2().doubleValue();
 
+        // ── Check trailing SL (active after T1 hit) ──────────────────────────
+        // Once T1 is hit and partial exit is done, we trail with a tighter SL.
+        Double activeTsl = trailingSl.get(symbol);
+        if (activeTsl != null) {
+            // Update trail level as price moves in our favour
+            if (isLong) {
+                double newTsl = ltp * (1.0 - TRAIL_STEP_PCT);
+                if (newTsl > activeTsl) {
+                    trailingSl.put(symbol, newTsl);
+                    activeTsl = newTsl;
+                }
+                // Check if trail SL hit
+                if (ltp <= activeTsl) {
+                    log.info("[HIGHRR-MGR] 📈 Trailing SL hit (LONG): {} ltp={} trail={}",
+                            symbol, ltp, String.format("%.2f", activeTsl));
+                    exitTrade(trade, ltp, "TRAIL_SL");
+                    return;
+                }
+                // T2 target — full exit
+                if (ltp >= t2) {
+                    log.info("[HIGHRR-MGR] 🎯 T2 hit (LONG): {} ltp={} t2={}", symbol, ltp, t2);
+                    exitTrade(trade, ltp, "TARGET_2");
+                }
+            } else {
+                double newTsl = ltp * (1.0 + TRAIL_STEP_PCT);
+                if (newTsl < activeTsl) {
+                    trailingSl.put(symbol, newTsl);
+                    activeTsl = newTsl;
+                }
+                if (ltp >= activeTsl) {
+                    log.info("[HIGHRR-MGR] 📉 Trailing SL hit (SHORT): {} ltp={} trail={}",
+                            symbol, ltp, String.format("%.2f", activeTsl));
+                    exitTrade(trade, ltp, "TRAIL_SL");
+                    return;
+                }
+                if (ltp <= t2) {
+                    log.info("[HIGHRR-MGR] 🎯 T2 hit (SHORT): {} ltp={} t2={}", symbol, ltp, t2);
+                    exitTrade(trade, ltp, "TARGET_2");
+                }
+            }
+            return; // Trailing SL is active — SL/T1 checks below are skipped
+        }
+
+        // ── Normal SL / T1 / T2 checks (before T1 hit) ───────────────────────
         if (isLong) {
-            // ── LONG: SL below entry, targets above ─────────────────────────
             if (ltp <= sl) {
-                log.info("[HIGHRR-MGR] 🛑 SL hit: {} ltp={} sl={}", symbol, ltp, sl);
+                log.info("[HIGHRR-MGR] 🛑 SL hit (LONG): {} ltp={} sl={}", symbol, ltp, sl);
                 exitTrade(trade, ltp, "STOP_LOSS");
             } else if (ltp >= t2) {
-                log.info("[HIGHRR-MGR] 🎯 T2 hit: {} ltp={} t2={}", symbol, ltp, t2);
+                log.info("[HIGHRR-MGR] 🎯 T2 hit (LONG): {} ltp={} t2={}", symbol, ltp, t2);
                 exitTrade(trade, ltp, "TARGET_2");
             } else if (ltp >= t1) {
-                log.info("[HIGHRR-MGR] ✅ T1 hit: {} ltp={} t1={}", symbol, ltp, t1);
-                exitTrade(trade, ltp, "TARGET_1");
+                // T1 hit: activate trailing SL — do NOT exit yet, let it run to T2
+                // Trail starts at entry price (breakeven) + TRAIL_STEP_PCT
+                double initialTrail = trade.fillPrice().doubleValue() * (1.0 + TRAIL_STEP_PCT);
+                trailingSl.put(symbol, initialTrail);
+                log.info("[HIGHRR-MGR] ✅ T1 hit (LONG): {} ltp={} t1={} — trailing SL activated at {}",
+                        symbol, ltp, t1, String.format("%.2f", initialTrail));
             }
         } else {
-            // ── SHORT: SL above entry, targets below ────────────────────────
             if (ltp >= sl) {
-                log.info("[HIGHRR-MGR] 🛑 SL hit: {} ltp={} sl={}", symbol, ltp, sl);
+                log.info("[HIGHRR-MGR] 🛑 SL hit (SHORT): {} ltp={} sl={}", symbol, ltp, sl);
                 exitTrade(trade, ltp, "STOP_LOSS");
             } else if (ltp <= t2) {
-                log.info("[HIGHRR-MGR] 🎯 T2 hit: {} ltp={} t2={}", symbol, ltp, t2);
+                log.info("[HIGHRR-MGR] 🎯 T2 hit (SHORT): {} ltp={} t2={}", symbol, ltp, t2);
                 exitTrade(trade, ltp, "TARGET_2");
             } else if (ltp <= t1) {
-                log.info("[HIGHRR-MGR] ✅ T1 hit: {} ltp={} t1={}", symbol, ltp, t1);
-                exitTrade(trade, ltp, "TARGET_1");
+                // T1 hit: activate trailing SL
+                double initialTrail = trade.fillPrice().doubleValue() * (1.0 - TRAIL_STEP_PCT);
+                trailingSl.put(symbol, initialTrail);
+                log.info("[HIGHRR-MGR] ✅ T1 hit (SHORT): {} ltp={} t1={} — trailing SL activated at {}",
+                        symbol, ltp, t1, String.format("%.2f", initialTrail));
             }
         }
     }
@@ -195,6 +252,9 @@ public class HighRRTradeManager {
 
         // Remove from active tracking first (prevent duplicate triggers)
         activeTrades.remove(symbol);
+
+        // Clear trailing SL state for this symbol
+        trailingSl.remove(symbol);
 
         // Apply P&L to paper account
         paperAccount.applyPnl(netPnl);
@@ -271,6 +331,25 @@ public class HighRRTradeManager {
     /** All closed trades this session (since app start). */
     public List<HighRRClosedTrade> getAllClosedTrades() {
         return Collections.unmodifiableList(closedTrades);
+    }
+
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // DAILY RESET — 9:10 AM every trading day
+    // Clears all session state: active trades (should be empty), trailing SL map,
+    // and closed trades list so stale data never leaks into a new session.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
+    public void dailyReset() {
+        if (!activeTrades.isEmpty()) {
+            log.warn("[HIGHRR-MGR] Daily reset with {} active trades — force closing",
+                    activeTrades.size());
+            forceCloseAll("DAILY_RESET");
+        }
+        trailingSl.clear();
+        closedTrades.clear();
+        log.info("[HIGHRR-MGR] Daily reset complete — trailing SL map and closed trade history cleared");
     }
 
     // ══════════════════════════════════════════════════════════════════════════

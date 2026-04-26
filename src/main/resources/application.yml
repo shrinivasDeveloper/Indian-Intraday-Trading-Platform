@@ -164,10 +164,10 @@ strategy:
   smart-channel-pullback:
     enabled: ${SCPS_ENABLED:true}
     require-high-quality-channel: false
-    time-stop-minutes: 90
+    time-stop-minutes: 0  # FIXED: was 90. Now uses 3:00 PM EOD stop only.
     # FIX: was 1.0 (average RVOL = no conviction). Internal floor is 1.1.
     min-rvol: 1.0
-    max-signals-per-session: 3
+    max-signals-per-session: 2  # CHANGED: was 3. Hard limit: 2 trades/day per requirements.
     # FIX: sector must be strictly positive for BUY, strictly negative for SELL
     sector-buy-threshold: 0.0  # IMPROVED: was 0.05 — rejecting valid +0.03% sectors. Now: any positive = BUY valid
     sector-sell-threshold: 0.0  # IMPROVED: was -0.05 — any negative = SELL valid
@@ -190,8 +190,8 @@ strategy:
   sideways-scalp:
     enabled: ${SCALP_ENABLED:true}
     min-rvol: 1.1
-    max-signals-per-session: 5
-    time-stop-minutes: 90
+    max-signals-per-session: 2  # CHANGED: was 5. Hard limit: 2 trades/day per requirements.
+    time-stop-minutes: 0  # FIXED: was 90. Now uses 3:00 PM EOD stop only.
     # FIX: Strong pressure bypass ratio (see SidewaysScalpStrategy FIX 1)
     # When market pressure ratio >= this value, strict hammer/shooting-star
     # pattern is relaxed to any bullish/bearish candle direction.
@@ -208,14 +208,14 @@ strategy:
   # ================================
   high-rr:
     enabled: ${HIGHRR_ENABLED:true}
-    time-stop-minutes: 90
+    time-stop-minutes: 0  # FIXED: was 90. Now uses 3:00 PM EOD stop in HighRRTradeManager.
     risk-per-trade: 0.01
 
   # ================================
   # MARKET PRESSURE STRATEGY
   # ================================
   market-pressure:
-    enabled: ${PRESSURE_ENABLED:true}
+    enabled: ${PRESSURE_ENABLED:false}  # DISABLED — MARKET_PRESSURE_V1 removed. Set PRESSURE_ENABLED=true to re-enable.
     time-stop-minutes: 30
     # IMPROVED: Reduced from 6 → 4 signals/session.
     # 6 signals consumed all 10 daily slots, starving ORB and HighRR.
@@ -234,11 +234,9 @@ strategy:
     # T2 = entry ± (orbRange × target-rr × 1.5)
     target-rr: 2.5  # IMPROVED: was 1.5 — ORB trend days run 3-5x range, T1=2.5x gives real profits
     # Auto-cancel breakout watch if no breakout by 11:30 AM.
-    # Time-stop for active trades: 120 minutes from entry (≈ 1:30 PM exit).
-    # Note: forced exit at 1:30 PM is also enforced by HighRROrderExecutionService
-    # scheduler. The time-stop-minutes here governs PaperTradeManagementService
-    # tick-level exit, providing a second line of defence.
-    time-stop-minutes: 120
+    # Time-stop: 0 = disabled. ORB monitoring window ends at 11:30 AM.
+    # After 11:30, positions are managed by PaperTradeManagementService until 3:00 PM EOD.
+    time-stop-minutes: 0  # FIXED: was 120. ORB uses 3:00 PM EOD stop.
     # GAP FIX 1: Minimum traded volume at 9:15 for a stock to qualify for ORB tracking.
     # Stocks below this volume threshold are pre-filtered before entering the ORB pipeline.
     # This prevents illiquid stocks (wide spreads, unreliable price discovery) from
@@ -247,6 +245,21 @@ strategy:
     # 50,000  = wider net (includes mid-cap stocks)
     min-premarket-volume: 100000
 
+
+
+  # ================================
+  # BEST TRADE V1 — SMC 1-trade-per-day strategy
+  # 5 hard rules: HTF(4H) trend + MTF(1H) structure + FVG(15m) + ADX + liquidity sweep
+  # Scoring 0-9, min 4 to qualify. Picks single best setup per day.
+  # ================================
+  best-trade:
+    enabled: ${BEST_TRADE_ENABLED:true}
+    # Minimum composite score (0-9) to qualify for trade execution
+    # 4 = two strong scoring factors (VWAP+FVG) or four minor factors
+    # 6 = high conviction setups only
+    min-score: 4
+    # Skip stocks below this price (avoids illiquid penny stocks)
+    min-stock-price: 100.0
 
   # ================================
   # NEWS CATALYST STRATEGY (NEW — independent module)
@@ -260,11 +273,14 @@ strategy:
     # 80 = high conviction only (confirmed earnings/M&A, strongly positive/negative)
     min-score: 65
     max-signals-per-session: 2
-    # NewsAPI key — free tier at newsapi.org (100 req/day)
-    # Leave blank to use only BSE + RSS feeds (always free, no key needed)
-    newsapi-key: ${NEWSAPI_KEY:}
+    # GNews.io free API key — 100 requests/day, NO delay (unlike NewsAPI which delays 24h).
+    # Get yours free at https://gnews.io — email only, no credit card required.
+    # We use 72 requests/day (1 per 5 min × 6 hours), well within the 100/day limit.
+    # If blank, GNews is skipped. The other 7 free sources (BSE/NSE/5 RSS) still run.
+    gnews-key: ${GNEWS_KEY:}
+    # NewsAPI has been REMOVED — its free tier has a 24-hour news delay (useless for intraday).
     # Time-stop for news catalyst trades: 20 minutes (news impact fades fast)
-    time-stop-minutes: 20
+    time-stop-minutes: 20  # 20 min time stop for news — news impact fades quickly
 
 # ================================
 # WARMUP CONFIG

@@ -23,6 +23,8 @@ import com.trading.strategy.channel.SmartChannelSignalHandler;
 import com.trading.strategy.highrr.HighRRStrategyEngine;
 import com.trading.strategy.highrr.HighRRTradeManager;
 import com.trading.strategy.orb.OrbDataService;
+import com.trading.strategy.news.NewsTradingStrategy;
+import com.trading.strategy.smc.BestTradeStrategy;
 import com.trading.strategy.orb.OrbStrategyEngine;
 import com.trading.validation.StrategyValidationTracker;
 import lombok.RequiredArgsConstructor;
@@ -100,6 +102,8 @@ public class DashboardController {
     private final HighRRTradeManager           highRRTradeManager;
 
     // ── FIX 2: ORB strategy services ──────────────────────────────────────
+    private final NewsTradingStrategy          newsTradingStrategy; // NEWS_CATALYST_V1
+    private final BestTradeStrategy             bestTradeStrategy;   // BEST_TRADE_V1
     private final OrbDataService               orbDataService;
     private final OrbStrategyEngine            orbStrategyEngine;
 
@@ -287,6 +291,8 @@ public class DashboardController {
         // 20. Portfolio daily overview — all trades across all strategies
         //     Combines: ORB (max 2) + HighRR (max 2) + Pullback+Sideways (max 6) = max 10/day
         data.put("portfolioSummary", buildPortfolioSummary(prices));
+        data.put("newsCatalyst",     buildNewsCatalystSummary());
+        data.put("bestTrade",        buildBestTradeSummary());
 
         return ResponseEntity.ok(data);
     }
@@ -524,7 +530,11 @@ public class DashboardController {
             double pnlVal = t.netPnl() != null ? t.netPnl().doubleValue() : 0;
             double risk   = t.stopLoss() != null && t.entryPrice() != null
                     ? t.entryPrice().subtract(t.stopLoss()).abs().doubleValue() : 0;
-            double rMult  = risk > 0 ? pnlVal / risk / t.quantity() : 0;
+            // FIX: rMultiple sign was inverted for SHORT trades.
+            // risk = |entry - stopLoss| is always positive (abs value of SL distance).
+            // rMult = pnlVal / (risk * quantity). pnlVal is positive for winners.
+            // For SHORT: entry=856, SL=862, risk=6 (abs). P&L=+140. qty=23. R=140/(6*23)=1.01R ✓
+            double rMult  = (risk > 0 && t.quantity() > 0) ? pnlVal / (risk * t.quantity()) : 0;
             Map<String, Object> ct = new LinkedHashMap<>();
             ct.put("symbol",     t.symbol());
             ct.put("direction",  t.direction().name());
@@ -1010,7 +1020,9 @@ public class DashboardController {
         allocationTargets.put("SMART_CHANNEL_PULLBACK_V3",  new int[]{3});
         allocationTargets.put("SIDEWAYS_SCALP_V1",          new int[]{3});
         allocationTargets.put("SCALP_PRESSURE_V2",          new int[]{3}); // actual STRATEGY_NAME in SidewaysScalpStrategy
-        allocationTargets.put("MARKET_PRESSURE_V1",         new int[]{4}); // FIX: was missing → showed allocationMax=0
+        // MARKET_PRESSURE_V1 removed — strategy disabled per requirements
+        allocationTargets.put("NEWS_CATALYST_V1",            new int[]{2}); // news-driven catalyst strategy
+        allocationTargets.put("BEST_TRADE_V1",              new int[]{1}); // SMC 1-trade-per-day strategy
 
         // Build from all seen strategies, plus ensure targets are shown even with 0 trades
         Set<String> allStrats = new LinkedHashSet<>(allocationTargets.keySet());
@@ -1263,4 +1275,80 @@ public class DashboardController {
         if (sd.alignedBearish()) return "WEAK";
         return "NEUTRAL";
     }
+    // ══════════════════════════════════════════════════════════════════════════
+    // NEWS CATALYST SUMMARY — read-only snapshot for dashboard
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private Map<String, Object> buildNewsCatalystSummary() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        try {
+            out.put("enabled",             newsTradingStrategy.isEnabled());
+            out.put("sessionSignals",      newsTradingStrategy.getSessionSignalCount());
+            out.put("maxSignals",          newsTradingStrategy.getMaxSignalsPerSession());
+            out.put("activeNewsItems",     newsTradingStrategy.getActiveItemCount());
+            out.put("totalIngested",       newsTradingStrategy.getTotalIngested());
+            out.put("firedToday",          newsTradingStrategy.getFiredToday());
+
+            // Recent news events that triggered signals
+            List<Map<String, Object>> events = new ArrayList<>();
+            for (var e : newsTradingStrategy.getRecentEvents()) {
+                Map<String, Object> ev = new LinkedHashMap<>();
+                ev.put("symbol",    e.symbol());
+                ev.put("direction", e.direction().name());
+                ev.put("category",  e.category());
+                ev.put("sentiment", e.sentiment());
+                ev.put("score",     e.score());
+                ev.put("headline",  e.headline());
+                ev.put("ageMin",    e.ageMinutes());
+                ev.put("firedAt",   e.firedAt());
+                events.add(ev);
+            }
+            out.put("recentEvents", events);
+        } catch (Exception e) {
+            log.warn("[DASHBOARD] buildNewsCatalystSummary failed: {}", e.getMessage());
+            out.put("error", e.getMessage());
+        }
+        return out;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // BEST TRADE (SMC) SUMMARY — read-only snapshot for dashboard
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private Map<String, Object> buildBestTradeSummary() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        try {
+            out.put("enabled",          bestTradeStrategy.isEnabled());
+            out.put("tradeFiredToday",  bestTradeStrategy.isTradeFiredToday());
+            out.put("cyclesRun",        bestTradeStrategy.getCyclesRun());
+            out.put("totalScanned",     bestTradeStrategy.getTotalScanned());
+            out.put("totalQualified",   bestTradeStrategy.getTotalQualified());
+            out.put("lastScanSummary",  bestTradeStrategy.getLastScanSummary());
+            out.put("noTradeReason",    bestTradeStrategy.getLastNoTradeReason());
+
+            var best = bestTradeStrategy.getLastBestSetup();
+            if (best != null && best.passesAllRules()) {
+                Map<String, Object> setup = new LinkedHashMap<>();
+                setup.put("symbol",      best.symbol());
+                setup.put("direction",   best.direction().name());
+                setup.put("score",       best.totalScore());
+                setup.put("entry",       best.entryPrice());
+                setup.put("stopLoss",    best.stopLoss());
+                setup.put("target1",     best.target1());
+                setup.put("target2",     best.target2());
+                setup.put("adx",         String.format("%.1f", best.adxValue()));
+                setup.put("fvgAge",      best.fvgAgeCandels());
+                setup.put("sweepAge",    best.sweepAgeCandles());
+                setup.put("reasons",     best.reasons());
+                out.put("bestSetup", setup);
+            } else {
+                out.put("bestSetup", null);
+            }
+        } catch (Exception e) {
+            log.warn("[DASHBOARD] buildBestTradeSummary failed: {}", e.getMessage());
+            out.put("error", e.getMessage());
+        }
+        return out;
+    }
+
 }

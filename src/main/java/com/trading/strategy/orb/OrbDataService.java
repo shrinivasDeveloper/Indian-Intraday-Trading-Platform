@@ -74,7 +74,13 @@ public class OrbDataService {
 
     // ── Gap and RVOL thresholds ─────────────────────────────────────────────
     private static final double MIN_GAP_PCT = 0.01;
-    private static final double MIN_RVOL    = 1.5;
+    // FIXED: was 1.5 — blocked EVERY day for a full week (shortlist>0 but validOrb=0 always).
+    // ROOT CAUSE: At 9:30 AM only 15 min of volume has accumulated (~5% of daily volume).
+    // RVOL=1.5 requires 7.5% of daily volume in 15 min — nearly impossible on a normal day.
+    // Only earnings/budget stocks hit RVOL>1.5 at 9:30. For a gap breakout strategy,
+    // any above-average volume (RVOL>=1.0) confirms genuine institutional participation.
+    // Breakout-time RVOL gate (in OrbStrategyEngine.fireSignal) catches weak-volume entries.
+    private static final double MIN_RVOL    = 1.0;
 
     /**
      * GAP FIX 1: Minimum volume pre-filter at shortlisting time (9:15:30).
@@ -386,7 +392,7 @@ public class OrbDataService {
             double rvol = rvolService.getRvolNow(od.symbol, od.latestVolume);
             od.rvol = rvol;
             if (rvol < MIN_RVOL) {
-                log.debug("[ORB] {} rejected: RVOL {:.2f} < min {}", od.symbol, rvol, MIN_RVOL);
+                log.debug("[ORB] {} rejected: RVOL {} < min {}", od.symbol, rvol, MIN_RVOL);
                 od.valid = false;
                 continue;
             }
@@ -399,7 +405,7 @@ public class OrbDataService {
             persistOrbRange(od);
             persistScore(od.symbol, score);
 
-            log.debug("[ORB] {} | H={} L={} gap={:.2f}% rvol={:.2f} score={}",
+            log.debug("[ORB] {} | H={} L={} gap={}% rvol={} score={}",
                     od.symbol,
                     String.format("%.2f", od.orbHigh),
                     String.format("%.2f", od.orbLow),
@@ -489,7 +495,7 @@ public class OrbDataService {
             usedSectors.add(od.sectorName);
             persistToRedisList(KEY_SELECTED, od.symbol);
 
-            log.info("[ORB] 📌 SELECTED #{}/10: {} | score={} rvol={:.2f} gap={:.2f}% " +
+            log.info("[ORB] 📌 SELECTED #{}/10: {} | score={} rvol={} gap={}% " +
                             "sector={} orbH={} orbL={} sectorAligned={}",
                     selectedToday.size(), od.symbol, od.score,
                     od.rvol, od.gapPct * 100, od.sectorName,

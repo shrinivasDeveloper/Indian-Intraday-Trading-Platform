@@ -34,7 +34,6 @@ package com.trading.regime.service;
 import com.trading.domain.Candle;
 import com.trading.events.CandleCompleteEvent;
 import com.trading.marketdata.service.InstrumentCacheService;
-import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
@@ -148,7 +147,6 @@ public class MarketDirectionService {
 
     private final Deque<Candle> niftyBuffer = new ArrayDeque<>();
 
-    @Getter
     private volatile MarketDirectionResult currentDirection = new MarketDirectionResult(
             Direction.SIDEWAYS, false, false, false, false,
             0, 0, 0, 0, 0, "Waiting for 15min candle data"
@@ -432,6 +430,11 @@ public class MarketDirectionService {
             sum += tr;
         }
         return sum / n;
+    }
+
+    /** Returns the current market direction result. Called by all strategies and WarmupService. */
+    public MarketDirectionResult getCurrentDirection() {
+        return currentDirection;
     }
 
     @org.springframework.scheduling.annotation.Scheduled(

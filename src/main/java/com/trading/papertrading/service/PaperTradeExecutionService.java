@@ -203,7 +203,7 @@ public class PaperTradeExecutionService {
         paperManagement.register(trade, estimatedAtr,
                 timingService.getCurrentWindow(), strongTrend, timeStopMinutes);
 
-        log.info("[PAPER] Registered: {} fill={} (raw={} slip={:.3f}%) atr={:.2f} " +
+        log.info("[PAPER] Registered: {} fill={} (raw={} slip={}%) atr={} " +
                         "window={} trend={} timeStop={}",
                 sym, fillPrice, rawEntry, ENTRY_SLIP * 100, estimatedAtr,
                 timingService.getCurrentWindow(), strongTrend,
@@ -252,7 +252,7 @@ public class PaperTradeExecutionService {
         account.applyPnl(netPnl);
         riskService.onTradeClosed(sym, netPnl, strategy, reachedPhase2);
 
-        log.info("[PAPER] CLOSED: {} reason={} gross=₹{:.2f} brok=₹{:.2f} NET=₹{:.2f} phase2={}",
+        log.info("[PAPER] CLOSED: {} reason={} gross=₹{} brok=₹{} NET=₹{} phase2={}",
                 sym, reason,
                 pnl.doubleValue(), brokerage.doubleValue(), netPnl.doubleValue(),
                 reachedPhase2);

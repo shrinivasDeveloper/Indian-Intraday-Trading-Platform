@@ -106,7 +106,10 @@ public class HighRRStrategyEngine {
     @Value("${strategy.high-rr.enabled:true}")
     private boolean engineEnabled;
 
-    @Value("${strategy.high-rr.time-stop-minutes:90}")
+    // FIX: was 90 — 90-min stop exited profitable trades before they hit target.
+    // INDUSINDBK and MAXHEALTH on Apr-24 were 3-7 pts from target when cut.
+    // Now set to 0 = DISABLED. HighRRTradeManager uses 3:00 PM EOD stop instead.
+    @Value("${strategy.high-rr.time-stop-minutes:0}")
     private int timeStopMinutes;
 
     @Value("${strategy.high-rr.risk-per-trade:0.01}")

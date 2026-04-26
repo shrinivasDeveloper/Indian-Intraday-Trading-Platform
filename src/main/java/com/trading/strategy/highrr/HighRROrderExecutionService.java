@@ -226,7 +226,7 @@ public class HighRROrderExecutionService {
 
         String txType = isBuy ? Constants.TRANSACTION_TYPE_BUY : Constants.TRANSACTION_TYPE_SELL;
 
-        log.info("[HIGHRR-EXEC] LIVE LIMIT ORDER: {} {} qty={} limit={} (buffer={:.3f}%) | timeout=2s",
+        log.info("[HIGHRR-EXEC] LIVE LIMIT ORDER: {} {} qty={} limit={} (buffer={}%) | timeout=2s",
                 txType, symbol, qty, limitPrice, ENTRY_BUFFER_PCT * 100);
 
         String orderId;

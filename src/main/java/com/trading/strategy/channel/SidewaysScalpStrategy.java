@@ -283,7 +283,7 @@ public class SidewaysScalpStrategy {
         Map<String, ChannelResult> validChannels = channelDetection.getAllValidChannels();
         if (validChannels.isEmpty()) return;
 
-        log.debug("[SCALP] Evaluating {} channels | pressure={} ratio={:.3f} strong={} window={}",
+        log.debug("[SCALP] Evaluating {} channels | pressure={} ratio={} strong={} window={}",
                 validChannels.size(), pressure.direction(),
                 pressure.ratio(), isStrongPressure, currentWindow);
 
@@ -334,7 +334,7 @@ public class SidewaysScalpStrategy {
         // widthPct = (resistance - support) / support * 100
         double widthPct = support > 0 ? (channelWidth / support) * 100.0 : 0.0;
         if (widthPct < MIN_WIDTH_PCT || widthPct > MAX_WIDTH_PCT) {
-            log.trace("[SCALP] {} — channel width {:.2f}% outside [{},{}]%",
+            log.trace("[SCALP] {} — channel width {}% outside [{},{}]%",
                     symbol, widthPct, MIN_WIDTH_PCT, MAX_WIDTH_PCT);
             return;
         }
@@ -353,7 +353,7 @@ public class SidewaysScalpStrategy {
 
         // ── FIX 2: Minimum stock price ────────────────────────────────────────
         if (closePrice < MIN_STOCK_PRICE) {
-            log.debug("[SCALP] {} — price ₹{:.2f} below minimum ₹{}. Skipping.",
+            log.debug("[SCALP] {} — price ₹{} below minimum ₹{}. Skipping.",
                     symbol, closePrice, MIN_STOCK_PRICE);
             return;
         }
@@ -364,12 +364,12 @@ public class SidewaysScalpStrategy {
         boolean nearResistance = (resistance - closePrice) / resistance <= PROXIMITY;
 
         if (isBuy && !nearSupport) {
-            log.trace("[SCALP] {} — not near support for BUY. price={:.2f} support={:.2f}",
+            log.trace("[SCALP] {} — not near support for BUY. price={} support={}",
                     symbol, closePrice, support);
             return;
         }
         if (!isBuy && !nearResistance) {
-            log.trace("[SCALP] {} — not near resistance for SELL. price={:.2f} resistance={:.2f}",
+            log.trace("[SCALP] {} — not near resistance for SELL. price={} resistance={}",
                     symbol, closePrice, resistance);
             return;
         }
@@ -377,12 +377,12 @@ public class SidewaysScalpStrategy {
         // ── FIX 5: Range position gate (widened) ─────────────────────────────
         double rangePos = (closePrice - support) / channelWidth;
         if (isBuy && rangePos > RANGE_POS_BUY_MAX) {
-            log.trace("[SCALP] {} — rangePos {:.2f} > {:.2f} for BUY (too far from support)",
+            log.trace("[SCALP] {} — rangePos {} > {} for BUY (too far from support)",
                     symbol, rangePos, RANGE_POS_BUY_MAX);
             return;
         }
         if (!isBuy && rangePos < RANGE_POS_SELL_MIN) {
-            log.trace("[SCALP] {} — rangePos {:.2f} < {:.2f} for SELL (too far from resistance)",
+            log.trace("[SCALP] {} — rangePos {} < {} for SELL (too far from resistance)",
                     symbol, rangePos, RANGE_POS_SELL_MIN);
             return;
         }
@@ -390,7 +390,7 @@ public class SidewaysScalpStrategy {
         // ── RVOL gate ─────────────────────────────────────────────────────────
         double rvol = rvolService.getRvolNow(symbol, candle.getVolume());
         if (rvol < minRvol) {
-            log.trace("[SCALP] {} — RVOL {:.2f} < minimum {:.2f}", symbol, rvol, minRvol);
+            log.trace("[SCALP] {} — RVOL {} < minimum {}", symbol, rvol, minRvol);
             return;
         }
 
@@ -405,7 +405,7 @@ public class SidewaysScalpStrategy {
         // Reject extremely thin candles (body < 5% of range = near-zero body)
         // These are pure dojis where open ≈ close and no pattern is meaningful.
         if (bodyPct < 0.05) {
-            log.trace("[SCALP] {} — candle body {:.1f}% of range — pure doji, skipping",
+            log.trace("[SCALP] {} — candle body {}% of range — pure doji, skipping",
                     symbol, bodyPct * 100);
             return;
         }
@@ -420,7 +420,7 @@ public class SidewaysScalpStrategy {
                     log.trace("[SCALP] {} — strong pressure bypass active but candle not bullish", symbol);
                     return;
                 }
-                log.debug("[SCALP] {} — strong pressure bypass ({:.2f}x ≥ {:.2f}x): " +
+                log.debug("[SCALP] {} — strong pressure bypass ({}x ≥ {}x): " +
                                 "accepting bullish candle without hammer pattern",
                         symbol, pressure.ratio(), STRONG_PRESSURE_BYPASS_RATIO);
             } else {
@@ -439,7 +439,7 @@ public class SidewaysScalpStrategy {
                     log.trace("[SCALP] {} — strong pressure bypass active but candle not bearish", symbol);
                     return;
                 }
-                log.debug("[SCALP] {} — strong pressure bypass ({:.2f}x ≥ {:.2f}x): " +
+                log.debug("[SCALP] {} — strong pressure bypass ({}x ≥ {}x): " +
                                 "accepting bearish candle without shooting-star pattern",
                         symbol, pressure.ratio(), STRONG_PRESSURE_BYPASS_RATIO);
             } else {
@@ -462,12 +462,12 @@ public class SidewaysScalpStrategy {
 
         // Reject if sector is STRONGLY opposing (e.g. -1% sector for a BUY trade)
         if (isBuy && sectorChg < -0.5) {
-            log.trace("[SCALP] {} — sector {} strongly bearish ({:.2f}%) for BUY scalp",
+            log.trace("[SCALP] {} — sector {} strongly bearish ({}%) for BUY scalp",
                     symbol, sectorName, sectorChg);
             return;
         }
         if (!isBuy && sectorChg > 0.5) {
-            log.trace("[SCALP] {} — sector {} strongly bullish ({:.2f}%) for SELL scalp",
+            log.trace("[SCALP] {} — sector {} strongly bullish ({}%) for SELL scalp",
                     symbol, sectorName, sectorChg);
             return;
         }
@@ -507,7 +507,7 @@ public class SidewaysScalpStrategy {
         // ── FIX 3: Minimum SL distance ────────────────────────────────────────
         double slPct = risk.doubleValue() / entryPrice.doubleValue();
         if (slPct < MIN_SL_PCT) {
-            log.debug("[SCALP] {} — SL {:.3f}% below minimum {:.2f}%. " +
+            log.debug("[SCALP] {} — SL {}% below minimum {}%. " +
                             "Channel too narrow for safe scalp. entry={} sl={}",
                     symbol, slPct * 100, MIN_SL_PCT * 100, entryPrice, stopLoss);
             return;
@@ -528,7 +528,7 @@ public class SidewaysScalpStrategy {
 
         // Scalp minimum RR is lower (1.2) since target is the full channel width
         if (rrRatio < 1.2) {
-            log.trace("[SCALP] {} — RR {:.2f} below scalp minimum 1.2", symbol, rrRatio);
+            log.trace("[SCALP] {} — RR {} below scalp minimum 1.2", symbol, rrRatio);
             return;
         }
 
@@ -550,7 +550,7 @@ public class SidewaysScalpStrategy {
 
         // ── Fire signal ───────────────────────────────────────────────────────
         log.info("[SCALP] 🚀 SIGNAL: {} | {} | entry={} | sl={} | T1={} | T2={} | " +
-                        "channel={} | RVOL={:.2f} | RR={:.2f} | score={} | " +
+                        "channel={} | RVOL={} | RR={} | score={} | " +
                         "strongPressure={} | bypass={}",
                 symbol, direction, entryPrice, stopLoss, target1, target2,
                 channelLabel, rvol, rrRatio, totalScore,

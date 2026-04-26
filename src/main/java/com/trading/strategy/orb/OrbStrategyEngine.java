@@ -165,13 +165,18 @@ public class OrbStrategyEngine {
         if (!orbDataService.isOrbLocked()) return;
 
         // ── ORB REGIME GATE ──────────────────────────────────────────────────
-        // ORB is a gap + momentum breakout strategy. It needs:
-        //  1. Nifty ATR ≥ 0.20% — FIXED: was 0.30, blocked Apr-22(0.29%) and Apr-23(0.23%)
-        //     Nifty 0.20% ATR = ~48pt candle range. Gap stocks move 3-5x Nifty on gap days.
-        //  2. Market NOT SIDEWAYS — a directionless market kills gap follow-through
+        // ORB monitors GAP stocks which trade independently of Nifty direction.
+        // A gap-up stock in a "SIDEWAYS" Nifty session still has its own momentum.
+        // The OCO + lockedDirection mechanism already controls trade direction.
+        //
+        // REMOVED: dir.direction() == SIDEWAYS → return
+        //   This was blocking ORB even on big IB days (Apr-24: IB=1.08%, ibBrokeLow=true)
+        //   when Nifty EMAs showed SIDEWAYS at 9:30 AM before the day developed.
+        //   ORB should fire when gap+RVOL conditions are met, regardless of Nifty regime.
+        //
+        // KEPT: ATR gate — below 0.20% the whole market is frozen and ORB setups are noise.
         MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
         if (dir.niftyAtrPct() < 0.20) return;
-        if (dir.direction() == MarketDirectionService.Direction.SIDEWAYS) return;
 
         String symbol = tick.getTradingSymbol();
         if (symbol == null || symbol.isBlank()) return;
@@ -275,11 +280,13 @@ public class OrbStrategyEngine {
             return;
         }
 
-        // REQ 4: Direction-aware RVOL thresholds.
-        // BUY:  RVOL >= 1.0 — more opportunities, higher win rate
-        // SELL: RVOL >= 1.5 — fewer but higher-quality signals (gap-downs are noisier)
+        // RVOL confirmation at breakout time.
+        // Lockout-RVOL (MIN_RVOL in OrbDataService) is now 1.0 — captures all gap stocks.
+        // Breakout-RVOL is a second filter at the moment the price actually breaks.
+        // SHORT (gap-down breakdown): needs 1.2x — slightly higher quality required for shorts.
+        // LONG (gap-up breakout): needs 1.0x — any above-average volume confirms move.
         double breakoutRvol = rvolService.getRvolNow(symbol, tickVolume);
-        double minRvol = direction == TradeDirection.SHORT ? 1.5 : 1.0;
+        double minRvol = direction == TradeDirection.SHORT ? 1.2 : 1.0;
         if (breakoutRvol < minRvol) {
             log.warn("[ORB] {} SKIPPED: breakout RVOL {} < min {} for {} side. " +
                             "Will retry if RVOL improves on next confirmation.",

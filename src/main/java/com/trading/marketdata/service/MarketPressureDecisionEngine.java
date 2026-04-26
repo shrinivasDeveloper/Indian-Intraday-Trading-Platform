@@ -140,7 +140,9 @@ public class MarketPressureDecisionEngine {
     @Value("${trading.capital:100000}")
     private BigDecimal capital;
 
-    @Value("${strategy.market-pressure.enabled:true}")
+    // DISABLED by default — MARKET_PRESSURE_V1 removed per requirements.
+    // Set PRESSURE_ENABLED=true in env vars to re-enable if needed.
+    @Value("${strategy.market-pressure.enabled:false}")
     private boolean engineEnabled;
 
     @Value("${strategy.market-pressure.time-stop-minutes:30}")
