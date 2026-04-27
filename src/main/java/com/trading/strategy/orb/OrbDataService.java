@@ -5,6 +5,8 @@ import com.trading.domain.Candle;
 import com.trading.events.CandleCompleteEvent;
 import com.trading.events.TickReceivedEvent;
 import com.trading.marketdata.service.InstrumentCacheService;
+import com.zerodhatech.kiteconnect.KiteConnect;
+import com.zerodhatech.models.HistoricalData;
 import com.trading.sector.service.SectorClassificationService;
 import com.trading.sector.service.SectorStrengthService;
 import com.zerodhatech.models.Instrument;
@@ -73,7 +75,11 @@ public class OrbDataService {
     static final LocalTime MARKET_CLOSE  = LocalTime.of(15, 30);
 
     // ── Gap and RVOL thresholds ─────────────────────────────────────────────
-    private static final double MIN_GAP_PCT = 0.01;
+    // FIX: was 0.01 (1.0%). Reduced to 0.003 (0.3%) to capture more gap candidates.
+    // On a normal NSE day, only 5-15 stocks gap >1%. At 0.3%, 40-80 stocks qualify,
+    // giving the strategy a meaningful candidate pool. The RVOL filter at 9:30 and
+    // the scoring system select only the best setups from this wider pool.
+    private static final double MIN_GAP_PCT = 0.003;
     // FIXED: was 1.5 — blocked EVERY day for a full week (shortlist>0 but validOrb=0 always).
     // ROOT CAUSE: At 9:30 AM only 15 min of volume has accumulated (~5% of daily volume).
     // RVOL=1.5 requires 7.5% of daily volume in 15 min — nearly impossible on a normal day.
@@ -118,6 +124,12 @@ public class OrbDataService {
 
     @Autowired(required = false)
     private StringRedisTemplate redis;
+
+    // FIX: inject KiteConnect for prevClose bootstrap on first-run or Redis flush.
+    // @Autowired(required=false) ensures startup doesn't fail if the bean is unavailable.
+    // KiteConnect is a Spring bean registered by the auth service on login.
+    @Autowired(required = false)
+    private KiteConnect kiteConnect;
 
     // ── In-memory state ──────────────────────────────────────────────────────
     private final Map<String, OrbData> orbDataMap    = new ConcurrentHashMap<>();
@@ -273,14 +285,23 @@ public class OrbDataService {
             if (pl != null && pl > 0) prevLowMap.put(symbol, pl);
         }
 
-        // FIX 1: track and report prev-close data availability
+        // FIX: if Redis has no prevClose data (first deployment or Redis flush),
+        // bootstrap from broker's historical API. This fetches yesterday's daily
+        // candle close price for every equity instrument and writes it to both
+        // the in-memory map and Redis so it survives the next restart.
+        // @see bootstrapPrevCloseFromBroker()
+        if (loaded == 0) {
+            log.warn("[ORB] No prev-close data in Redis. Bootstrapping from broker API...");
+            loaded = bootstrapPrevCloseFromBroker();
+        }
+
         prevCloseDataAvailable = (loaded > 0);
         if (!prevCloseDataAvailable) {
-            log.warn("[ORB] ⚠️  No prev-close prices found in Redis. This is normal on first deployment " +
-                    "or after a Redis flush. Gap filtering will be inactive today. " +
-                    "Prev-close prices will be captured at 15:20 for use tomorrow.");
+            log.warn("[ORB] ⚠️  prevClose bootstrap also returned 0. " +
+                    "Gap filtering inactive today. Will auto-recover tomorrow at 15:20.");
         } else {
-            log.info("[ORB] Daily reset. Loaded {} prev-close prices from Redis.", loaded);
+            log.info("[ORB] Daily reset complete. prevClose loaded for {} symbols " +
+                    "(prevCloseAvailable=true).", loaded);
         }
     }
 
@@ -636,6 +657,109 @@ public class OrbDataService {
             redis.opsForValue().set(KEY_PREV_LOW + symbol,
                     String.format("%.4f", price), 26, TimeUnit.HOURS);
         } catch (Exception ignored) {}
+    }
+
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // BOOTSTRAP: Load prevClose from broker when Redis is empty
+    // Runs ONCE at dailyReset if no orb:prev_close:* keys exist in Redis.
+    // Uses KiteConnect.getHistoricalData() to fetch yesterday's "day" candle for each
+    // equity instrument. Writes results to Redis so they persist for subsequent
+    // restarts (26-hour TTL ensures next day's 9 AM reset can load them).
+    //
+    // Batch processing: instruments are fetched in groups to avoid hitting
+    // Zerodha API rate limits (3 req/sec). Uses 250ms delay between batches.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private int bootstrapPrevCloseFromBroker() {
+        if (kiteConnect == null) {
+            log.warn("[ORB] bootstrapPrevCloseFromBroker: KiteConnect bean not available. " +
+                    "prevClose will be captured at 15:20 today and available tomorrow.");
+            return 0;
+        }
+
+        // Calculate yesterday's market date (skip weekends — NSE is closed Sat/Sun)
+        java.time.LocalDate today     = java.time.LocalDate.now(IST);
+        java.time.LocalDate yesterday = today.minusDays(1);
+        if (yesterday.getDayOfWeek() == java.time.DayOfWeek.SUNDAY)  yesterday = yesterday.minusDays(2);
+        if (yesterday.getDayOfWeek() == java.time.DayOfWeek.SATURDAY) yesterday = yesterday.minusDays(1);
+
+        // KiteConnect.getHistoricalData expects java.util.Date
+        // Set from=yesterday 00:00:00 and to=yesterday 23:59:59 IST
+        java.time.ZonedDateTime fromZdt = yesterday.atStartOfDay(IST);
+        java.time.ZonedDateTime toZdt   = yesterday.atTime(23, 59, 59).atZone(IST);
+        java.util.Date fromDate = java.util.Date.from(fromZdt.toInstant());
+        java.util.Date toDate   = java.util.Date.from(toZdt.toInstant());
+
+        log.info("[ORB] Bootstrapping prevClose from Zerodha for market date {} ...", yesterday);
+
+        int loaded  = 0;
+        int errors  = 0;
+        int skipped = 0;
+
+        java.util.List<Map.Entry<String, com.zerodhatech.models.Instrument>> entries =
+                new java.util.ArrayList<>(instrumentCache.getEquityInstruments().entrySet());
+
+        // Process in batches of 50 with 250ms pause — respects Zerodha 3 req/sec rate limit
+        int batchSize = 50;
+        for (int batchStart = 0; batchStart < entries.size(); batchStart += batchSize) {
+            java.util.List<Map.Entry<String, com.zerodhatech.models.Instrument>> batch =
+                    entries.subList(batchStart, Math.min(batchStart + batchSize, entries.size()));
+
+            for (Map.Entry<String, com.zerodhatech.models.Instrument> entry : batch) {
+                String symbol = entry.getKey();
+                long   token  = entry.getValue().getInstrument_token();
+                try {
+                    // KiteConnect.getHistoricalData takes instrumentToken as String
+                    HistoricalData result = kiteConnect.getHistoricalData(
+                            fromDate, toDate,
+                            String.valueOf(token),
+                            "day",
+                            false,   // continuous = false (not for equity)
+                            false    // oi = false (open interest not needed)
+                    );
+
+                    if (result == null || result.dataArrayList == null || result.dataArrayList.isEmpty()) {
+                        skipped++;
+                        continue;
+                    }
+
+                    // Last item in dataArrayList = yesterday's day candle
+                    HistoricalData last = result.dataArrayList.get(result.dataArrayList.size() - 1);
+                    double close = last.close;
+                    if (close <= 0) { skipped++; continue; }
+
+                    prevCloseMap.put(symbol, close);
+                    persistPrevClose(symbol, close);
+
+                    // Persist prevHigh and prevLow for S/R proximity scoring
+                    if (last.high > 0) { prevHighMap.put(symbol, last.high); persistPrevHigh(symbol, last.high); }
+                    if (last.low  > 0) { prevLowMap.put(symbol, last.low);   persistPrevLow(symbol, last.low);   }
+
+                    loaded++;
+                } catch (Throwable e) {
+                    // KiteException extends Throwable directly (not Exception),
+                    // so catch(Exception) misses it. catch(Throwable) catches both
+                    // KiteException and IOException correctly.
+                    errors++;
+                    if (errors <= 5) {
+                        log.debug("[ORB] Bootstrap error for {}: {}", symbol, e.getMessage());
+                    }
+                }
+            }
+
+            // Rate-limit guard between batches
+            if (batchStart + batchSize < entries.size()) {
+                try { Thread.sleep(250); } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+
+        log.info("[ORB] Bootstrap complete. Loaded={} skipped={} errors={} / {} instruments",
+                loaded, skipped, errors, entries.size());
+        return loaded;
     }
 
     private Double loadPrevCloseFromRedis(String symbol) {

@@ -82,7 +82,7 @@ public class HighRROrderExecutionService {
     private static final double ENTRY_BUFFER_PCT = 0.0003;
 
     // ── Time exit ───────────────────────────────────────────────────────────
-    private static final LocalTime TIME_EXIT = LocalTime.of(13, 30);
+    private static final LocalTime TIME_EXIT = LocalTime.of(15, 0);
 
     private final ApplicationEventPublisher  publisher;
     private final HighRRScannerService       scanner;
@@ -314,10 +314,10 @@ public class HighRROrderExecutionService {
     // TIME EXIT – force close all HighRR positions at 1:30 PM
     // ══════════════════════════════════════════════════════════════════════════
 
-    @Scheduled(cron = "0 30 13 * * MON-FRI", zone = "Asia/Kolkata")
+    @Scheduled(cron = "0 0 15 * * MON-FRI", zone = "Asia/Kolkata")
     public void timeExit() {
-        log.warn("[HIGHRR-EXEC] ⏰ Time exit triggered at 1:30 PM – closing all HighRR positions");
-        tradeManager.forceCloseAll("TIME_EXIT_13:30");
+        log.warn("[HIGHRR-EXEC] ⏰ Time exit triggered at 3:00 PM – closing all HighRR positions");
+        tradeManager.forceCloseAll("TIME_EXIT_15:00");
 
         for (Map.Entry<String, PendingOrder> entry : pendingOrders.entrySet()) {
             PendingOrder p = entry.getValue();

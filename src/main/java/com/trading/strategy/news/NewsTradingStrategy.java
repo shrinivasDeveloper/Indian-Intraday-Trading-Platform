@@ -25,6 +25,7 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
@@ -120,7 +121,7 @@ public class NewsTradingStrategy {
     private BigDecimal configuredCapital;
 
     // ── Per-session state ──────────────────────────────────────────────────────
-    private volatile int            sessionSignalCount = 0;
+    private final AtomicInteger     sessionSignalCount = new AtomicInteger(0);  // FIX: volatile int++ is not atomic
     private final Set<String>       firedToday         = ConcurrentHashMap.newKeySet();
     private final Set<String>       activeSignals      = ConcurrentHashMap.newKeySet();
 
@@ -138,13 +139,16 @@ public class NewsTradingStrategy {
         LocalTime now = LocalTime.now(IST);
         if (now.isBefore(TRADE_START) || now.isAfter(TRADE_END)) return;
 
-        // ── Gate 1: Frozen market (ATR < 0.30%) ───────────────────────────────
+        // ── Gate 1: Frozen market (ATR < 0.20%) ───────────────────────────────
+        // EXCEPTION: EARNINGS and M&A news bypass this gate entirely.
+        // A company announcing +80% profit moves 5-8% regardless of Nifty ATR.
+        // The ATR gate protects against trading macro/sector news in a dead market,
+        // NOT against trading company-specific events that move independently.
+        // High-conviction bypass: category is EARNINGS or M&A AND score >= 75.
         MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
-        if (dir.niftyAtrPct() < MIN_ATR_PCT) {
-            log.debug("[NEWS] Gate 1 BLOCKED — ATR {}% < {}%",
-                    dir.niftyAtrPct(), MIN_ATR_PCT);
-            return;
-        }
+        final boolean marketFrozen = dir.niftyAtrPct() < MIN_ATR_PCT;
+        // NOTE: marketFrozen is applied PER-SIGNAL in the scoring loop below,
+        // not as a blanket early return — so company events can still pass.
 
         // ── Gate 2: Lunch window — NOT applied to news strategy ─────────────
         // News events (RBI policy, earnings, M&A) happen at any time including lunch.
@@ -168,8 +172,8 @@ public class NewsTradingStrategy {
         // based on category and score. Do not block here — let scoring decide.
 
         // ── Session cap ────────────────────────────────────────────────────────
-        if (sessionSignalCount >= maxSignalsPerSession) {
-            log.debug("[NEWS] Session cap reached {}/{}", sessionSignalCount, maxSignalsPerSession);
+        if (sessionSignalCount.get() >= maxSignalsPerSession) {
+            log.debug("[NEWS] Session cap reached {}/{}", sessionSignalCount.get(), maxSignalsPerSession);
             return;
         }
 
@@ -200,20 +204,35 @@ public class NewsTradingStrategy {
                 scores.size(), scores.get(0).symbol());
 
         // ── Gate 4: Regime match — smart bypass for company-specific events ────
-        // RULE: Company events (EARNINGS, M&A) bypass regime alignment — the stock moves
-        //       regardless of Nifty direction when a company announces 50% profit growth.
-        // RULE: Macro events (RBI, GDP, GLOBAL) respect regime alignment — these ARE market events.
+        // RULE: Company events (EARNINGS, M&A) bypass regime alignment AND ATR gate.
+        //       The individual stock moves on its own news — Nifty ATR is irrelevant.
+        // RULE: Macro events (RBI, GDP, GLOBAL) respect regime alignment + ATR gate.
         // RULE: SIDEWAYS market + score >= SIDEWAYS_BYPASS_SCORE → allow company-specific news.
+        final int ATR_BYPASS_MIN_SCORE = 75; // minimum score to bypass frozen ATR gate
         List<NewsScore> aligned = scores.stream()
                 .filter(s -> {
                     boolean isCompanyEvent = s.primaryCategory() == NewsItem.NewsCategory.EARNINGS
                             || s.primaryCategory() == NewsItem.NewsCategory.MERGER_ACQUISITION;
-                    // Company events bypass regime check entirely
+
+                    // Company events bypass BOTH regime check AND ATR gate
+                    if (isCompanyEvent && s.totalScore() >= ATR_BYPASS_MIN_SCORE) {
+                        log.info("[NEWS] {} bypassing ATR+regime gate — company event ({}) score={}",
+                                s.symbol(), s.primaryCategory(), s.totalScore());
+                        return true;
+                    }
+                    // Company event but score < 75 — still bypass regime, but needs normal ATR
                     if (isCompanyEvent) {
+                        if (marketFrozen) {
+                            log.debug("[NEWS] {} company event blocked — ATR frozen and score {} < {}",
+                                    s.symbol(), s.totalScore(), ATR_BYPASS_MIN_SCORE);
+                            return false;
+                        }
                         log.debug("[NEWS] {} bypassing regime gate — company event ({})",
                                 s.symbol(), s.primaryCategory());
                         return true;
                     }
+                    // Non-company event: ATR gate applies
+                    if (marketFrozen) return false;
                     // SIDEWAYS bypass: only for very high conviction non-company news
                     if (isSideways && s.totalScore() >= SIDEWAYS_BYPASS_SCORE) {
                         log.info("[NEWS] {} bypassing SIDEWAYS gate — score={} >= {}",
@@ -234,7 +253,7 @@ public class NewsTradingStrategy {
         }
 
         // ── Fire top-N signals ─────────────────────────────────────────────────
-        int slotsLeft = maxSignalsPerSession - sessionSignalCount;
+        int slotsLeft = maxSignalsPerSession - sessionSignalCount.get();
         int toFire    = Math.min(slotsLeft, aligned.size());
 
         for (int i = 0; i < toFire; i++) {
@@ -373,7 +392,7 @@ public class NewsTradingStrategy {
         // Track state
         firedToday.add(symbol);
         activeSignals.add(symbol);
-        sessionSignalCount++;
+        sessionSignalCount.incrementAndGet();
 
         // Record for dashboard
         recentEvents.add(0, new NewsEventSnapshot(
@@ -385,7 +404,7 @@ public class NewsTradingStrategy {
         if (recentEvents.size() > 20) recentEvents.subList(20, recentEvents.size()).clear();
 
         log.info("[NEWS] Signal #{}/{} fired for {} (session total)",
-                sessionSignalCount, maxSignalsPerSession, symbol);
+                sessionSignalCount.get(), maxSignalsPerSession, symbol);
         return true;
     }
 
@@ -445,7 +464,7 @@ public class NewsTradingStrategy {
     public void dailyReset() {
         firedToday.clear();
         activeSignals.clear();
-        sessionSignalCount = 0;
+        sessionSignalCount.set(0);
         recentEvents.clear();
         log.info("[NEWS] Daily reset complete");
     }
@@ -454,7 +473,7 @@ public class NewsTradingStrategy {
     // DASHBOARD API (read-only)
     // ══════════════════════════════════════════════════════════════════════════
 
-    public int     getSessionSignalCount()    { return sessionSignalCount; }
+    public int     getSessionSignalCount()    { return sessionSignalCount.get(); }
     public int     getMaxSignalsPerSession()  { return maxSignalsPerSession; }
     public boolean isEnabled()               { return engineEnabled; }
     public int     getActiveItemCount()       { return ingestionService.getActiveItems().size(); }

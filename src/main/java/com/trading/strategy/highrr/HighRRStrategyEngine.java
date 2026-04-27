@@ -24,6 +24,7 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -116,7 +117,7 @@ public class HighRRStrategyEngine {
     private double riskPerTrade;
 
     // ── Session state ────────────────────────────────────────────────────────
-    private volatile int        tradesExecutedToday = 0;
+    private final AtomicInteger tradesExecutedToday = new AtomicInteger(0);  // FIX: volatile int++ is not atomic
     private final Set<String>   firedToday          = ConcurrentHashMap.newKeySet();
     private final Set<String>   activeSignals       = ConcurrentHashMap.newKeySet();
 
@@ -127,7 +128,7 @@ public class HighRRStrategyEngine {
     // 1-MINUTE EVALUATION CYCLE
     // ══════════════════════════════════════════════════════════════════════════
 
-    @Scheduled(fixedRate = 60_000)
+    @Scheduled(fixedDelay = 60_000)  // FIX: fixedDelay fires 60s after completion, not start — prevents cycle overlap
     public void runEvaluationCycle() {
         if (!engineEnabled) return;
 
@@ -138,9 +139,9 @@ public class HighRRStrategyEngine {
             return;
         }
 
-        if (tradesExecutedToday >= MAX_TRADES_PER_DAY) {
+        if (tradesExecutedToday.get() >= MAX_TRADES_PER_DAY) {
             log.debug("[HIGHRR] Daily trade limit reached ({}/{}). Engine idle.",
-                    tradesExecutedToday, MAX_TRADES_PER_DAY);
+                    tradesExecutedToday.get(), MAX_TRADES_PER_DAY);
             return;
         }
 
@@ -194,7 +195,7 @@ public class HighRRStrategyEngine {
         }
 
         log.info("[HIGHRR] Starting evaluation cycle @{} | symbols={} | tradesLeft={}",
-                now, symbols.size(), MAX_TRADES_PER_DAY - tradesExecutedToday);
+                now, symbols.size(), MAX_TRADES_PER_DAY - tradesExecutedToday.get());
 
         List<ScoredCandidate> candidates = new ArrayList<>();
         int evaluated = 0, buySetups = 0, sellSetups = 0;
@@ -248,7 +249,7 @@ public class HighRRStrategyEngine {
 
         candidates.sort(Comparator.comparingDouble(ScoredCandidate::score).reversed());
 
-        int slotsLeft = MAX_TRADES_PER_DAY - tradesExecutedToday;
+        int slotsLeft = MAX_TRADES_PER_DAY - tradesExecutedToday.get();
         int toFire    = Math.min(slotsLeft, Math.min(TOP_N_CANDIDATES, candidates.size()));
 
         for (int i = 0; i < toFire; i++) {
@@ -443,10 +444,10 @@ public class HighRRStrategyEngine {
 
         firedToday.add(cand.symbol());
         activeSignals.add(cand.symbol());
-        tradesExecutedToday++;
+        tradesExecutedToday.incrementAndGet();
 
         log.info("[HIGHRR] ✅ Signal #{}/{} fired for {}. Session complete for this symbol.",
-                tradesExecutedToday, MAX_TRADES_PER_DAY, cand.symbol());
+                tradesExecutedToday.get(), MAX_TRADES_PER_DAY, cand.symbol());
     }
 
     // ── Instrument token resolution (FIX 1) ────────────────────────────────
@@ -497,10 +498,10 @@ public class HighRRStrategyEngine {
 
     // ── Dashboard helpers ────────────────────────────────────────────────────
 
-    public int     getTradesExecutedToday() { return tradesExecutedToday; }
-    public int     getRemainingSlots()      { return MAX_TRADES_PER_DAY - tradesExecutedToday; }
+    public int     getTradesExecutedToday() { return tradesExecutedToday.get(); }
+    public int     getRemainingSlots()      { return MAX_TRADES_PER_DAY - tradesExecutedToday.get(); }
     public boolean isEnabled()              { return engineEnabled; }
-    public boolean isDailyLimitReached()    { return tradesExecutedToday >= MAX_TRADES_PER_DAY; }
+    public boolean isDailyLimitReached()    { return tradesExecutedToday.get() >= MAX_TRADES_PER_DAY; }
     public int     getMaxTradesPerDay()     { return MAX_TRADES_PER_DAY; }
     /** Dashboard: symbols that fired a signal today (may be closed or active). */
     public Set<String> getFiredToday()      { return Collections.unmodifiableSet(firedToday); }
@@ -509,7 +510,7 @@ public class HighRRStrategyEngine {
 
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
-        tradesExecutedToday = 0;
+        tradesExecutedToday.set(0);
         firedToday.clear();
         activeSignals.clear();
         volumeHistory.clear();

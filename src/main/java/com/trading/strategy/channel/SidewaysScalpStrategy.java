@@ -31,6 +31,7 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * SidewaysScalpStrategy (SCALP_PRESSURE_V2)
@@ -206,7 +207,7 @@ public class SidewaysScalpStrategy {
     private BigDecimal capital;
 
     // ── Session state ─────────────────────────────────────────────────────────
-    private volatile int         sessionSignalCount = 0;
+    private final AtomicInteger  sessionSignalCount = new AtomicInteger(0);  // FIX: volatile int++ is not atomic
     private final Set<String>    activeSignals      = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> lastSignalTime  = new ConcurrentHashMap<>();
 
@@ -237,8 +238,8 @@ public class SidewaysScalpStrategy {
         if (!strategyEnabled) return;
 
         // ── Session cap ───────────────────────────────────────────────────────
-        if (sessionSignalCount >= maxSignalsPerSession) {
-            log.debug("[SCALP] Session cap reached ({}/{})", sessionSignalCount, maxSignalsPerSession);
+        if (sessionSignalCount.get() >= maxSignalsPerSession) {
+            log.debug("[SCALP] Session cap reached ({}/{})", sessionSignalCount.get(), maxSignalsPerSession);
             return;
         }
 
@@ -288,7 +289,7 @@ public class SidewaysScalpStrategy {
                 pressure.ratio(), isStrongPressure, currentWindow);
 
         for (Map.Entry<String, ChannelResult> entry : validChannels.entrySet()) {
-            if (sessionSignalCount >= maxSignalsPerSession) break;
+            if (sessionSignalCount.get() >= maxSignalsPerSession) break;
 
             String        symbol  = entry.getKey();
             ChannelResult channel = entry.getValue();
@@ -593,10 +594,10 @@ public class SidewaysScalpStrategy {
 
         lastSignalTime.put(symbol, System.currentTimeMillis());
         activeSignals.add(symbol);
-        sessionSignalCount++;
+        sessionSignalCount.incrementAndGet();
 
         log.info("[SCALP] Signal #{}/{} fired for {} (session)",
-                sessionSignalCount, maxSignalsPerSession, symbol);
+                sessionSignalCount.get(), maxSignalsPerSession, symbol);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -660,7 +661,7 @@ public class SidewaysScalpStrategy {
 
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
-        sessionSignalCount = 0;
+        sessionSignalCount.set(0);
         activeSignals.clear();
         lastSignalTime.clear();
         latestCandles.clear();
@@ -670,7 +671,7 @@ public class SidewaysScalpStrategy {
     // ── Dashboard helpers ─────────────────────────────────────────────────────
 
     public boolean isEnabled()             { return strategyEnabled; }
-    public int     getSessionSignalCount() { return sessionSignalCount; }
+    public int     getSessionSignalCount() { return sessionSignalCount.get(); }
     public int     getActiveSignalCount()  { return activeSignals.size(); }
     public Set<String> getActiveSignals()  { return Collections.unmodifiableSet(activeSignals); }
 

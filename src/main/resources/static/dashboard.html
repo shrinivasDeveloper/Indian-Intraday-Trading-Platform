@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
-    <title>Trading Dashboard v9.1</title>
+    <title>Trading Dashboard v9.2</title>
     <style>
         :root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#e6edf3;--muted:#8b949e;
           --green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;
@@ -136,13 +136,13 @@
     </style>
 </head>
 <body>
-<div id="loading">⚡ Loading Trading Dashboard v9.1…</div>
+<div id="loading">⚡ Loading Trading Dashboard v9.2…</div>
 <div id="stale-banner" class="stale-banner">
     ⚠ DATA STALE — No tick received for &gt;10s. All new entries BLOCKED until WebSocket recovers.
 </div>
 
 <div class="header">
-    <h1>⚡ Trading Dashboard v9.1</h1>
+    <h1>⚡ Trading Dashboard v9.2</h1>
     <span id="h-mode"  class="badge badge-blue">PAPER</span>
     <span id="h-phase" class="pc pp2">PRE_OPEN</span>
     <span id="h-dir"   class="badge badge-yellow">SIDEWAYS</span>
@@ -153,6 +153,8 @@
     <span id="h-scps"  class="badge badge-orange" style="display:none">SCPS:0</span>
     <span id="h-hrr"   class="badge badge-purple" style="display:none">HRR:0/2</span>
     <span id="h-orb"   class="badge badge-gold"   style="display:none">ORB:0</span>
+    <span id="h-smc"   class="badge badge-purple" style="display:none">SMC:—</span>
+    <span id="h-news"  class="badge badge-blue"   style="display:none">NEWS:0</span>
     <span class="rtime" id="rtime">—</span>
     <button class="btn" onclick="load()">↻</button>
 </div>
@@ -168,7 +170,8 @@
     <div class="tab" onclick="switchTab('scanner',this)">Scanner</div>
     <div class="tab" onclick="switchTab('sectors',this)">Sectors</div>
     <div class="tab" onclick="switchTab('risk',this)">Risk</div>
-    <div class="tab" onclick="switchTab('validation',this)">Validation</div>
+    <div class="tab" onclick="switchTab('smc',this)">SMC 🧠</div>
+    <div class="tab" onclick="switchTab('news',this)">News 📰</div>
 </div>
 
 <!-- OVERVIEW -->
@@ -184,9 +187,7 @@
             <div class="ct">🎯 Market Phase</div>
             <div style="display:flex;gap:9px;align-items:flex-start;margin-bottom:7px">
                 <div id="phase-big" class="pc pp2" style="font-size:13px;padding:4px 12px;flex-shrink:0">PRE_OPEN</div>
-                <div><div id="phase-desc" class="sub" style="margin-bottom:4px">—</div>
-                    <span id="orb-pill" class="pill pm">ORB:—</span>
-                    <span id="thr-pill" class="pill pb" style="margin-left:3px">Thr:—</span>
+                <div><div id="phase-desc" class="sub">—</div>
                 </div>
             </div>
             <div class="bt"><div id="phase-prog" class="bf" style="width:0%;background:var(--muted)"></div></div>
@@ -280,12 +281,12 @@
         <div class="card">
             <div class="ct">🔍 Shortlisted</div>
             <div class="stat sb" id="orb-shortlist-cnt">0</div>
-            <div class="sub">Gap ≥ 1% + Vol OK</div>
+            <div class="sub">Gap ≥ 0.3% + Vol OK</div>
         </div>
         <div class="card">
             <div class="ct">✅ Valid at 9:30</div>
             <div class="stat sg" id="orb-valid-cnt">0</div>
-            <div class="sub">RVOL ≥ 1.5 passed</div>
+            <div class="sub">RVOL ≥ 1.0 passed</div>
         </div>
         <div class="card">
             <div class="ct">⚡ Triggered</div>
@@ -313,8 +314,8 @@
             <div class="ir"><span class="il">Open Trades</span><span class="iv" id="orb-open-trades">—</span></div>
             <div class="ir"><span class="il">Executed / Max</span><span class="iv" id="orb-exec-slots">—</span></div>
             <div class="ir"><span class="il">Direction Lock</span><span class="iv" id="orb-dir-lock">—</span></div>
-            <div class="ir"><span class="il">Target RR</span><span class="iv">1.5×</span></div>
-            <div class="ir"><span class="il">Time Stop</span><span class="iv">120 min from entry</span></div>
+            <div class="ir"><span class="il">Target RR</span><span class="iv">2.5× (T1) · 4.0× (T2)</span></div>
+            <div class="ir"><span class="il">Time Stop</span><span class="iv">EOD 15:00 IST</span></div>
             <div class="ir"><span class="il">Auto-Cancel</span><span class="iv">11:30 AM if no breakout</span></div>
             <div class="ir"><span class="il">EOD Close</span><span class="iv">15:00 IST</span></div>
             <div style="margin-top:8px">
@@ -367,9 +368,9 @@
             <div class="ir"><span class="il">Strategy Name</span><span class="iv" style="font-size:10px">HIGH_RR_INTRADAY_V1</span></div>
             <div class="ir"><span class="il">Status</span><span class="iv" id="hrr-status">—</span></div>
             <div class="ir"><span class="il">Daily Limit Reached</span><span class="iv" id="hrr-limit-reached">—</span></div>
-            <div class="ir"><span class="il">Window</span><span class="iv">9:30 AM – 1:00 PM</span></div>
-            <div class="ir"><span class="il">Time Stop</span><span class="iv">13:30 IST</span></div>
-            <div class="ir"><span class="il">Target</span><span class="iv">Min 1:2 R:R (ideal 1:3)</span></div>
+            <div class="ir"><span class="il">Window</span><span class="iv">9:35 AM – 3:00 PM</span></div>
+            <div class="ir"><span class="il">Time Stop</span><span class="iv">15:00 IST (EOD)</span></div>
+            <div class="ir"><span class="il">Target</span><span class="iv">Min RR 2.0 · T1=2R · T2=3R</span></div>
         </div>
         <div class="card">
             <div class="ct">📋 Fired Today</div>
@@ -651,27 +652,120 @@
     </div>
 </div>
 
-<!-- VALIDATION -->
-<div id="tc-validation" class="tc">
-    <div style="padding:9px">
-        <div style="display:flex;gap:7px;align-items:center;margin-bottom:9px;flex-wrap:wrap">
-            <input id="vs" placeholder="Symbol filter" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:5px 9px;border-radius:6px;font-size:12px;flex:1;min-width:100px">
-            <select id="vstr" style="background:var(--card);border:1px solid var(--border);color:var(--text);padding:5px 9px;border-radius:6px;font-size:12px">
-                <option value="">All Strategies</option>
-                <option value="SMART_CHANNEL_PULLBACK_V3">Smart Channel Pullback</option>
-                <option value="HIGH_RR_INTRADAY_V1">High RR</option>
-                <option value="ORB_BREAKOUT_V1">ORB Breakout</option>
-            </select>
-            <button class="btn" onclick="loadVal()">Filter</button>
-            <span class="sub">Tracked: <span id="val-cnt">—</span></span>
+
+<!-- SMC / BEST TRADE TAB -->
+<div id="tc-smc" class="tc">
+    <div class="g g4" style="padding-bottom:0">
+        <div class="card highlight-purple">
+            <div class="ct">🧠 SMC Status</div>
+            <div class="stat spur" id="smc-status">—</div>
+            <div class="sub" id="smc-fired">Trade fired: —</div>
         </div>
-        <div class="card" style="margin-bottom:9px">
-            <div class="ct">⚙ Top Gate Failures</div>
-            <div id="ffreq"></div>
+        <div class="card">
+            <div class="ct">🔍 Cycles Run</div>
+            <div class="stat sb" id="smc-cycles">0</div>
+            <div class="sub">Every 15min from 9:30</div>
         </div>
-        <div class="card"><div class="ct">📋 Validation Log</div><div id="vlog"></div></div>
+        <div class="card">
+            <div class="ct">📊 Scanned</div>
+            <div class="stat" id="smc-scanned">0</div>
+            <div class="sub" id="smc-qualified">0 qualified</div>
+        </div>
+        <div class="card">
+            <div class="ct">💰 SMC P&L</div>
+            <div class="stat" id="smc-pnl">—</div>
+            <div class="sub" id="smc-wr">Win Rate: —</div>
+        </div>
+    </div>
+    <div class="g g2" style="padding-top:0">
+        <div class="card highlight-purple">
+            <div class="ct">🎯 Best Setup Today</div>
+            <div id="smc-setup-body"><div class="sub">No setup found yet — waiting for 4 days of data accumulation</div></div>
+        </div>
+        <div class="card">
+            <div class="ct">📋 SMC Engine State</div>
+            <div class="ir"><span class="il">Last Scan Summary</span><span class="iv" id="smc-summary" style="font-size:10px">—</span></div>
+            <div class="ir"><span class="il">No-Trade Reason</span><span class="iv sr" id="smc-noreason" style="font-size:10px">—</span></div>
+            <div class="ir"><span class="il">Strategy</span><span class="iv">BEST_TRADE_V1</span></div>
+            <div class="ir"><span class="il">Max Trades/Day</span><span class="iv">1 (highest scoring setup)</span></div>
+            <div class="ir"><span class="il">Scan Window</span><span class="iv">9:30–14:45 every 15min</span></div>
+            <div class="ir"><span class="il">Min Score</span><span class="iv">4 / 9</span></div>
+            <div class="ir"><span class="il">Time Stop</span><span class="iv">15:00 IST EOD</span></div>
+            <div style="margin-top:8px;background:#21262d;border-radius:6px;padding:8px">
+                <div class="ct" style="margin-bottom:5px">5 SMC Hard Rules</div>
+                <div style="font-size:11px;line-height:1.7;color:var(--muted)">
+                    1. 4H price vs EMA50 → institutional bias<br>
+                    2. 1H HH/HL or LH/LL → structure confirmation<br>
+                    3. 15min FVG ≤ 6 candles → entry zone<br>
+                    4. ADX &gt; 20 on 15min → trending market<br>
+                    5. Liquidity sweep ≤ 4 candles → institutional entry
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="card" style="margin:0 9px 9px">
+        <div class="ct">⏳ Data Readiness</div>
+        <div id="smc-readiness" style="padding:4px 0">
+            <div class="sub">SMC requires ~80 fifteen-minute candles per symbol (≈4 trading days after first deployment).</div>
+            <div style="margin-top:8px" id="smc-data-bar"></div>
+        </div>
     </div>
 </div>
+
+
+<!-- NEWS CATALYST TAB -->
+<div id="tc-news" class="tc">
+    <div class="g g4" style="padding-bottom:0">
+        <div class="card highlight-green">
+            <div class="ct">📰 News Status</div>
+            <div class="stat sg" id="news-status">—</div>
+            <div class="sub" id="news-fired-sub">Fired today: 0</div>
+        </div>
+        <div class="card">
+            <div class="ct">📥 Ingested Today</div>
+            <div class="stat sb" id="news-ingested">0</div>
+            <div class="sub" id="news-active-sub">Active: 0 items</div>
+        </div>
+        <div class="card">
+            <div class="ct">🎯 Session Signals</div>
+            <div class="stat sg" id="news-signals">0</div>
+            <div class="sub">Max 2 per session</div>
+        </div>
+        <div class="card">
+            <div class="ct">💰 News P&L</div>
+            <div class="stat" id="news-pnl">—</div>
+            <div class="sub" id="news-wr">Win Rate: —</div>
+        </div>
+    </div>
+    <div class="g g2" style="padding-top:0">
+        <div class="card highlight-green">
+            <div class="ct">📋 Recent Events / Fired Today</div>
+            <div id="news-events-body"><div class="sub">No news events yet today</div></div>
+        </div>
+        <div class="card">
+            <div class="ct">⚙ News Strategy Config</div>
+            <div class="ir"><span class="il">Strategy</span><span class="iv">NEWS_CATALYST_V1</span></div>
+            <div class="ir"><span class="il">Min Score to Trade</span><span class="iv">65 / 100</span></div>
+            <div class="ir"><span class="il">EARNINGS/M&A bypass</span><span class="iv">Score ≥ 75 → ignores ATR/Regime</span></div>
+            <div class="ir"><span class="il">Max Signals/Session</span><span class="iv">2</span></div>
+            <div class="ir"><span class="il">Trade Window</span><span class="iv">9:35 AM – 2:30 PM</span></div>
+            <div class="ir"><span class="il">Time Stop</span><span class="iv">20 min (news fades fast)</span></div>
+            <div class="ir"><span class="il">SL</span><span class="iv">0.8% from entry</span></div>
+            <div class="ir"><span class="il">T1 / T2</span><span class="iv">1.6% / 2.4% (2R / 3R)</span></div>
+            <div style="margin-top:8px;background:#21262d;border-radius:6px;padding:8px">
+                <div class="ct" style="margin-bottom:5px">Active Sources (5)</div>
+                <div style="font-size:11px;line-height:1.7;color:var(--muted)">
+                    ✅ BSE Corp Announcements (3min)<br>
+                    ✅ BSE Results Filter (3min)<br>
+                    ✅ ET Markets RSS (5min)<br>
+                    ✅ Moneycontrol Business RSS (7min)<br>
+                    ✅ Hindu Business Line RSS (10min)
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
 
 <script>
     const API = '/api/dashboard';
@@ -683,7 +777,6 @@
         el.classList.add('active');
         const e = document.getElementById('tc-' + name);
         if (e) e.classList.add('active');
-        if (name === 'validation') loadVal();
     }
 
     const q    = id => document.getElementById(id);
@@ -712,6 +805,7 @@
     function render() {
         renderHdr(); renderOv(); renderOrb(); renderHighRR(); renderTrades();
         renderPortfolio(); renderStrategy(); renderChannels(); renderScanner(); renderSectors(); renderRisk();
+        renderSmc(); renderNews();
     }
 
     // ── HEADER ───────────────────────────────────────────────────────────────────
@@ -753,6 +847,23 @@
         const orbSel = orb.selectedCount||0;
         const oe = q('h-orb');
         if(oe){oe.textContent='ORB:'+orbSel;oe.style.display=orbSel>0?'inline-block':'none';}
+
+        // SMC badge
+        const bt = D.bestTrade||{};
+        const smcEl = q('h-smc');
+        if(smcEl){
+            smcEl.textContent = 'SMC:'+(bt.tradeFiredToday?'FIRED':bt.cyclesRun>0?bt.cyclesRun+'cyc':'—');
+            smcEl.style.display = bt.cyclesRun>0?'inline-block':'none';
+        }
+
+        // News badge
+        const nc = D.newsCatalyst||{};
+        const newsEl = q('h-news');
+        if(newsEl){
+            const ns = nc.sessionSignals||0;
+            newsEl.textContent = 'NEWS:'+ns+'/'+(nc.maxSignals||2);
+            newsEl.style.display = (nc.totalIngested||0)>0?'inline-block':'none';
+        }
     }
 
     // ── OVERVIEW ─────────────────────────────────────────────────────────────────
@@ -779,11 +890,6 @@
         const ph=phase.phase||'PRE_OPEN',phEl=q('phase-big');
         if(phEl){phEl.textContent=ph;phEl.className='pc '+({EARLY:'pe',CONFIRMED:'pco'}[ph]||'pp2');}
         set('phase-desc',phase.description||'—');
-        const op=q('orb-pill');
-        if(op){op.textContent='ORB:'+(phase.isOrbAllowed?'ALLOWED':'BLOCKED');op.className='pill '+(phase.isOrbAllowed?'pg':'pr');}
-        const thr=phase.isEarlyPhase?58:(mm.minProbability||60);
-        const tp=q('thr-pill');
-        if(tp){tp.textContent='Thr:'+thr;tp.className='pill '+(phase.isEarlyPhase?'po':'pb');}
         const prog=Math.max(0,Math.min(100,(new Date().getHours()*60+new Date().getMinutes()-9*60-15)/(6*60)*100));
         const pp=q('phase-prog');
         if(pp){pp.style.width=prog+'%';pp.style.background=ph==='EARLY'?'var(--gold)':ph==='CONFIRMED'?'var(--blue)':'var(--muted)';}
@@ -1156,6 +1262,9 @@
             'HIGH_RR_INTRADAY_V1':       {border:'var(--purple)', bg:'#12101f', icon:'🏆', label:'High RR'},
             'SMART_CHANNEL_PULLBACK_V3': {border:'var(--orange)', bg:'#1a0e00', icon:'📡', label:'Pullback'},
             'SIDEWAYS_SCALP_V1':         {border:'var(--blue)',   bg:'#0d1f30', icon:'↔', label:'Sideways'},
+            'SCALP_PRESSURE_V2':         {border:'var(--blue)',   bg:'#0d1f30', icon:'↔', label:'Scalp'},
+            'NEWS_CATALYST_V1':          {border:'var(--green)',  bg:'#0d1f15', icon:'📰', label:'News'},
+            'BEST_TRADE_V1':             {border:'var(--purple)', bg:'#12101f', icon:'🧠', label:'SMC'},
         };
 
         html('port-strat-grid', strats.length
@@ -1229,6 +1338,136 @@
             }).join(''));
         }
     }
+
+
+    // ── SMC TAB ───────────────────────────────────────────────────────────────────
+    function renderSmc() {
+        const bt = D.bestTrade || {};
+        const enabled = bt.enabled !== false;
+        const fired   = bt.tradeFiredToday === true;
+
+        const stEl = q('smc-status');
+        if(stEl){
+            stEl.textContent = !enabled ? 'DISABLED' : fired ? '✅ FIRED' : 'SCANNING';
+            stEl.className = 'stat ' + (!enabled ? 'sr' : fired ? 'sg' : 'spur');
+        }
+        set('smc-fired', 'Trade fired: ' + (fired ? 'YES ✅' : 'No'));
+        set('smc-cycles',    bt.cyclesRun    || 0);
+        set('smc-scanned',   bt.totalScanned || 0);
+        set('smc-qualified', (bt.totalQualified || 0) + ' qualified');
+        set('smc-summary',   bt.lastScanSummary || '—');
+
+        const nr = bt.noTradeReason || '—';
+        const nrEl = q('smc-noreason');
+        if(nrEl){ nrEl.textContent = nr; nrEl.style.color = nr.includes('SIDEWAYS') ? 'var(--yellow)' : nr==='—' ? 'var(--muted)' : 'var(--red)'; }
+
+        const pnlMap = (D.strategyStatus || {}).perStrategyPnl || {};
+        const smcPnl = pnlMap['BEST_TRADE_V1'] || {};
+        const p = parseFloat(smcPnl.pnl || 0);
+        const pEl = q('smc-pnl'); if(pEl){pEl.textContent=fp(p);pEl.className='stat '+pc(p);}
+        set('smc-wr','Win Rate: '+(smcPnl.winRate||'—'));
+
+        // Best setup card
+        const best = bt.bestSetup;
+        if(best && best.symbol) {
+            html('smc-setup-body',
+                `<div style="background:#1a102a;border:1px solid var(--purple);border-radius:8px;padding:12px">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                    <div style="display:flex;align-items:center;gap:8px">
+                      <b style="font-size:16px">${best.symbol}</b>
+                      <span class="pill ${best.direction==='LONG'?'pg':'pr'}">${best.direction||'—'}</span>
+                      <span class="pill pp">Score ${best.totalScore||0}/9</span>
+                    </div>
+                    ${fired ? '<span class="pill pg">✅ TRADED</span>' : '<span class="pill py">⏳ WATCHING</span>'}
+                  </div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:11px;margin-bottom:8px">
+                    <div class="ir"><span class="il">Entry</span><span class="iv">₹${f2(best.entryPrice)}</span></div>
+                    <div class="ir"><span class="il">Stop Loss</span><span class="iv sr">₹${f2(best.stopLoss)}</span></div>
+                    <div class="ir"><span class="il">T1 (2.5R)</span><span class="iv sg">₹${f2(best.target1)}</span></div>
+                    <div class="ir"><span class="il">T2 (3.5R)</span><span class="iv sg">₹${f2(best.target2)}</span></div>
+                    <div class="ir"><span class="il">ADX</span><span class="iv">${f2(best.adx)}</span></div>
+                    <div class="ir"><span class="il">ATR</span><span class="iv">${f2(best.atr)}</span></div>
+                  </div>
+                  <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">
+                    ${best.rule1Passed?'<span class="pill pg">✅ R1:4H Bias</span>':'<span class="pill pr">❌ R1:4H Bias</span>'}
+                    ${best.rule2Passed?'<span class="pill pg">✅ R2:Structure</span>':'<span class="pill pr">❌ R2:Structure</span>'}
+                    ${best.rule3Passed?'<span class="pill pg">✅ R3:FVG</span>':'<span class="pill pr">❌ R3:FVG</span>'}
+                    ${best.rule4Passed?'<span class="pill pg">✅ R4:ADX</span>':'<span class="pill pr">❌ R4:ADX</span>'}
+                    ${best.rule5Passed?'<span class="pill pg">✅ R5:Sweep</span>':'<span class="pill pr">❌ R5:Sweep</span>'}
+                  </div>
+                </div>`
+            );
+        } else {
+            html('smc-setup-body', '<div class="sub">' + (nr !== '—' ? '⏳ ' + nr : 'No setup qualified today') + '</div>');
+        }
+
+        // Data readiness bar
+        const candleCount = bt.buf15mSize || 0; // if backend exposes it
+        const needed = 80, pct = Math.min(100, Math.round(candleCount / needed * 100));
+        html('smc-data-bar',
+            `<div style="display:flex;align-items:center;gap:8px">
+              <div style="flex:1;height:8px;border-radius:4px;background:#21262d;overflow:hidden">
+                <div style="height:100%;border-radius:4px;width:${pct}%;background:${pct>=100?'var(--green)':'var(--yellow)'};transition:width .5s"></div>
+              </div>
+              <span class="sub" style="white-space:nowrap">${candleCount||'?'}/${needed} candles (${pct}%${pct>=100?' ✅ Ready':' — accumulating'})</span>
+            </div>`
+        );
+    }
+
+    // ── NEWS TAB ──────────────────────────────────────────────────────────────────
+    function renderNews() {
+        const nc = D.newsCatalyst || {};
+        const enabled  = nc.enabled  !== false;
+        const signals  = nc.sessionSignals  || 0;
+        const maxSig   = nc.maxSignals  || 2;
+        const ingested = nc.totalIngested   || 0;
+        const active   = nc.activeNewsItems || 0;
+        const fired    = Array.from(nc.firedToday || []);
+        const events   = nc.recentEvents    || [];
+
+        const stEl = q('news-status');
+        if(stEl){
+            stEl.textContent = !enabled ? 'DISABLED' : signals >= maxSig ? '🏁 CAP REACHED' : '✅ ACTIVE';
+            stEl.className = 'stat ' + (!enabled ? 'sr' : signals >= maxSig ? 'sy' : 'sg');
+        }
+        set('news-fired-sub', 'Fired today: ' + signals + '/' + maxSig);
+        set('news-ingested',  ingested);
+        set('news-active-sub','Active: ' + active + ' items');
+        set('news-signals',   signals);
+
+        const pnlMap = (D.strategyStatus || {}).perStrategyPnl || {};
+        const nPnl   = pnlMap['NEWS_CATALYST_V1'] || {};
+        const p = parseFloat(nPnl.pnl || 0);
+        const npEl = q('news-pnl'); if(npEl){npEl.textContent=fp(p);npEl.className='stat '+pc(p);}
+        set('news-wr','Win Rate: '+(nPnl.winRate||'—'));
+
+        // Events list
+        const allItems = [...events, ...fired.map(s=>({symbol:s,fired:true}))];
+        html('news-events-body', allItems.length
+            ? allItems.map(e=>{
+                const isFired = e.fired === true || fired.includes(e.symbol||e);
+                const sym = e.symbol || e;
+                const score = e.score || e.compositeScore || 0;
+                const headline = e.headline || e.title || '—';
+                const category = e.category || '—';
+                const sentiment = e.sentiment || '';
+                return `<div style="padding:7px;border-bottom:1px solid var(--border);border-left:3px solid ${isFired?'var(--green)':'var(--blue)'}">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+                    <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
+                      <b>${sym}</b>
+                      ${score>0?'<span class="pill '+(score>=75?'pg':score>=65?'py':'pm')+'">Score '+score+'</span>':''}
+                      ${category!=='—'?'<span class="pill pb" style="font-size:9px">'+category+'</span>':''}
+                      ${sentiment?'<span class="pill '+(sentiment==='POSITIVE'?'pg':sentiment==='NEGATIVE'?'pr':'pm')+'" style="font-size:9px">'+sentiment+'</span>':''}
+                      ${isFired?'<span class="pill pg">✅ TRADED</span>':''}
+                    </div>
+                  </div>
+                  <div style="font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${headline}</div>
+                </div>`;
+              }).join('')
+            : '<div class="sub">No news events ingested yet. Sources poll every 3–10 minutes.</div>'
+        );
+    }
+
 
     // ── STRATEGY TAB ─────────────────────────────────────────────────────────────
     function renderStrategy() {
@@ -1338,27 +1577,6 @@
         const se=risk.sectorExposure||{},ste=risk.strategyExposure||{};
         html('r-sexp',Object.entries(se).filter(([,v])=>v>0).map(([k,v])=>`<span class="pill pb" style="margin:2px">${k}:${v}</span>`).join('')||'<span class="sub">None</span>');
         html('r-stexp',Object.entries(ste).filter(([,v])=>v>0).map(([k,v])=>`<span class="pill pp" style="margin:2px">${k}:${v}</span>`).join('')||'<span class="sub">None</span>');
-    }
-
-    // ── VALIDATION ────────────────────────────────────────────────────────────────
-    async function loadVal() {
-        const sym=q('vs').value.trim(),str=q('vstr').value;
-        let url=API+'/validation';
-        if(sym)url+='?symbol='+encodeURIComponent(sym);
-        else if(str)url+='?strategy='+encodeURIComponent(str);
-        try{
-            const res=await fetch(url),val=await res.json();
-            set('val-cnt',val.symbolsTracked||'—');
-            const freq=Object.entries(val.failureFrequency||{}).sort(([,a],[,b])=>b-a).slice(0,10);
-            html('ffreq',!freq.length?'<span class="sub">No failures yet</span>':freq.map(([k,v])=>`<div class="ir"><span class="il">${k}</span><span class="iv np">${v} fails</span></div>`).join(''));
-            const logs=val.results||[],all=val.allLogs||{};
-            const combined=logs.length?logs:Object.values(all).flat().slice(0,30);
-            html('vlog',!combined.length?'<span class="sub">No data yet</span>':combined.map(l=>{
-                if(!l)return'';
-                const ok=l.failedAtStep===0,steps=l.steps||[];
-                return`<div style="margin-bottom:7px;padding:7px;background:#1c2129;border-radius:6px;border-left:3px solid ${ok?'var(--green)':'var(--red)'}"><div style="display:flex;gap:5px;align-items:center;margin-bottom:5px;flex-wrap:wrap"><b>${l.symbol||'—'}</b><span class="pill pm">${l.strategy||'—'}</span><span class="pill pm">${l.direction||'BOTH'}</span><span class="pill ${ok?'pg':'pr'}">${ok?'ALL PASS':'FAIL@'+l.failedAtStep}</span><span class="sub" style="margin-left:auto">${l.lastChecked||''}</span></div>${steps.map(s=>`<div style="display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid #1c2129"><div style="width:20px;height:20px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;background:${s.passed?'#1a4220':'#3d1a1a'};color:${s.passed?'var(--green)':'var(--red)'};">${s.stepNum}</div><div style="flex:1;font-size:11px">${s.label||''}</div><div class="sub" style="max-width:150px;text-align:right;overflow:hidden;white-space:nowrap;text-overflow:ellipsis">${s.detail||''}</div></div>`).join('')}</div>`;
-            }).join(''));
-        }catch(e){console.error(e);}
     }
 
     window.addEventListener('DOMContentLoaded',()=>{load();setInterval(load,3000);});

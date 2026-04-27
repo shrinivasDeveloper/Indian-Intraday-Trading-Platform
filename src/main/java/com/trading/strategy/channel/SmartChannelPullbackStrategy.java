@@ -32,6 +32,7 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * SmartChannelPullbackStrategy (SMART_CHANNEL_PULLBACK_V3)
@@ -228,7 +229,7 @@ public class SmartChannelPullbackStrategy {
     private BigDecimal capital;
 
     // ── Session state ─────────────────────────────────────────────────────────
-    private volatile int         sessionSignalCount = 0;
+    private final AtomicInteger  sessionSignalCount = new AtomicInteger(0);  // FIX: volatile int++ is not atomic
     private final Set<String>    activeSignals      = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> lastSignalTime  = new ConcurrentHashMap<>();
 
@@ -261,8 +262,8 @@ public class SmartChannelPullbackStrategy {
         if (!strategyEnabled) return;
 
         // ── Session cap ───────────────────────────────────────────────────────
-        if (sessionSignalCount >= maxSignalsPerSession) {
-            log.debug("[SCPS] Session cap reached ({}/{})", sessionSignalCount, maxSignalsPerSession);
+        if (sessionSignalCount.get() >= maxSignalsPerSession) {
+            log.debug("[SCPS] Session cap reached ({}/{})", sessionSignalCount.get(), maxSignalsPerSession);
             return;
         }
 
@@ -342,7 +343,7 @@ public class SmartChannelPullbackStrategy {
         int evaluated = 0, signalsFired = 0;
 
         for (Map.Entry<String, ChannelResult> entry : validChannels.entrySet()) {
-            if (sessionSignalCount >= maxSignalsPerSession) break;
+            if (sessionSignalCount.get() >= maxSignalsPerSession) break;
 
             String        symbol  = entry.getKey();
             ChannelResult channel = entry.getValue();
@@ -620,10 +621,10 @@ public class SmartChannelPullbackStrategy {
         // Track state
         lastSignalTime.put(symbol, System.currentTimeMillis());
         activeSignals.add(symbol);
-        sessionSignalCount++;
+        sessionSignalCount.incrementAndGet();
 
         log.info("[SCPS] Signal #{}/{} fired for {} (session)",
-                sessionSignalCount, maxSignalsPerSession, symbol);
+                sessionSignalCount.get(), maxSignalsPerSession, symbol);
         return true;
     }
 
@@ -642,7 +643,7 @@ public class SmartChannelPullbackStrategy {
 
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
-        sessionSignalCount = 0;
+        sessionSignalCount.set(0);
         activeSignals.clear();
         lastSignalTime.clear();
         latestCandles.clear();
@@ -652,7 +653,7 @@ public class SmartChannelPullbackStrategy {
     // ── Dashboard helpers ─────────────────────────────────────────────────────
 
     public boolean isEnabled()            { return strategyEnabled; }
-    public int     getSessionSignalCount() { return sessionSignalCount; }
+    public int     getSessionSignalCount() { return sessionSignalCount.get(); }
     public int     getActiveSignalCount()  { return activeSignals.size(); }
     public Set<String> getActiveSignals()  { return Collections.unmodifiableSet(activeSignals); }
     public int     getOpenTradesCount()    { return activeSignals.size(); }
