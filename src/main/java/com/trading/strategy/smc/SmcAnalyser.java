@@ -37,7 +37,13 @@ import java.util.List;
 public class SmcAnalyser {
 
     // ── Constants ─────────────────────────────────────────────────────────────
-    private static final int    EMA50_PERIOD          = 50;
+    // EMA period for 4H HTF trend detection.
+    // FIX: was EMA50 — impossible with stride-16 sampling.
+    // buf15m capacity=120 → max synthetic 4H candles = 120/16 = 7.
+    // EMA50 needs 50 candles but we only ever have 7 → always returns 0.
+    // EMA5 needs 5 candles, works with 7 available (min(2×5,7)=7 ≥ 5).
+    // EMA5 on synthetic 4H represents 5 × 4H = 20-hour trend — valid HTF bias.
+    private static final int    EMA50_PERIOD          = 5;     // FIX: was 50, stride-16 only gives 7 candles
     private static final int    ADX_PERIOD            = 14;
     private static final double ADX_MIN               = 20.0;
     private static final double ADX_STRONG            = 25.0;

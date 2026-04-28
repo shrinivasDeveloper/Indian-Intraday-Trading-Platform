@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
+import java.util.Collections;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -136,6 +137,155 @@ public class NewsKeywordFilter {
             "US", "UK", "EU", "IT", "AI", "ML"
     );
 
+
+    // ── Company name → NSE symbol lookup table ────────────────────────────────
+    // Covers all major Nifty500 stocks with their common news name variations.
+    // Keys are LOWERCASE for case-insensitive matching.
+    // Built from: BSE full names, common abbreviations, brand names used in press.
+    private static final Map<String, String> COMPANY_NAME_MAP;
+    static {
+        Map<String, String> m = new LinkedHashMap<>();
+        // Large caps — most likely to appear in news
+        m.put("reliance industries",    "RELIANCE");
+        m.put("reliance industry",      "RELIANCE");
+        m.put("tata consultancy",       "TCS");
+        m.put("tcs",                    "TCS");
+        m.put("hdfc bank",              "HDFCBANK");
+        m.put("hdfcbank",               "HDFCBANK");
+        m.put("infosys",                "INFY");
+        m.put("icici bank",             "ICICIBANK");
+        m.put("hindustan unilever",     "HINDUNILVR");
+        m.put("hul",                    "HINDUNILVR");
+        m.put("state bank of india",    "SBIN");
+        m.put("state bank",             "SBIN");
+        m.put("sbi",                    "SBIN");
+        m.put("bharti airtel",          "BHARTIARTL");
+        m.put("airtel",                 "BHARTIARTL");
+        m.put("bajaj finance",          "BAJFINANCE");
+        m.put("kotak mahindra bank",    "KOTAKBANK");
+        m.put("kotak bank",             "KOTAKBANK");
+        m.put("kotak mahindra",         "KOTAKBANK");
+        m.put("larsen",                 "LT");
+        m.put("l&t",                    "LT");
+        m.put("larsen & toubro",        "LT");
+        m.put("larsen and toubro",      "LT");
+        m.put("itc",                    "ITC");
+        m.put("axis bank",              "AXISBANK");
+        m.put("asian paints",           "ASIANPAINT");
+        m.put("maruti suzuki",          "MARUTI");
+        m.put("maruti",                 "MARUTI");
+        m.put("sun pharmaceutical",     "SUNPHARMA");
+        m.put("sun pharma",             "SUNPHARMA");
+        m.put("ultratech cement",       "ULTRACEMCO");
+        m.put("wipro",                  "WIPRO");
+        m.put("hcl technologies",       "HCLTECH");
+        m.put("hcl tech",               "HCLTECH");
+        m.put("tech mahindra",          "TECHM");
+        m.put("tech mah",               "TECHM");
+        m.put("power grid",             "POWERGRID");
+        m.put("ntpc",                   "NTPC");
+        m.put("ongc",                   "ONGC");
+        m.put("oil and natural gas",    "ONGC");
+        m.put("tata steel",             "TATASTEEL");
+        m.put("tata motors",            "TATAMOTORS");
+        m.put("tata power",             "TATAPOWER");
+        m.put("tata consumer",          "TATACONSUM");
+        m.put("dr reddy",               "DRREDDY");
+        m.put("dr. reddy",              "DRREDDY");
+        m.put("cipla",                  "CIPLA");
+        m.put("bajaj auto",             "BAJAJ-AUTO");
+        m.put("hero motocorp",          "HEROMOTOCO");
+        m.put("hero moto",              "HEROMOTOCO");
+        m.put("eicher motors",          "EICHERMOT");
+        m.put("mahindra",               "M&M");
+        m.put("m&m",                    "M&M");
+        m.put("upl",                    "UPL");
+        m.put("adani enterprises",      "ADANIENT");
+        m.put("adani ports",            "ADANIPORTS");
+        m.put("adani green",            "ADANIGREEN");
+        m.put("adani power",            "ADANIPOWER");
+        m.put("adani transmission",     "ADANITRANS");
+        m.put("grasim",                 "GRASIM");
+        m.put("hindalco",               "HINDALCO");
+        m.put("nestle india",           "NESTLEIND");
+        m.put("nestle",                 "NESTLEIND");
+        m.put("titan",                  "TITAN");
+        m.put("bajaj finserv",          "BAJAJFINSV");
+        m.put("bank of baroda",         "BANKBARODA");
+        m.put("canara bank",            "CANBK");
+        m.put("punjab national bank",   "PNB");
+        m.put("pnb",                    "PNB");
+        m.put("union bank",             "UNIONBANK");
+        m.put("indusind bank",          "INDUSINDBK");
+        m.put("yes bank",               "YESBANK");
+        m.put("federal bank",           "FEDERALBNK");
+        m.put("bandhan bank",           "BANDHANBNK");
+        m.put("coal india",             "COALINDIA");
+        m.put("bhel",                   "BHEL");
+        m.put("gail",                   "GAIL");
+        m.put("ioc",                    "IOC");
+        m.put("indian oil",             "IOC");
+        m.put("bpcl",                   "BPCL");
+        m.put("bharat petroleum",       "BPCL");
+        m.put("hpcl",                   "HINDPETRO");
+        m.put("hindustan petroleum",    "HINDPETRO");
+        m.put("vedanta",                "VEDL");
+        m.put("jsw steel",              "JSWSTEEL");
+        m.put("steel authority",        "SAIL");
+        m.put("sail",                   "SAIL");
+        m.put("nmdc",                   "NMDC");
+        m.put("sbi life",               "SBILIFE");
+        m.put("hdfc life",              "HDFCLIFE");
+        m.put("icici prudential",       "ICICIPRULI");
+        m.put("icici lombard",          "ICICIGI");
+        m.put("sbi cards",              "SBICARD");
+        m.put("dmart",                  "DMART");
+        m.put("avenue supermarts",      "DMART");
+        m.put("havells",                "HAVELLS");
+        m.put("godrej consumer",        "GODREJCP");
+        m.put("dabur",                  "DABUR");
+        m.put("marico",                 "MARICO");
+        m.put("britannia",              "BRITANNIA");
+        m.put("pidilite",               "PIDILITIND");
+        m.put("berger paints",          "BERGEPAINT");
+        m.put("ambuja cements",         "AMBUJACEM");
+        m.put("acc",                    "ACC");
+        m.put("shree cement",           "SHREECEM");
+        m.put("divi's",                 "DIVISLAB");
+        m.put("divis laboratories",     "DIVISLAB");
+        m.put("lupin",                  "LUPIN");
+        m.put("aurobindo",              "AUROPHARMA");
+        m.put("torrent pharma",         "TORNTPHARM");
+        m.put("abbott india",           "ABBOTINDIA");
+        m.put("interglobe",             "INDIGO");
+        m.put("indigo",                 "INDIGO");
+        m.put("apollo hospitals",       "APOLLOHOSP");
+        m.put("max healthcare",         "MAXHEALTH");
+        m.put("fortis",                 "FORTIS");
+        m.put("muthoot",                "MUTHOOTFIN");
+        m.put("bajaj holdings",         "BAJAJHLDNG");
+        m.put("irctc",                  "IRCTC");
+        m.put("container corporation",  "CONCOR");
+        m.put("concor",                 "CONCOR");
+        m.put("intertek",               "INDUSTOWER");
+        m.put("indus towers",           "INDUSTOWER");
+        m.put("zomato",                 "ZOMATO");
+        m.put("nykaa",                  "NYKAA");
+        m.put("paytm",                  "PAYTM");
+        m.put("policy bazaar",          "POLICYBZR");
+        m.put("policybazaar",           "POLICYBZR");
+        m.put("swiggy",                 "SWIGGY");
+        m.put("eternal",                "ETERNAL");
+        m.put("irfc",                   "IRFC");
+        m.put("rvnl",                   "RVNL");
+        m.put("recltd",                 "RECLTD");
+        m.put("rec limited",            "RECLTD");
+        m.put("power finance",          "PFC");
+        m.put("pfc",                    "PFC");
+        m.put("ireda",                  "IREDA");
+        COMPANY_NAME_MAP = Collections.unmodifiableMap(m);
+    }
+
     // ── Public API ────────────────────────────────────────────────────────────
 
     /**
@@ -258,6 +408,19 @@ public class NewsKeywordFilter {
                     candidate.length() >= 3 &&
                     knownSymbols.contains(candidate)) {
                 found.add(candidate);
+            }
+        }
+
+        // Strategy 3: Company name → NSE symbol mapping table
+        // Handles "HDFC Bank" → "HDFCBANK", "Infosys" → "INFY" etc.
+        // BSE/RSS headlines use company names, not NSE tickers.
+        String lowerCombined = combined.toLowerCase();
+        for (Map.Entry<String, String> entry : COMPANY_NAME_MAP.entrySet()) {
+            if (lowerCombined.contains(entry.getKey())) {
+                String mappedSymbol = entry.getValue();
+                if (knownSymbols.contains(mappedSymbol)) {
+                    found.add(mappedSymbol);
+                }
             }
         }
 

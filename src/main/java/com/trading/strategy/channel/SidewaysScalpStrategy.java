@@ -1,6 +1,7 @@
 package com.trading.strategy.channel;
 
 import com.trading.analysis.service.RvolService;
+import com.trading.regime.service.MarketDirectionService;
 import com.trading.domain.Candle;
 import com.trading.domain.enums.TradeDirection;
 import com.trading.events.CandleCompleteEvent;
@@ -180,6 +181,7 @@ public class SidewaysScalpStrategy {
     private final MarketPressureService       pressureService;
     private final MarketTimingService         timingService;
     private final RvolService                 rvolService;
+    private final MarketDirectionService      marketDirection;
     private final SectorStrengthService       sectorStrength;
     private final SectorClassificationService sectorClassify;
     private final CircuitBreakerService       circuitBreaker;
@@ -271,14 +273,47 @@ public class SidewaysScalpStrategy {
 
         // ── Market pressure ───────────────────────────────────────────────────
         PressureSnapshot pressure = pressureService.getSnapshot();
-        if (!pressure.isActionable()) {
-            log.debug("[SCALP] Pressure not actionable: dir={} ratio={}",
-                    pressure.direction(), String.format("%.3f", pressure.ratio()));
-            return;
-        }
+        boolean isBuy;
+        boolean isStrongPressure;
 
-        boolean isBuy          = pressure.isBuy();
-        boolean isStrongPressure = pressure.ratio() >= STRONG_PRESSURE_BYPASS_RATIO;
+        if (pressure.isActionable()) {
+            isBuy            = pressure.isBuy();
+            isStrongPressure = pressure.ratio() >= STRONG_PRESSURE_BYPASS_RATIO;
+        } else {
+            // FIX: Scalp had no fallback — if pressure ratio < 1.10 it returned immediately.
+            // On balanced/mildly bearish days (ratio=0.873) this blocked ALL scalp trades.
+            // Fix: same sector/direction fallback as SCPS.
+            // If Nifty direction is clear OR a strongly-aligned sector exists → use it.
+            MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
+
+            boolean hasStrongBullishSector = channelDetection.getAllValidChannels().keySet()
+                    .stream().anyMatch(sym -> {
+                        String sec = sectorClassify.getSector(sym);
+                        var sd = sectorStrength.getSector(sec);
+                        return sd != null && sd.alignedBullish() && sd.changePercent() >= 0.30;
+                    });
+            boolean hasStrongBearishSector = channelDetection.getAllValidChannels().keySet()
+                    .stream().anyMatch(sym -> {
+                        String sec = sectorClassify.getSector(sym);
+                        var sd = sectorStrength.getSector(sec);
+                        return sd != null && sd.alignedBearish() && sd.changePercent() <= -0.30;
+                    });
+
+            if (dir.direction() == MarketDirectionService.Direction.BULLISH || hasStrongBullishSector) {
+                isBuy            = true;
+                isStrongPressure = false;
+                log.debug("[SCALP] Pressure not actionable — sector/direction fallback: BULLISH");
+            } else if (dir.direction() == MarketDirectionService.Direction.BEARISH || hasStrongBearishSector) {
+                isBuy            = false;
+                isStrongPressure = false;
+                log.debug("[SCALP] Pressure not actionable — sector/direction fallback: BEARISH");
+            } else {
+                log.debug("[SCALP] Pressure not actionable and no sector alignment: dir={} ratio={} syms={}",
+                        pressure.direction(), String.format("%.3f", pressure.ratio()),
+                        pressure.totalSymbols());
+                return;
+            }
+        }
 
         // ── Get SIDEWAYS channels ─────────────────────────────────────────────
         Map<String, ChannelResult> validChannels = channelDetection.getAllValidChannels();

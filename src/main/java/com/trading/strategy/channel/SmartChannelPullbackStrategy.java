@@ -463,8 +463,12 @@ public class SmartChannelPullbackStrategy {
         // FIX 7: Apply max(yml setting, INTERNAL_MIN_RVOL) as effective minimum
         double effectiveMinRvol = Math.max(minRvol, INTERNAL_MIN_RVOL);
         double rvol = rvolService.getRvolNow(symbol, candle.getVolume());
-        if (rvol < effectiveMinRvol) {
-            log.trace("[SCPS] {} — RVOL {} < minimum {}", symbol, rvol, effectiveMinRvol);
+        // FIX: RVOL=1.0 exactly means RvolService has no history yet (returns default).
+        // On Day 1-5, treat RVOL=1.0 as UNKNOWN (not FAIL) — use threshold of 1.0.
+        // After 5 days of accumulation, real RVOL values appear and 1.1 threshold applies.
+        double rvolThreshold = (rvol == 1.0) ? 1.0 : effectiveMinRvol;
+        if (rvol < rvolThreshold) {
+            log.trace("[SCPS] {} — RVOL {} < minimum {}", symbol, rvol, rvolThreshold);
             return false;
         }
 

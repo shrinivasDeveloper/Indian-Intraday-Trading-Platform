@@ -148,7 +148,7 @@ strategy:
     breakeven-r-trigger: 1.5
     partial-exit-r: 3.0
     trailing-mode: CANDLE_LOW
-    global-time-stop: 30m
+    global-time-stop: 0  # FIX: was 30m — caused TIME_STOP_30MIN on all EOD strategies. Each strategy manages its own exit.
     trend-trail-trigger-r: 2.0
 
   rvol:
@@ -337,7 +337,8 @@ app:
 logging:
   level:
     root: INFO
-    com.trading: TRACE
+    com.trading: DEBUG
+    com.trading.strategy.channel: DEBUG  # FIX: was TRACE — caused 500+ logs/sec on Railway
     com.zerodhatech: DEBUG
     org.springframework: WARN
     org.hibernate: WARN

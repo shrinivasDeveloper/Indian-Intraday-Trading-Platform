@@ -236,38 +236,6 @@
             <div id="sec-exp" class="sub" style="margin-top:4px;font-size:10px"></div>
         </div>
     </div>
-    <!-- Strategy Quick Summary Row -->
-    <div class="g g2" style="padding-top:0">
-        <!-- ORB Quick -->
-        <div class="card highlight-gold">
-            <div class="ct">📈 ORB Quick Status</div>
-            <div style="display:flex;gap:9px;flex-wrap:wrap;align-items:center;">
-                <div class="orb-stat" style="min-width:80px"><div class="ov sgold" id="ov-orb-selected">—</div><div class="ol">Selected</div></div>
-                <div class="orb-stat" style="min-width:80px"><div class="ov sb" id="ov-orb-shortlist">—</div><div class="ol">Shortlisted</div></div>
-                <div class="orb-stat" style="min-width:80px"><div class="ov sg" id="ov-orb-valid">—</div><div class="ol">Valid 9:30</div></div>
-                <div class="orb-stat" style="min-width:80px"><div class="ov" id="ov-orb-triggered">—</div><div class="ol">Triggered</div></div>
-                <div style="flex:2;min-width:180px">
-                    <div style="font-size:11px;color:var(--muted);margin-bottom:3px">Selected Symbols</div>
-                    <div id="ov-orb-symbols" class="sub">—</div>
-                    <div id="ov-orb-status" class="sub" style="margin-top:2px">—</div>
-                </div>
-            </div>
-        </div>
-        <!-- HighRR Quick -->
-        <div class="card highlight-purple">
-            <div class="ct">🏆 High RR Quick Status</div>
-            <div style="display:flex;gap:9px;flex-wrap:wrap;align-items:center;">
-                <div class="orb-stat" style="min-width:80px"><div class="ov spur" id="ov-hrr-executed">—</div><div class="ol">Executed</div></div>
-                <div class="orb-stat" style="min-width:80px"><div class="ov sb" id="ov-hrr-slots">—</div><div class="ol">Slots Left</div></div>
-                <div class="orb-stat" style="min-width:80px"><div class="ov" id="ov-hrr-active">—</div><div class="ol">Active</div></div>
-                <div style="flex:2;min-width:180px">
-                    <div style="font-size:11px;color:var(--muted);margin-bottom:3px">Fired Today</div>
-                    <div id="ov-hrr-fired" class="sub">—</div>
-                    <div id="ov-hrr-status" class="sub" style="margin-top:2px">—</div>
-                </div>
-            </div>
-        </div>
-    </div>
 </div>
 
 <!-- ORB TAB -->
@@ -922,24 +890,13 @@
 
         // ORB quick
         const selSyms=orb.selectedSymbols||[],sel=orb.selectedCount||0;
-        const oe=q('ov-orb-selected');if(oe){oe.textContent=sel;oe.className='ov '+(sel>0?'sgold':'sr');}
-        set('ov-orb-shortlist',orb.shortlistCount||0);
-        set('ov-orb-valid',orb.validOrbCount||0);
         const trig=orb.triggeredCount||0;
-        const te=q('ov-orb-triggered');if(te){te.textContent=trig;te.className='ov '+(trig>0?'sg':'sb');}
-        set('ov-orb-symbols',selSyms.length?selSyms.join(' · '):(orb.orbLocked?'None selected':'Waiting for 9:30 lock'));
-        set('ov-orb-status',orb.prevCloseAvailable===false?'⚠ No prev-close — first deployment, silent today':(orb.orbLocked?'🔒 ORB Locked':'Pre-lock phase'));
 
         // HighRR quick
         const hrrExec=hrr.tradesExecutedToday||0,hrrSlots=hrr.remainingSlots||0;
-        const hef=q('ov-hrr-executed');if(hef){hef.textContent=hrrExec;hef.className='ov '+(hrrExec>0?'spur':'sb');}
-        const hsf=q('ov-hrr-slots');if(hsf){hsf.textContent=hrrSlots;hsf.className='ov '+(hrrSlots===0?'sr':'sg');}
-        set('ov-hrr-active',hrr.activeSignalCount||0);
         const firedArr=Array.from(hrr.firedToday||[]);
-        set('ov-hrr-fired',firedArr.length?firedArr.join(' · '):'None today');
         const hrrPnl=parseFloat(hrr.realisedPnl||0);
         const hrrPnlSuffix=hrrPnl!==0?' (₹'+hrrPnl.toFixed(2)+')':'';
-        set('ov-hrr-status',(hrr.dailyLimitReached?'🏁 Daily limit reached':(hrr.enabled?'✅ Active':'❌ Disabled'))+hrrPnlSuffix);
     }
 
     // ── ORB TAB ──────────────────────────────────────────────────────────────────
