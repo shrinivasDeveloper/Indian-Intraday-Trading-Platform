@@ -562,9 +562,12 @@ public class SidewaysScalpStrategy {
         double reward  = target1.subtract(entryPrice).abs().doubleValue();
         double rrRatio = reward / risk.doubleValue();
 
-        // Scalp minimum RR is lower (1.2) since target is the full channel width
-        if (rrRatio < 1.2) {
-            log.trace("[SCALP] {} — RR {} below scalp minimum 1.2", symbol, rrRatio);
+        // FIX: raised minimum RR from 1.2 → 2.0 to enforce minimum 1:2 on every trade.
+        // Channel-width target already delivers 2-4R on valid 0.8-1.8% channels.
+        // Sub-2R entries only occur when price drifts into mid-channel — skip those.
+        if (rrRatio < 2.0) {
+            log.trace("[SCALP] {} — RR {} below minimum 2.0 — skipping sub-2R entry", symbol,
+                    String.format("%.2f", rrRatio));
             return;
         }
 

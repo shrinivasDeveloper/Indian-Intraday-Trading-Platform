@@ -149,7 +149,10 @@ public class SmartChannelPullbackStrategy {
      * pressure gate (sectorBuyThreshold) and RVOL gate ensure we don't enter on
      * weak pullbacks — the zone just needs to be wide enough to generate signals.
      */
-    private static final double PB_ZONE_FACTOR = 0.50;
+    // FIX: tightened from 0.50 → 0.30 — only enter in bottom 30% of channel near support.
+    // Entry at 0-30% from support → SL 0.3% below support → tight risk → RR improves.
+    // Was 0.50 (bottom half): entry could be mid-channel → wide SL → low RR.
+    private static final double PB_ZONE_FACTOR = 0.30;
 
     // ── FIX 2: Minimum stock price ────────────────────────────────────────────
     /** Reject stocks below ₹100 — consistent with scanner.min-price=100. */

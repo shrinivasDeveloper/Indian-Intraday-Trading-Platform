@@ -371,6 +371,26 @@ public class OrbStrategyEngine {
             return;
         }
 
+        // FIX: Enforce minimum 1:2 RR on ORB trades.
+        // Wide ORB ranges (e.g. 13pt range on ₹470 stock) create wide SLs that compress RR.
+        // Calculate actual RR before position sizing and skip if below 2.0.
+        // T1 reward = orbRange × targetRR (e.g. 13.3 × 2.5 = 33.25)
+        // Risk = entry - SL (e.g. 470.34 - 450 = 20.34)
+        // RR = 33.25 / 20.34 = 1.63 → SKIP (was firing at 1.65R previously)
+        double t1Reward = target1.subtract(entryPrice).abs().doubleValue();
+        double actualRR = t1Reward / risk.doubleValue();
+        if (actualRR < 2.0) {
+            log.info("[ORB] {} actual RR {:.1f} below minimum 2.0 (range={}pt, risk={}pt T1={}). Skipping."
+                            .replace("{:.1f}", "{}"),
+                    symbol, String.format("%.2f", actualRR),
+                    String.format("%.2f", orbRange),
+                    String.format("%.2f", risk.doubleValue()),
+                    target1);
+            orbDataService.markTriggered(symbol);
+            activeSignals.remove(symbol);
+            return;
+        }
+
         PositionSizerService.PositionSize pos =
                 positionSizer.calculate(cap, entryPrice, stopLoss, symbol, direction.name());
         if (!pos.isValid() || pos.quantity() <= 0) {

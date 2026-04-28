@@ -155,6 +155,28 @@ public class PaperTradeExecutionService {
             return;
         }
 
+        // FIX: Global minimum RR floor of 2.0 — safety net for all strategies.
+        // Individual strategies enforce their own RR gates, but this catches
+        // any edge case where a sub-2R signal slips through.
+        // HighRR is self-managed (skipped above) so this only applies to
+        // ORB, SCPS, Scalp, News, SMC.
+        if (event.getStopLoss() != null && event.getTarget() != null
+                && event.getEntryPrice() != null) {
+            double reward = event.getTarget().subtract(event.getEntryPrice()).abs().doubleValue();
+            double risk   = event.getEntryPrice().subtract(event.getStopLoss()).abs().doubleValue();
+            if (risk > 0) {
+                double rr = reward / risk;
+                if (rr < 2.0) {
+                    log.warn("[PAPER] ❌ Global RR floor: {} signal rejected — RR={} < 2.0 (reward={} risk={}). " +
+                                    "Strategy: {}",
+                            sym, String.format("%.2f", rr),
+                            String.format("%.2f", reward), String.format("%.2f", risk),
+                            strategyName);
+                    return;
+                }
+            }
+        }
+
         log.info("[PAPER] Executing: {} dir={} qty={} entry={} sl={} target={} strategy={}",
                 sym, event.getDirection(), qty,
                 event.getEntryPrice(), event.getStopLoss(), event.getTarget(),

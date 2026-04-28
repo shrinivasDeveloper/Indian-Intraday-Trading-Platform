@@ -178,7 +178,7 @@ strategy:
     t2-rr: 3.0
     # FIX: Pullback zone factor (FIX 1): 0.50 = lower 50% of channel accepted
     # (was 0.30 — too narrow, caused 0 signals on momentum days)
-    pb-zone-factor: 0.50
+    pb-zone-factor: 0.30  # FIX: was 0.50 — entry in bottom 30% of channel only (tight SL → better RR)
     # FIX: Minimum SL distance % (FIX 4)
     min-sl-pct: 0.004
     # FIX: Minimum stock price (FIX 2)
