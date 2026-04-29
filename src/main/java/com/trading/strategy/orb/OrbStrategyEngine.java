@@ -101,6 +101,17 @@ public class OrbStrategyEngine {
     /** REQ 2: Max trades to actually execute from the top-10 candidates. */
     private static final int MAX_EXECUTIONS = 2;
 
+    // INTRADAY SL CAP: maximum SL distance from entry as a percentage.
+    // 0.8% is standard for intraday ORB on NSE.
+    // Prevents wide ORB ranges from creating unacceptably large SLs.
+    // BANDHANBNK example: 9.81pt range on ₹197 stock was giving 5.61% SL.
+    // With this cap: SL is capped at 0.8% = ₹1.58 from entry.
+    private static final double MAX_SL_PCT = 0.008;
+
+    // Minimum stock price to trade ORB. Penny stocks (YESBANK ₹20, PATELENG ₹29)
+    // have tiny ORB ranges, wide spreads, and unreliable breakouts.
+    private static final double MIN_STOCK_PRICE = 100.0;
+
     // ── Confirmation counters ────────────────────────────────────────────────
     private final Map<String, Integer> breakoutConfirmCount = new ConcurrentHashMap<>();
 
@@ -305,6 +316,29 @@ public class OrbStrategyEngine {
         }
         activeSignals.add(symbol);
 
+        // ── Pre-flight gates (after markTriggered to prevent retry loops) ────
+
+        // GATE: Minimum stock price ₹100 — filters penny stocks (YESBANK ₹20, PATELENG ₹29).
+        // Penny stocks have wide spreads, unreliable price discovery, and tiny ORB ranges
+        // that make meaningful intraday risk management impossible.
+        if (breakoutPrice < MIN_STOCK_PRICE) {
+            log.info("[ORB] {} skipped — price ₹{} below minimum ₹{}",
+                    symbol, String.format("%.2f", breakoutPrice), MIN_STOCK_PRICE);
+            activeSignals.remove(symbol);
+            return;
+        }
+
+        // GATE: Sector alignment required — filters BANDHANBNK-type trades where
+        // the sector is unaligned at 9:30 and exit-on-sector-turn fires immediately at entry.
+        // sectorAligned=false means the stock's sector was not bullish/bearish at ORB scoring time.
+        // Trading against sector momentum on a breakout is a low-probability setup.
+        if (!od.sectorAligned) {
+            log.info("[ORB] {} skipped — sector {} not aligned with breakout direction",
+                    symbol, od.sectorName);
+            activeSignals.remove(symbol);
+            return;
+        }
+
         // REQ 3: Atomically lock direction on first trade.
         // compareAndSet(null, direction) succeeds only if no direction is set yet.
         // If it fails, another thread already locked a direction.
@@ -330,21 +364,41 @@ public class OrbStrategyEngine {
         // ── Trade parameters ─────────────────────────────────────────────────
         BigDecimal entryPrice = BigDecimal.valueOf(breakoutPrice)
                 .setScale(2, RoundingMode.HALF_UP);
-        double orbRange = od.orbHigh - od.orbLow;
+        double orbRange   = od.orbHigh - od.orbLow;
+        double entryDbl   = entryPrice.doubleValue();
+
+        // INTRADAY SL CAP FIX (2026-04-29):
+        // Old logic: SL = orbLow - 0.1% buffer.
+        // Problem: for wide ORB ranges (e.g. BANDHANBNK 9.81pt range on ₹197 stock),
+        // entry is at orbHigh + buffer (₹197.59) while SL was at orbLow - buffer (₹186.51).
+        // This puts 5.61% risk on a ₹197 intraday trade — completely unacceptable.
+        //
+        // Correct intraday ORB SL:
+        // SL = max(orbLow - buffer,  entry × (1 - MAX_SL_PCT))
+        // = take the HIGHER value (closer to entry = less risk)
+        // If orbLow is already within MAX_SL_PCT → use orbLow (normal tight range)
+        // If orbLow is further than MAX_SL_PCT → cap at MAX_SL_PCT from entry
+        //
+        // MAX_SL_PCT = 0.8% is standard for intraday ORB on NSE.
+        // This matches real institutional intraday ORB risk management.
+        //
+        // Target is unchanged — orbRange × targetRR from entry.
+        // This gives excellent RR on wide-range stocks (10-20R becomes possible).
 
         BigDecimal stopLoss, target1, target2;
         if (direction == TradeDirection.LONG) {
-            // SL: below orbLow with 0.1% buffer (tighter than 0.1% but min 1 tick away)
-            // IMPROVEMENT: use max(orbLow * 0.999, orbLow - 0.5*orbRange) as SL floor
-            // so SL distance is never less than 0.5x ORB range — avoids noise-level SL
-            double slLevel = Math.max(od.orbLow * 0.999, od.orbLow - orbRange * 0.5);
+            double orbLowSl    = od.orbLow * 0.999;                     // orbLow minus 0.1% noise buffer
+            double cappedSl    = entryDbl * (1.0 - MAX_SL_PCT);         // 0.8% cap from entry
+            double slLevel     = Math.max(orbLowSl, cappedSl);          // closer to entry wins
             stopLoss = BigDecimal.valueOf(slLevel).setScale(2, RoundingMode.FLOOR);
             target1  = entryPrice.add(BigDecimal.valueOf(orbRange * targetRR))
                     .setScale(2, RoundingMode.HALF_UP);
             target2  = entryPrice.add(BigDecimal.valueOf(orbRange * targetRR * 1.6))
                     .setScale(2, RoundingMode.HALF_UP);
         } else {
-            double slLevel = Math.min(od.orbHigh * 1.001, od.orbHigh + orbRange * 0.5);
+            double orbHighSl   = od.orbHigh * 1.001;
+            double cappedSl    = entryDbl * (1.0 + MAX_SL_PCT);
+            double slLevel     = Math.min(orbHighSl, cappedSl);
             stopLoss = BigDecimal.valueOf(slLevel).setScale(2, RoundingMode.CEILING);
             target1  = entryPrice.subtract(BigDecimal.valueOf(orbRange * targetRR))
                     .setScale(2, RoundingMode.HALF_UP);

@@ -38,10 +38,17 @@ import java.util.concurrent.ConcurrentHashMap;
  *   Phase 3 — Trailing   (at cfg.getGlobal().getTrendTrailTriggerR())
  *   Phase 4 — Partial exit (at cfg.getGlobal().getPartialExitR())
  *
- * FIX: cfg.getAutoMode().getTrendTrailTriggerR() replaced with
- *      cfg.getGlobal().getTrendTrailTriggerR() at lines 222 and 338.
- *      AutoMode inner class was removed from StrategyConfig.
- *      trendTrailTriggerR is now in StrategyConfig.Global.
+ * FIX 1: cfg.getAutoMode().getTrendTrailTriggerR() replaced with
+ *         cfg.getGlobal().getTrendTrailTriggerR() at lines 222 and 338.
+ *         AutoMode inner class was removed from StrategyConfig.
+ *         trendTrailTriggerR is now in StrategyConfig.Global.
+ *
+ * FIX 2: TIME_STOP_0MIN immediate exit bug.
+ *         When timeStopMinutes=0 AND global-time-stop=0:
+ *           effectiveStop = 0, elapsed = 0, 0 >= 0 = TRUE → fires instantly.
+ *         Fix: wrap the elapsed check in "if (effectiveStop > 0)".
+ *         When effectiveStop=0, time stop is DISABLED — trade runs to SL/Target/EOD.
+ *         This fix costs ₹160.75/day (ONGC + HDFCAMC exited in 2-5 seconds).
  */
 @Service
 @Slf4j
@@ -190,17 +197,16 @@ public class PaperTradeManagementService {
                 Instant.now()
         ));
 
-        // NOTE: cfg.getGlobal().getTrendTrailTriggerR() — AutoMode was removed
         log.info("[PAPER] Registered: {} dir={} entry={} sl={} 1R={} " +
                         "beAt={}R trailAt={}R atr={} window={} trend={} timeStop={}",
                 trade.getTradingSymbol(), trade.getDirection(),
                 entry, sl, rDist,
                 cfg.getGlobal().getBreakevenRTrigger(),
-                cfg.getGlobal().getTrendTrailTriggerR(),   // FIX: was getAutoMode()
+                cfg.getGlobal().getTrendTrailTriggerR(),
                 String.format("%.2f", atr), entryWindow, strongTrend,
                 timeStopMinutes > 0
                         ? timeStopMinutes + "min"
-                        : "none(global=" + cfg.getGlobal().getGlobalTimeStop().toMinutes() + "m)");
+                        : "DISABLED (0=no time stop)");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -242,22 +248,31 @@ public class PaperTradeManagementService {
             return;
         }
 
-        // Time Stop
+        // ── Time Stop ─────────────────────────────────────────────────────────
+        // FIX (2026-04-29): When timeStopMinutes=0 AND global-time-stop=0,
+        // effectiveStop was 0, elapsed was 0, and 0>=0 fired IMMEDIATELY.
+        // This caused ONGC to exit in 2 seconds and HDFCAMC in 5 seconds.
+        // Fix: only apply time stop when effectiveStop > 0.
+        // effectiveStop=0 means DISABLED — trade runs to SL, Target, or 15:00 EOD.
         {
             long effectiveStop = mt.timeStopMinutes() > 0
                     ? mt.timeStopMinutes()
                     : cfg.getGlobal().getGlobalTimeStop().toMinutes();
-            long elapsed = (Instant.now().getEpochSecond()
-                    - mt.entryInstant().getEpochSecond()) / 60;
-            if (elapsed >= effectiveStop) {
-                BigDecimal eodFill = simulateEodFill(ltp, t.getDirection());
-                String label = mt.timeStopMinutes() > 0 ? "STRATEGY" : "GLOBAL";
-                log.warn("[PAPER] TIME STOP ({}): {} {}min elapsed (limit={}min) fill={}",
-                        label, sym, elapsed, effectiveStop, eodFill);
-                closeTrade(sym, eodFill,
-                        "TIME_STOP_" + effectiveStop + "MIN", mt.slAtBreakeven());
-                return;
+
+            if (effectiveStop > 0) {
+                long elapsed = (Instant.now().getEpochSecond()
+                        - mt.entryInstant().getEpochSecond()) / 60;
+                if (elapsed >= effectiveStop) {
+                    BigDecimal eodFill = simulateEodFill(ltp, t.getDirection());
+                    String label = mt.timeStopMinutes() > 0 ? "STRATEGY" : "GLOBAL";
+                    log.warn("[PAPER] TIME STOP ({}): {} {}min elapsed (limit={}min) fill={}",
+                            label, sym, elapsed, effectiveStop, eodFill);
+                    closeTrade(sym, eodFill,
+                            "TIME_STOP_" + effectiveStop + "MIN", mt.slAtBreakeven());
+                    return;
+                }
             }
+            // effectiveStop=0 → time stop disabled → trade continues to SL/Target/EOD
         }
 
         // R-multiple
@@ -314,7 +329,6 @@ public class PaperTradeManagementService {
                 ? profit / mt.rDistance().doubleValue() : 0;
 
         // FIX: was cfg.getAutoMode().getTrendTrailTriggerR()
-        //      AutoMode removed — now in cfg.getGlobal().getTrendTrailTriggerR()
         double trailStartR = cfg.getGlobal().getTrendTrailTriggerR();
 
         if (rMultiple < trailStartR) {

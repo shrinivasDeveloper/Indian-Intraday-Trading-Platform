@@ -243,7 +243,7 @@ strategy:
     # being tracked. Adjust based on your universe (Nifty 100 vs Nifty 500).
     # 100,000 = conservative (works well for Nifty 100 stocks)
     # 50,000  = wider net (includes mid-cap stocks)
-    min-premarket-volume: 100000
+    min-premarket-volume: 200000  # FIX: raised from 100k — ensures meaningful liquidity at open
 
 
 
