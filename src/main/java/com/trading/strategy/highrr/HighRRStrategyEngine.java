@@ -10,6 +10,9 @@ import com.trading.position.service.PositionSizerService;
 import com.trading.risk.service.CircuitBreakerService;
 import com.trading.regime.service.MarketDirectionService;
 import com.trading.strategy.highrr.HighRRScannerService.SymbolState;
+import com.trading.strategy.highrr.HighRRStructureService;
+import com.trading.strategy.highrr.HighRRStructureService.StructureLevels;
+import com.trading.strategy.highrr.HighRRStructureService.SRLevel;
 import com.zerodhatech.models.Instrument;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -81,6 +84,23 @@ public class HighRRStrategyEngine {
     private static final double MIN_SL_PCT         = 0.005;
     private static final double GOOD_RR_RATIO      = 3.0;
 
+    // ── Gate 5: Structural S/R entry zone ────────────────────────────────────
+    // Entry must be within this % of a known S/R level.
+    // Prevents mid-air entries like ADANIGREEN ₹1,223 when resistance was ₹1,252 (2.4% away).
+    private static final double SR_ENTRY_ZONE_PCT = 0.005; // 0.5%
+    // Structural SL max distance from entry (avoids oversized risk)
+    private static final double SR_SL_MAX_PCT     = 0.015; // 1.5%
+    // Min RR for a structural T1 to be accepted
+    private static final double SR_T1_MIN_RR      = 2.0;
+
+    // ── Minimum candidate score before adding to fire list ─────────────────
+    // WHY: Without this, a setup with RR=2.0 but no pullback, no volume spike,
+    // no S/R quality still qualifies (score = 15 pts from RR alone).
+    // UTIAMC and PHOENIXLTD both would have scored below 50 — this gate blocks them.
+    // Score breakdown: trend(20)+pullback(15)+volume(15)+clean(15)+liquidity(10) = 75 max
+    // For a HIGH_RR trade, minimum entry quality = trend + pullback + one other = 50.
+    private static final int    MIN_CANDIDATE_SCORE = 50;
+
     // ── SL placement ────────────────────────────────────────────────────────
     private static final double SL_BUFFER_PCT    = 0.002;
     private static final double ENTRY_BUFFER_PCT = 0.0003;
@@ -96,7 +116,8 @@ public class HighRRStrategyEngine {
     private final LatencyMonitor             latencyMonitor;
     private final MarketDirectionService     marketDirection; // Gate 1: ATR + regime
     private final MarketTimingService        timingService;   // Gate 2: lunch window
-    private final InstrumentCacheService     instrumentCache; // FIX 1: added for token resolution
+    private final InstrumentCacheService     instrumentCache;  // FIX 1: added for token resolution
+    private final HighRRStructureService     structureService; // Gate 5: S/R structural levels
 
     @Value("${trading.mode:PAPER}")
     private String tradingMode;
@@ -218,7 +239,8 @@ public class HighRRStrategyEngine {
                     log.trace("[HIGHRR] {} BUY setup skipped — market is BEARISH", symbol);
                 } else {
                     ScoredCandidate c = buildCandidate(symbol, state, true, cap);
-                    if (c != null && c.rr() >= MIN_RR_RATIO) {
+                    if (c != null && c.rr() >= MIN_RR_RATIO
+                            && c.score() >= MIN_CANDIDATE_SCORE) {
                         candidates.add(c);
                         buySetups++;
                     }
@@ -231,7 +253,8 @@ public class HighRRStrategyEngine {
                     log.trace("[HIGHRR] {} SELL setup skipped — market is BULLISH", symbol);
                 } else {
                     ScoredCandidate c = buildCandidate(symbol, state, false, cap);
-                    if (c != null && c.rr() >= MIN_RR_RATIO) {
+                    if (c != null && c.rr() >= MIN_RR_RATIO
+                            && c.score() >= MIN_CANDIDATE_SCORE) {
                         candidates.add(c);
                         sellSetups++;
                     }
@@ -239,8 +262,8 @@ public class HighRRStrategyEngine {
             }
         }
 
-        log.info("[HIGHRR] Evaluated {} symbols | BUY setups={} SELL setups={} | {} candidates qualify",
-                evaluated, buySetups, sellSetups, candidates.size());
+        log.info("[HIGHRR] Evaluated {} symbols | BUY setups={} SELL setups={} | {} candidates qualify (min score {})",
+                evaluated, buySetups, sellSetups, candidates.size(), MIN_CANDIDATE_SCORE);
 
         if (candidates.isEmpty()) {
             log.info("[HIGHRR] No qualifying candidates this cycle");
@@ -275,50 +298,143 @@ public class HighRRStrategyEngine {
                 ? price * (1.0 + ENTRY_BUFFER_PCT)
                 : price * (1.0 - ENTRY_BUFFER_PCT);
         BigDecimal entryPrice = BigDecimal.valueOf(entryD).setScale(2, RoundingMode.HALF_UP);
+        double entryDbl = entryPrice.doubleValue();
 
-        double slD;
-        if (isBuy) {
-            double swingLow = state.candleLow() > 0 ? state.candleLow() : price * 0.985;
-            slD = swingLow * (1.0 - SL_BUFFER_PCT);
-        } else {
-            double swingHigh = state.candleHigh() > 0 ? state.candleHigh() : price * 1.015;
-            slD = swingHigh * (1.0 + SL_BUFFER_PCT);
+        // ── Fetch structural levels — pure O(1) ConcurrentHashMap read ─────────
+        // HighRRStructureService pre-computes these every hour from 5 days of
+        // 15-min OHLCV. This call has zero I/O and zero blocking.
+        StructureLevels structure = structureService.getStructure(symbol);
+
+        // ── GATE 5: Entry must be within 0.5% of a structural S/R level ────────
+        // Prevents mid-air entries. ADANIGREEN at ₹1,223 was 2.4% below
+        // the ₹1,252 resistance — that entry had no structural edge.
+        // A valid SHORT entry waits for price to reach ₹1,252 (near resistance).
+        SRLevel entryAnchorLevel = null;
+        if (structure != null) {
+            if (isBuy) {
+                SRLevel sup = structure.nearestSupportBelow(entryDbl);
+                if (sup != null && (entryDbl - sup.price()) / entryDbl <= SR_ENTRY_ZONE_PCT)
+                    entryAnchorLevel = sup;
+            } else {
+                SRLevel res = structure.nearestResistanceAbove(entryDbl);
+                if (res != null && (res.price() - entryDbl) / entryDbl <= SR_ENTRY_ZONE_PCT)
+                    entryAnchorLevel = res;
+            }
+            if (entryAnchorLevel == null) {
+                log.debug("[HIGHRR] {} {} Gate5 BLOCKED — not within {}% of S/R (price={})",
+                        symbol, isBuy?"BUY":"SELL",
+                        (int)(SR_ENTRY_ZONE_PCT*100), String.format("%.2f", entryDbl));
+                return null;
+            }
         }
+        // If structure has no data yet (first deploy) → fall through to original logic.
+
+        // ── STRUCTURAL SL — placed at nearest S/R level, not 1-min candle ──────
+        double slD;
+        if (structure != null) {
+            if (isBuy) {
+                SRLevel structSl = structure.nearestSupportBelow(entryDbl * 0.9995);
+                if (structSl != null) {
+                    double pct = (entryDbl - structSl.price()) / entryDbl;
+                    if (pct >= MIN_SL_PCT && pct <= SR_SL_MAX_PCT) {
+                        slD = structSl.price() * (1.0 - SL_BUFFER_PCT);
+                    } else if (pct > SR_SL_MAX_PCT) {
+                        // Structural SL too wide — fall back to 1-min candle
+                        double sw = state.candleLow() > 0 ? state.candleLow() : price * 0.985;
+                        slD = sw * (1.0 - SL_BUFFER_PCT);
+                    } else { return null; } // too tight
+                } else {
+                    double sw = state.candleLow() > 0 ? state.candleLow() : price * 0.985;
+                    slD = sw * (1.0 - SL_BUFFER_PCT);
+                }
+            } else {
+                SRLevel structSl = structure.nearestResistanceAbove(entryDbl * 1.0005);
+                if (structSl != null) {
+                    double pct = (structSl.price() - entryDbl) / entryDbl;
+                    if (pct >= MIN_SL_PCT && pct <= SR_SL_MAX_PCT) {
+                        slD = structSl.price() * (1.0 + SL_BUFFER_PCT);
+                    } else if (pct > SR_SL_MAX_PCT) {
+                        double sw = state.candleHigh() > 0 ? state.candleHigh() : price * 1.015;
+                        slD = sw * (1.0 + SL_BUFFER_PCT);
+                    } else { return null; }
+                } else {
+                    double sw = state.candleHigh() > 0 ? state.candleHigh() : price * 1.015;
+                    slD = sw * (1.0 + SL_BUFFER_PCT);
+                }
+            }
+        } else {
+            // No structure data — original 1-min candle logic unchanged
+            if (isBuy) {
+                double sw = state.candleLow()  > 0 ? state.candleLow()  : price * 0.985;
+                slD = sw * (1.0 - SL_BUFFER_PCT);
+            } else {
+                double sw = state.candleHigh() > 0 ? state.candleHigh() : price * 1.015;
+                slD = sw * (1.0 + SL_BUFFER_PCT);
+            }
+        }
+
         BigDecimal stopLoss = BigDecimal.valueOf(slD).setScale(2,
                 isBuy ? RoundingMode.FLOOR : RoundingMode.CEILING);
-
         BigDecimal risk = entryPrice.subtract(stopLoss).abs();
         if (risk.compareTo(BigDecimal.ZERO) == 0) return null;
-
         double riskD = risk.doubleValue();
 
-        // IMPROVEMENT: enforce BOTH max AND min SL distance.
-        // Max 5% prevents oversized risk (existing check).
-        // Min 0.5% prevents noise-level SL on low-priced stocks.
-        // Root cause of UCOBANK/REDINGTON Apr-21 losses: SL was 0.30-0.34%
-        // on stocks ₹26-₹228. Opening noise ate through SL in 2-3 minutes.
         if (riskD / price < MIN_SL_PCT) {
-            log.debug("[HIGHRR] {} SL distance {}% below minimum {}% — structural level too tight.",
-                    symbol, riskD / price * 100, MIN_SL_PCT * 100);
+            log.debug("[HIGHRR] {} SL {}% below minimum {}%",
+                    symbol, String.format("%.2f", riskD/price*100),
+                    String.format("%.2f", MIN_SL_PCT*100));
             return null;
         }
         if (riskD / price > 0.05) {
-            log.trace("[HIGHRR] {} SL too far: risk={}%", symbol,
-                    String.format("%.2f", riskD / price * 100));
+            log.trace("[HIGHRR] {} SL too far: {}%", symbol,
+                    String.format("%.2f", riskD/price*100));
             return null;
         }
 
-        BigDecimal target1, target2;
-        if (isBuy) {
-            target1 = entryPrice.add(risk.multiply(BigDecimal.valueOf(2)));
-            target2 = entryPrice.add(risk.multiply(BigDecimal.valueOf(3)));
-        } else {
-            target1 = entryPrice.subtract(risk.multiply(BigDecimal.valueOf(2)));
-            target2 = entryPrice.subtract(risk.multiply(BigDecimal.valueOf(3)));
+        // ── STRUCTURAL TARGET — T1 at next S/R level, not arbitrary 2×risk ─────
+        // If the next S/R level gives RR ≥ 2.0, use it. This makes T1 a real
+        // price magnet (institutional defenders). Fallback to 2×risk arithmetic.
+        BigDecimal target1 = null, target2;
+        SRLevel structT1 = null;
+        if (structure != null) {
+            if (isBuy) {
+                List<SRLevel> ress = structure.resistances();
+                if (ress != null) {
+                    for (SRLevel r : ress) {
+                        if (r.price() <= entryDbl * 1.001) continue;
+                        if ((r.price() - entryDbl) / riskD >= SR_T1_MIN_RR) {
+                            target1 = BigDecimal.valueOf(r.price()).setScale(2, RoundingMode.HALF_UP);
+                            structT1 = r;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                List<SRLevel> sups = structure.supports();
+                if (sups != null) {
+                    for (SRLevel s2 : sups) {
+                        if (s2.price() >= entryDbl * 0.999) continue;
+                        if ((entryDbl - s2.price()) / riskD >= SR_T1_MIN_RR) {
+                            target1 = BigDecimal.valueOf(s2.price()).setScale(2, RoundingMode.HALF_UP);
+                            structT1 = s2;
+                            break;
+                        }
+                    }
+                }
+            }
         }
+        if (target1 == null) {
+            // Fallback: arithmetic 2× risk (original behaviour preserved)
+            target1 = isBuy
+                    ? entryPrice.add(risk.multiply(BigDecimal.valueOf(2)))
+                    : entryPrice.subtract(risk.multiply(BigDecimal.valueOf(2)));
+        }
+        target2 = isBuy
+                ? entryPrice.add(risk.multiply(BigDecimal.valueOf(3)))
+                : entryPrice.subtract(risk.multiply(BigDecimal.valueOf(3)));
 
         double rewardD = target1.subtract(entryPrice).abs().doubleValue();
-        double rr      = rewardD / riskD;
+        double rr = rewardD / riskD;
         if (rr < MIN_RR_RATIO) return null;
 
         TradeDirection direction = isBuy ? TradeDirection.LONG : TradeDirection.SHORT;
@@ -329,9 +445,7 @@ public class HighRRStrategyEngine {
             return null;
         }
 
-        int score = computeScore(state, rr, isBuy, symbol);
-
-        // FIX 1: resolve instrument token from cache
+        int score = computeScore(state, rr, isBuy, symbol, entryAnchorLevel, structT1);
         long instrumentToken = resolveInstrumentToken(symbol);
 
         return new ScoredCandidate(
@@ -351,9 +465,11 @@ public class HighRRStrategyEngine {
     //   TOTAL MAX    = 100
     // ══════════════════════════════════════════════════════════════════════════
 
-    private int computeScore(SymbolState s, double rr, boolean isBuy, String symbol) {
+    private int computeScore(SymbolState s, double rr, boolean isBuy, String symbol,
+                             SRLevel entryLevel, SRLevel structT1) {
         int score = 0;
 
+        // ── Original scoring (all unchanged) ────────────────────────────────
         if (rr >= GOOD_RR_RATIO) score += 25;
         else if (rr >= MIN_RR_RATIO) score += 15;
 
@@ -367,6 +483,21 @@ public class HighRRStrategyEngine {
         if (!s.hasExcessiveWick()) score += 15;
 
         if (s.hasAdequateDepth() && s.isSpreadOk()) score += 10;
+
+        // ── NEW: Structural S/R quality bonuses (max +35) ───────────────────
+        // +20  Entry at a MAJOR level (touchCount≥3 or PDH/PDL)
+        //       → institutional defenders present → highest win-rate entries
+        // +10  Entry at ANY S/R level (touchCount≥1)
+        //       → some structural significance
+        // +15  T1 target is a major S/R level
+        //       → T1 is a real price magnet, not arbitrary arithmetic
+        // These push a major-level entry from 100 → 135 score,
+        // ensuring structural trades always rank above noise-level setups.
+        if (entryLevel != null) {
+            if (entryLevel.isMajor()) score += 20;
+            else                      score += 10;
+        }
+        if (structT1 != null && structT1.isMajor()) score += 15;
 
         return score;
     }

@@ -171,7 +171,7 @@ strategy:
     # FIX: sector must be strictly positive for BUY, strictly negative for SELL
     sector-buy-threshold: 0.0  # IMPROVED: was 0.05 — rejecting valid +0.03% sectors. Now: any positive = BUY valid
     sector-sell-threshold: 0.0  # IMPROVED: was -0.05 — any negative = SELL valid
-    min-adjusted-rr: 1.8
+    min-adjusted-rr: 2.0  # FIX: was 1.8 — now enforces minimum 1:2 RR on every SCPS trade
     symbol-cooldown-minutes: 60
     max-channel-width-pct: 5.0
     t1-rr: 2.0
@@ -231,19 +231,36 @@ strategy:
     enabled: ${ORB_ENABLED:true}
     # Reward:risk multiplier for T1 target.
     # T1 = entry ± (orbRange × target-rr)
-    # T2 = entry ± (orbRange × target-rr × 1.5)
-    target-rr: 2.5  # IMPROVED: was 1.5 — ORB trend days run 3-5x range, T1=2.5x gives real profits
+    # T2 = entry ± (orbRange × target-rr × 1.6)
+    target-rr: 2.5
     # Auto-cancel breakout watch if no breakout by 11:30 AM.
-    # Time-stop: 0 = disabled. ORB monitoring window ends at 11:30 AM.
-    # After 11:30, positions are managed by PaperTradeManagementService until 3:00 PM EOD.
-    time-stop-minutes: 0  # FIXED: was 120. ORB uses 3:00 PM EOD stop.
-    # GAP FIX 1: Minimum traded volume at 9:15 for a stock to qualify for ORB tracking.
-    # Stocks below this volume threshold are pre-filtered before entering the ORB pipeline.
-    # This prevents illiquid stocks (wide spreads, unreliable price discovery) from
-    # being tracked. Adjust based on your universe (Nifty 100 vs Nifty 500).
-    # 100,000 = conservative (works well for Nifty 100 stocks)
-    # 50,000  = wider net (includes mid-cap stocks)
-    min-premarket-volume: 200000  # FIX: raised from 100k — ensures meaningful liquidity at open
+    time-stop-minutes: 0  # ORB uses 3:00 PM EOD stop via PaperTradeManagementService.
+
+    # ── High Wave Candle thresholds (spec §2) ──────────────────────────────────
+    # Body must be 20–25% of total candle range (indecision zone, not a doji, not a trend candle)
+    high-wave-body-min: 0.20
+    high-wave-body-max: 0.25
+    # Both wicks (upper and lower) must be ≥ 30% of total range
+    high-wave-wick-min: 0.30
+    # Maximum imbalance between upper and lower wicks (allows 5–10%)
+    high-wave-wick-imbalance-max: 0.10
+
+    # ── Wick Rejection Quality thresholds (spec §4) ────────────────────────────
+    # How far price pierced beyond the ORB level before rejecting:
+    # 0.0–0.3% = PERFECT (+20 score)
+    # 0.3–0.6% = ACCEPTABLE (+10 score)
+    # >0.6%    = WEAK → trade rejected (deep wick = breakout attempt, not rejection)
+    wick-perfect-max-pct: 0.003
+    wick-accept-max-pct:  0.006
+
+    # ── Sector alignment thresholds (spec §6 — STRICT) ────────────────────────
+    # BUY requires sector ≥ +0.4% change on the day
+    # SELL requires sector ≤ -0.4% change on the day
+    sector-buy-min-pct:  0.40
+    sector-sell-max-pct: -0.40
+
+    # Minimum traded volume at 9:15 for a stock to qualify for ORB tracking.
+    min-premarket-volume: 200000
 
 
 

@@ -217,10 +217,20 @@ public class PaperTradeExecutionService {
 
         boolean strongTrend = isStrongTrend();
 
-        int timeStopMinutes = 0;
+        int rawTimeStop = 0;
         try {
-            timeStopMinutes = event.getTimeStopMinutes();
+            rawTimeStop = event.getTimeStopMinutes();
         } catch (Exception ignored) { }
+
+        // FIX: TIME_STOP_0MIN bug.
+        // PaperTradeManagementService treats timeStopMinutes=0 as "stop at 0 minutes"
+        // (i.e. immediate exit), not as "disabled".
+        // When a strategy sets time-stop-minutes=0 it means EOD only (no time stop).
+        // Fix: convert 0 → 480 minutes (8 hours, beyond market close = effectively disabled).
+        // News strategy sends 20 (non-zero) → unchanged.
+        // HighRR is SELF_MANAGED → never reaches here → unchanged.
+        // MarketPressure sends 30 but is DISABLED → unchanged.
+        int timeStopMinutes = (rawTimeStop <= 0) ? 480 : rawTimeStop;
 
         paperManagement.register(trade, estimatedAtr,
                 timingService.getCurrentWindow(), strongTrend, timeStopMinutes);
@@ -229,7 +239,7 @@ public class PaperTradeExecutionService {
                         "window={} trend={} timeStop={}",
                 sym, fillPrice, rawEntry, ENTRY_SLIP * 100, estimatedAtr,
                 timingService.getCurrentWindow(), strongTrend,
-                timeStopMinutes > 0 ? timeStopMinutes + "min" : "none");
+                rawTimeStop > 0 ? rawTimeStop + "min" : "EOD-only (480min sentinel)");
 
         publishResult(sym, "ENTERED", entryOrderId, slOrderId,
                 fillPrice, null, BigDecimal.ZERO, null);

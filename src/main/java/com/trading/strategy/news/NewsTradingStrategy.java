@@ -127,6 +127,8 @@ public class NewsTradingStrategy {
 
     /** Snapshot of recent news events for dashboard display */
     private final List<NewsEventSnapshot> recentEvents = new CopyOnWriteArrayList<>();
+    /** All scores from the last evaluation cycle — for dashboard scored-items table. */
+    private volatile List<NewsScore> lastCycleScores = Collections.emptyList();
 
     // ══════════════════════════════════════════════════════════════════════════
     // MAIN EXECUTION CYCLE — every 3 minutes
@@ -193,6 +195,11 @@ public class NewsTradingStrategy {
 
         Set<String> tradableSymbols = instrumentCache.getEquityInstruments().keySet();
         List<NewsScore> scores = scoreEngine.scoreAll(activeItems, tradableSymbols, minScore);
+        // For dashboard: score ALL symbols with no direction filter and no threshold.
+        // scoreAllForDashboard() keeps direction-unclear items (shown as SKIPPED)
+        // and below-threshold items (shown as BELOW 65) — full visibility in News tab.
+        // Trading still uses the filtered 'scores' list above (minScore=65, direction required).
+        lastCycleScores = scoreEngine.scoreAllForDashboard(activeItems, tradableSymbols);
 
         if (scores.isEmpty()) {
             log.debug("[NEWS] No news scores above threshold {} — cycle idle", minScore);
@@ -482,6 +489,7 @@ public class NewsTradingStrategy {
         return Collections.unmodifiableList(recentEvents);
     }
     public Set<String> getFiredToday()       { return Collections.unmodifiableSet(firedToday); }
+    public List<NewsScore> getLastCycleScores() { return lastCycleScores; }
 
     // ══════════════════════════════════════════════════════════════════════════
     // DASHBOARD SNAPSHOT RECORD

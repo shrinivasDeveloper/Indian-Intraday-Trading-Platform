@@ -80,10 +80,15 @@ public class NewsIngestionService {
     private volatile Set<String>       knownSymbols = Collections.emptySet();
 
     /** Consecutive failure counter per source — for health monitoring */
-    private final Map<String, Integer> sourceFailures = new ConcurrentHashMap<>();
+    private final Map<String, Integer> sourceFailures    = new ConcurrentHashMap<>();
+    /** Per-source backoff epoch (ms). After 3 consecutive failures, skip until this time. */
+    private final Map<String, Long>    sourceBackoffUntil = new ConcurrentHashMap<>();
 
+    // HTTP/1.1 forced: Cloudflare on Railway datacenter IPs sometimes rejects HTTP/2.
+    // HTTP/1.1 is what a browser uses for simple RSS navigation.
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(6))
+            .version(HttpClient.Version.HTTP_1_1)
             .build();
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -157,20 +162,47 @@ public class NewsIngestionService {
 
     /**
      * SOURCE 4: Moneycontrol Business RSS — every 7 minutes.
+     *
+     * 403 HANDLING:
+     *   Moneycontrol uses Cloudflare. 403 is a bot-challenge, not a permanent ban.
+     *   It is most common at off-hours (midnight) when Cloudflare is stricter.
+     *   Strategy:
+     *     - 1st failure: log WARN, retry normally next cycle (7 min)
+     *     - 2nd failure: log WARN, still retry
+     *     - 3rd+ consecutive failure: log DEBUG only (silence spam), backoff 30 min
+     *   sourceFailures counter is cleared on any success.
+     *   sourceBackoffUntil tracks when to resume after 3+ failures.
      */
     @Scheduled(fixedRate = 420_000)
     public void fetchFromMoneycontrolBusiness() {
         if (!enabled) return;
         refreshSymbolCache();
+
+        // Backoff: after 3 consecutive 403s, skip until backoff window expires
+        Long backoffUntil = sourceBackoffUntil.get("RSS_MC_BIZ");
+        if (backoffUntil != null && System.currentTimeMillis() < backoffUntil) {
+            log.debug("[NEWS-INGEST] Moneycontrol Business RSS skipped (backoff until {})", backoffUntil);
+            return;
+        }
+
         try {
             int added = fetchRss(
                     "https://www.moneycontrol.com/rss/business.xml",
                     "RSS_MC_BIZ");
             if (added > 0) log.info("[NEWS-INGEST] Moneycontrol Business RSS: +{} articles", added);
             sourceFailures.remove("RSS_MC_BIZ");
+            sourceBackoffUntil.remove("RSS_MC_BIZ");
         } catch (Exception e) {
             int f = sourceFailures.merge("RSS_MC_BIZ", 1, Integer::sum);
-            log.warn("[NEWS-INGEST] Moneycontrol Business RSS failed ({}x): {}", f, e.getMessage());
+            if (f <= 2) {
+                log.warn("[NEWS-INGEST] Moneycontrol Business RSS failed ({}x): {}", f, e.getMessage());
+            } else {
+                // 3+ failures: activate 30-min backoff, reduce log noise
+                long backoff = System.currentTimeMillis() + 30 * 60 * 1000L;
+                sourceBackoffUntil.put("RSS_MC_BIZ", backoff);
+                log.warn("[NEWS-INGEST] Moneycontrol Business RSS failed ({}x) — backing off 30min: {}",
+                        f, e.getMessage());
+            }
         }
     }
 
@@ -282,13 +314,48 @@ public class NewsIngestionService {
     }
 
     // ── RSS feeds (ET Markets, Moneycontrol Business, Hindu Business Line) ────
+    //
+    // 403 FIX: Moneycontrol (and ET) use Cloudflare bot detection.
+    // They check for a complete browser header fingerprint.
+    // Java HttpClient sends minimal headers by default — Cloudflare blocks it.
+    // Adding sec-fetch-* and upgrade-insecure-requests makes the request look like a real
+    // Chrome browser. NOTE: "Connection" and "Accept-Encoding" are NOT set here — they are
+    // restricted headers in Java HttpClient and are managed by the HTTP stack automatically.
+    // makes the request look like a real Chrome browser.
+    //
+    // Referer is set per-domain: MC gets mc.com, ET gets economictimes.com.
+    // This prevents Cloudflare from flagging cross-origin requests.
+    //
+    // HTTP/1.1 forced (version(HttpClient.Version.HTTP_1_1)) because:
+    //   - Some Cloudflare configs block HTTP/2 from datacenter IPs (Railway)
+    //   - HTTP/1.1 is what a simple browser tab uses for RSS fetch
     private int fetchRss(String url, String sourceTag) throws Exception {
+        // Choose referer based on domain
+        String referer = url.contains("moneycontrol") ? "https://www.moneycontrol.com/"
+                : url.contains("economictimes") ? "https://economictimes.indiatimes.com/"
+                : url.contains("thehindubusinessline") ? "https://www.thehindubusinessline.com/"
+                : "https://www.google.com/";
+
+        // RESTRICTED HEADER FIX:
+        // Java HttpClient throws IllegalArgumentException for "Connection" and "Accept-Encoding".
+        // These are managed internally by the HTTP/1.1 stack — the JDK controls them directly:
+        //   Connection:      managed by keep-alive logic inside HttpClient
+        //   Accept-Encoding: managed by HttpClient's built-in gzip decompression
+        // Setting them via builder.header() throws:
+        //   "restricted header name: Connection"
+        //   "restricted header name: Accept-Encoding"
+        // Both must be REMOVED from application code. The stack sends them correctly anyway.
         String body = get(url,
-                "User-Agent",      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept",          "application/rss+xml, application/xml, text/xml, */*",
-                "Accept-Language", "en-US,en;q=0.9",
-                "Cache-Control",   "no-cache",
-                "Referer",         "https://www.moneycontrol.com/"
+                "User-Agent",                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept",                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language",           "en-IN,en-US;q=0.9,en;q=0.8",
+                "Upgrade-Insecure-Requests", "1",
+                "Sec-Fetch-Dest",            "document",
+                "Sec-Fetch-Mode",            "navigate",
+                "Sec-Fetch-Site",            "none",
+                "Sec-Fetch-User",            "?1",
+                "Cache-Control",             "max-age=0",
+                "Referer",                   referer
         );
 
         List<String[]> items = parseRssItems(body);

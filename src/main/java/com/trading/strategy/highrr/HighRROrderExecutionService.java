@@ -167,17 +167,34 @@ public class HighRROrderExecutionService {
 
         BigDecimal fillPrice = BigDecimal.valueOf(fillPriceD).setScale(2, RoundingMode.HALF_UP);
 
-        log.info("[HIGHRR-EXEC] PAPER FILL: {} | dir={} | rawEntry={} | fill={} | qty={} | sl={} | T1={}",
+        // FIX (2026-04-30): Recompute T1 and T2 from FILL PRICE, not signal rawEntry.
+        // ROOT CAUSE: signal T1 = rawEntry - risk*2 (RR=2.0 at rawEntry).
+        // But fill = rawEntry * (1 - ENTRY_BUFFER_PCT) for SHORT — slightly lower.
+        // fill_risk = sl - fill  (LARGER than signal risk)
+        // fill_reward = fill - signal_T1  (SMALLER — target unchanged, entry moved)
+        // Result: fill_rr = 1.86 instead of 2.0.
+        //
+        // Fix: after computing fillPrice, recompute T1 = fill ± fill_risk*2
+        // This guarantees RR = exactly 2.0 measured from the actual fill price.
+        BigDecimal fillRisk = fillPrice.subtract(event.getStopLoss()).abs();
+        BigDecimal target1FromFill = isBuy
+                ? fillPrice.add(fillRisk.multiply(BigDecimal.valueOf(2)))
+                : fillPrice.subtract(fillRisk.multiply(BigDecimal.valueOf(2)));
+        BigDecimal target2 = isBuy
+                ? fillPrice.add(fillRisk.multiply(BigDecimal.valueOf(3)))
+                : fillPrice.subtract(fillRisk.multiply(BigDecimal.valueOf(3)));
+
+        double actualRr = fillRisk.doubleValue() > 0
+                ? target1FromFill.subtract(fillPrice).abs().doubleValue() / fillRisk.doubleValue()
+                : 0;
+
+        log.info("[HIGHRR-EXEC] PAPER FILL: {} | dir={} | rawEntry={} | fill={} | qty={} | sl={} | T1={}(was {}) | RR={}",
                 symbol, event.getDirection(), rawEntry, fillPrice,
-                event.getQuantity(), event.getStopLoss(), event.getTarget());
+                event.getQuantity(), event.getStopLoss(),
+                target1FromFill, event.getTarget(),
+                String.format("%.3f", actualRr));
 
         String orderId = "HIGHRR-PAPER-" + symbol + "-" + System.currentTimeMillis();
-
-        // Compute T2 = 3R
-        BigDecimal risk    = fillPrice.subtract(event.getStopLoss()).abs();
-        BigDecimal target2 = isBuy
-                ? fillPrice.add(risk.multiply(BigDecimal.valueOf(3)))
-                : fillPrice.subtract(risk.multiply(BigDecimal.valueOf(3)));
 
         // FIX 3: pass instrumentToken from event (resolved by HighRRStrategyEngine)
         HighRRTradeManager.HighRRTrade trade = new HighRRTradeManager.HighRRTrade(
@@ -185,7 +202,7 @@ public class HighRROrderExecutionService {
                 event.getDirection(),
                 fillPrice,
                 event.getStopLoss(),
-                event.getTarget(),
+                target1FromFill,   // FIX: was event.getTarget() — now recomputed from fill for exact 2.0R
                 target2,
                 event.getQuantity(),
                 orderId,
@@ -200,7 +217,7 @@ public class HighRROrderExecutionService {
         // circuitBreaker.recordTradeEntered() before TradeApprovedEvent was fired.
 
         log.info("[HIGHRR-EXEC] ✅ Paper trade active: {} | fill={} | SL={} | T1={} | T2={}",
-                symbol, fillPrice, event.getStopLoss(), event.getTarget(), target2);
+                symbol, fillPrice, event.getStopLoss(), target1FromFill, target2);
     }
 
     // ══════════════════════════════════════════════════════════════════════════

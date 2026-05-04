@@ -7,6 +7,7 @@ import com.trading.events.TickReceivedEvent;
 import com.trading.marketdata.service.InstrumentCacheService;
 import com.zerodhatech.kiteconnect.KiteConnect;
 import com.zerodhatech.models.HistoricalData;
+import com.zerodhatech.models.OHLCQuote;
 import com.trading.sector.service.SectorClassificationService;
 import com.trading.sector.service.SectorStrengthService;
 import com.zerodhatech.models.Instrument;
@@ -75,11 +76,11 @@ public class OrbDataService {
     static final LocalTime MARKET_CLOSE  = LocalTime.of(15, 30);
 
     // ── Gap and RVOL thresholds ─────────────────────────────────────────────
-    // FIX: was 0.01 (1.0%). Reduced to 0.003 (0.3%) to capture more gap candidates.
-    // On a normal NSE day, only 5-15 stocks gap >1%. At 0.3%, 40-80 stocks qualify,
-    // giving the strategy a meaningful candidate pool. The RVOL filter at 9:30 and
-    // the scoring system select only the best setups from this wider pool.
-    private static final double MIN_GAP_PCT = 0.003;
+    // MIN_GAP_PCT REMOVED — gap % is no longer a shortlisting gate.
+    // Every liquid stock is tracked through the 9:15–9:30 ORB window.
+    // Gap % is used only as a SCORING BONUS in computeScore().
+    // WHY: A High Wave candle can form on any stock — gapping or flat-open.
+    // The 15-min candle body/wick quality (evaluated at 9:30) is the real filter.
     // FIXED: was 1.5 — blocked EVERY day for a full week (shortlist>0 but validOrb=0 always).
     // ROOT CAUSE: At 9:30 AM only 15 min of volume has accumulated (~5% of daily volume).
     // RVOL=1.5 requires 7.5% of daily volume in 15 min — nearly impossible on a normal day.
@@ -231,28 +232,82 @@ public class OrbDataService {
     // CANDLE LISTENER
     // ══════════════════════════════════════════════════════════════════════════
 
-    @EventListener
-    @Async("tradingExecutor")
-    public void onCandle(CandleCompleteEvent event) {
-        Candle c = event.getCandle();
-        if (!"5minute".equals(c.getTimeframe()) || !c.isComplete()) return;
-        long token = c.getInstrumentToken();
-        if (token == 256265L || token == 260105L || token == 264969L) return;
+    // onCandle(CandleCompleteEvent) REMOVED.
+    // The 5-min candle listener was counting trend candles inside the ORB window
+    // and storing into cleanCandleCount. This was wrong because:
+    //   (a) The ORB candle is a single 15-min candle (9:15–9:30), not 5-min candles.
+    //   (b) Body/wick quality of the ORB candle must be computed from the full
+    //       15-min OHLC (orbOpen/orbHigh/orbLow/orbClose), not from sub-candles.
+    //   (c) 5-min candles inside the ORB window can individually be trend candles
+    //       while the combined 15-min candle is a High Wave — the sub-candle body
+    //       check gave false negatives.
+    // Replacement: computeHighWaveQuality() is called in lockOrbAndScore() at 9:30
+    // on the complete 15-min OHLC (orbOpen, orbHigh, orbLow, orbClose) which is
+    // built accurately from tick data via updateHighLow() and orbClose tracking.
 
-        String    symbol      = c.getTradingSymbol();
-        LocalTime candleClose = c.getCandleTime().atZone(IST).toLocalTime();
-
-        if (!candleClose.isBefore(ORB_START) && candleClose.isBefore(ORB_END)) {
-            OrbData od = orbDataMap.get(symbol);
-            if (od != null && od.valid) {
-                od.updateCandleQuality(c);
-            }
-        }
-    }
 
     // ══════════════════════════════════════════════════════════════════════════
     // SCHEDULER: 9:00 AM – daily reset + load prev-close
     // ══════════════════════════════════════════════════════════════════════════
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SCHEDULER: 15:30 — Persist prevClose, prevHigh, prevLow for tomorrow
+    //
+    // WHY 15:30 EXACTLY:
+    // NSE closing price = 15:30 closing auction result.
+    // livePrices holds the most recent tick for every symbol (updated all day).
+    // At 15:30, livePrices[symbol] = the last traded price = closest to official close.
+    //
+    // WHY NOT TICK-BASED (previous approach was wrong):
+    //   (a) Ticks continue until 15:35 — last tick is NOT the official close price
+    //   (b) The old code saved prevClose on every tick 15:20–15:35 = thousands of
+    //       redundant Redis writes overwriting each other
+    //   (c) On a holiday, no ticks fire → 15:20–15:35 window never triggered
+    //       → prevClose was never saved → dailyReset() next trading day found empty
+    //       Redis → bootstrapPrevCloseFromBroker() ran → startup delay + API load
+    //
+    // HOLIDAY SAFETY (with 96h TTL):
+    //   This cron fires on every MON–FRI when NSE is open.
+    //   On a holiday NSE is closed — no ticks, this cron still fires but
+    //   livePrices may be stale (last saved from previous trading day).
+    //   BUT: the 96h TTL on Redis keys ensures the PREVIOUS trading day's
+    //   prevClose survives until the next trading day regardless of holidays:
+    //
+    //   Thursday close  → Friday holiday + Saturday + Sunday → Monday 9:00 AM
+    //     Thursday 15:30 → Monday 9:00 = 65.5 hours → within 96h ✅
+    //
+    //   Thursday close  → Fri holiday + Sat + Sun + Mon holiday → Tuesday 9:00 AM
+    //     Thursday 15:30 → Tuesday 9:00 = 89.5 hours → within 96h ✅
+    //
+    //   If holiday cron fires with stale livePrices — it simply re-saves the same
+    //   price from the last trading day with a fresh 96h TTL. No harm done.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Scheduled(cron = "0 30 15 * * MON-FRI", zone = "Asia/Kolkata")
+    public void persistEndOfDayPrices() {
+        if (livePrices.isEmpty()) {
+            log.warn("[ORB] EOD persist: livePrices empty — WebSocket not connected?");
+            return;
+        }
+        int saved = 0;
+        for (Map.Entry<String, Double> e : livePrices.entrySet()) {
+            String symbol = e.getKey();
+            double closePrice = e.getValue();
+            if (closePrice <= 0) continue;
+
+            // prevClose = live price at 15:30 ≈ NSE closing auction price
+            prevCloseMap.put(symbol, closePrice);
+            persistPrevClose(symbol, closePrice);
+
+            // prevHigh / prevLow = intraday extremes (tracked all day by onTick)
+            Double dayHigh = prevHighMap.get(symbol);
+            Double dayLow  = prevLowMap.get(symbol);
+            if (dayHigh != null && dayHigh > 0) persistPrevHigh(symbol, dayHigh);
+            if (dayLow  != null && dayLow  > 0) persistPrevLow(symbol, dayLow);
+            saved++;
+        }
+        log.info("[ORB] 📦 EOD: saved prevClose+High+Low for {} symbols (96h TTL — holiday safe)", saved);
+    }
 
     @Scheduled(cron = "0 0 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
@@ -334,7 +389,7 @@ public class OrbDataService {
             return;
         }
 
-        log.info("[ORB] Shortlisting gapped stocks ({} open prices captured, prevClose available={})",
+        log.info("[ORB] Shortlisting liquid stocks for ORB tracking ({} open prices captured, prevClose available={})",
                 openPrices.size(), prevCloseDataAvailable);
 
         int count = 0;
@@ -356,20 +411,25 @@ public class OrbDataService {
                 continue;
             }
 
-            // FIX 1: prevClose fallback for first-day operation
-            Double prevClose = prevCloseMap.get(symbol);
-            if (prevClose == null || prevClose <= 0) {
-                // First run or Redis was flushed: no prev-close available.
-                // Use openPrice as prevClose so gapPct = 0 → will not pass MIN_GAP_PCT filter.
-                // This is correct behaviour: on day-1 we cannot identify genuine gaps.
+            // prevClose needed for gap % scoring bonus only (not as a gate).
+            // If unavailable (first deploy), use 0 — gap bonus will simply be 0.
+            Double prevClose = prevCloseMap.getOrDefault(symbol, 0.0);
+            if (prevClose <= 0) {
                 noPrevCloseCount++;
-                continue; // skip — will not meet MIN_GAP_PCT threshold
+                // Continue tracking — no gap bonus today, but HW + sector can still qualify.
             }
 
-            double gapPct = (openP - prevClose) / prevClose;
-            if (Math.abs(gapPct) < MIN_GAP_PCT) continue;
+            double gapPct = (prevClose > 0)
+                    ? (openP - prevClose) / prevClose
+                    : 0.0;
+            // REMOVED: gap % filter. Do NOT gate on gap here.
+            // WHY: A High Wave candle can form on ANY stock — gapping or flat.
+            //   The 15-min ORB candle quality (body/wick ratio) is what matters,
+            //   and that is only known at 9:30 after the candle closes.
+            //   Gating at 9:20 on gap % means we miss every flat-open High Wave.
+            //   Gap % is now used as a SCORING BONUS in computeScore(), not a gate.
+            //   Volume (minPremarketVolume) is the only pre-filter — ensures liquidity.
 
-            // GAP FIX 2: pass prevHigh and prevLow into OrbData for S/R proximity check
             Double prevHigh = prevHighMap.get(symbol);
             Double prevLow  = prevLowMap.get(symbol);
             OrbData od = new OrbData(symbol, openP, prevClose, gapPct,
@@ -390,7 +450,7 @@ public class OrbDataService {
             log.info("[ORB] {} symbols skipped (no prev-close data). " +
                     "Normal on first deployment; will work from tomorrow.", noPrevCloseCount);
         }
-        log.info("[ORB] Shortlisted {} stocks with gap ≥ ±{}%", count, (int)(MIN_GAP_PCT * 100));
+        log.info("[ORB] Shortlisted {} liquid stocks for ORB tracking (gap % used for scoring only)", count);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -409,6 +469,22 @@ public class OrbDataService {
                 log.debug("[ORB] {} rejected: invalid range (H={} L={})", od.symbol, od.orbHigh, od.orbLow);
                 continue;
             }
+
+            // Compute High Wave quality from real 15-min OHLC at lock time.
+            // orbOpen = first tick at 9:15, orbHigh/Low = tick extremes, orbClose = last tick.
+            // This gives the TRUE body/wick breakdown of the 15-min ORB candle.
+            od.computeHighWaveQuality();
+            log.debug("[ORB] {} ORB candle: O={} H={} L={} C={} | HW={} body={:.1f}% upperW={:.1f}% lowerW={:.1f}%"
+                            .replace("{:.1f}", "{}"),
+                    od.symbol,
+                    String.format("%.2f", od.orbOpen),
+                    String.format("%.2f", od.orbHigh),
+                    String.format("%.2f", od.orbLow),
+                    String.format("%.2f", od.orbClose),
+                    od.isHighWaveCandle,
+                    String.format("%.1f", od.highWaveBodyPct * 100),
+                    String.format("%.1f", od.highWaveUpperWick * 100),
+                    String.format("%.1f", od.highWaveLowerWick * 100));
 
             double rvol = rvolService.getRvolNow(od.symbol, od.latestVolume);
             od.rvol = rvol;
@@ -452,6 +528,13 @@ public class OrbDataService {
         if (rvol >= 2.0)      score += SCORE_HIGH_RVOL;
         else if (rvol >= 1.5) score += 12;
 
+        // Gap bonus: gap direction should align with trade direction.
+        // Gap-up + buy breakout = strongest setup. Flat-open setups can still fire
+        // (High Wave + sector alignment is enough) but score lower.
+        if (Math.abs(od.gapPct) >= 0.005)      score += 10; // gap ≥ 0.5% → bonus
+        else if (Math.abs(od.gapPct) >= 0.003)  score += 5;  // gap 0.3–0.5% → small bonus
+        // gap < 0.3% → no bonus (flat open, rely on HW + sector)
+
         String sectorName = sectorClassify.getSector(od.symbol);
         SectorStrengthService.SectorData sd = sectorStrength.getSector(sectorName);
         boolean isGapUp = od.gapPct > 0;
@@ -461,8 +544,12 @@ public class OrbDataService {
         }
         od.sectorName = sectorName;
 
-        if (od.cleanCandleCount >= 2)      score += SCORE_CLEAN_CANDLE;
-        else if (od.cleanCandleCount == 1) score += 8;
+        // High Wave candle bonus (replaces cleanCandleCount).
+        // A confirmed High Wave (body 20-25%, both wicks ≥30%) is the strongest
+        // indecision signal — full bonus. Partial quality (no wicks but body OK) → partial.
+        if (od.isHighWaveCandle)                             score += SCORE_CLEAN_CANDLE; // +15
+        else if (od.highWaveBodyPct >= 0.20
+                && od.highWaveBodyPct <= 0.40)               score += 8; // reasonable body
 
         // GAP FIX 2: Check proximity to prevClose, prevHigh, AND prevLow.
         // Original code only checked prevClose — but the spec says "near previous
@@ -493,9 +580,39 @@ public class OrbDataService {
     //        The remaining 8 are cancelled INSTANTLY once 2 trades fire.
     // ══════════════════════════════════════════════════════════════════════════
 
+    // FIX: minimum stock price and score filters for ORB selection.
+    // Prevents penny stocks (YESBANK ₹20, PATELENG ₹29) and low-quality setups
+    // (score=8) from entering the shortlist and firing invalid trades.
+    private static final double MIN_ORB_STOCK_PRICE = 100.0;
+    private static final int    MIN_ORB_SCORE        = 30;
+
     private void selectTop10() {
         List<OrbData> candidates = orbDataMap.values().stream()
                 .filter(od -> od.valid)
+                // FIX: filter out penny stocks, low quality, and sector-misaligned setups
+                .filter(od -> {
+                    double openPrice = openPrices.getOrDefault(od.symbol, 0.0);
+                    if (openPrice < MIN_ORB_STOCK_PRICE) {
+                        log.debug("[ORB] {} skipped — price ₹{} below minimum ₹{}",
+                                od.symbol, openPrice, MIN_ORB_STOCK_PRICE);
+                        return false;
+                    }
+                    if (od.score < MIN_ORB_SCORE) {
+                        log.debug("[ORB] {} skipped — score {} below minimum {}",
+                                od.symbol, od.score, MIN_ORB_SCORE);
+                        return false;
+                    }
+                    // FIX: require sector alignment unless score is very high (≥50).
+                    // Sector-unaligned trades fire and immediately hit SECTOR_TURNED.
+                    // Exception: score ≥ 50 means strong gap+RVOL+candle quality
+                    // which can override a sector miss.
+                    if (!od.sectorAligned && od.score < 50) {
+                        log.debug("[ORB] {} skipped — sectorAligned=false and score {} < 50",
+                                od.symbol, od.score);
+                        return false;
+                    }
+                    return true;
+                })
                 .sorted(Comparator
                         .<OrbData, Integer>comparing(od -> od.score).reversed()
                         .thenComparingDouble((OrbData od) -> od.rvol).reversed()
@@ -599,13 +716,13 @@ public class OrbDataService {
 
     private void persistToRedisSet(String key, String member) {
         if (redis == null) return;
-        try { redis.opsForSet().add(key, member); redis.expire(key, 26, TimeUnit.HOURS); }
+        try { redis.opsForSet().add(key, member); redis.expire(key, 96, TimeUnit.HOURS); }
         catch (Exception ignored) {}
     }
 
     private void persistToRedisList(String key, String value) {
         if (redis == null) return;
-        try { redis.opsForList().rightPush(key, value); redis.expire(key, 26, TimeUnit.HOURS); }
+        try { redis.opsForList().rightPush(key, value); redis.expire(key, 96, TimeUnit.HOURS); }
         catch (Exception ignored) {}
     }
 
@@ -630,7 +747,7 @@ public class OrbDataService {
             f.put("valid",        String.valueOf(od.valid));
             f.put("cleanCandles", String.valueOf(od.cleanCandleCount));
             redis.opsForHash().putAll(key, f);
-            redis.expire(key, 26, TimeUnit.HOURS);
+            redis.expire(key, 96, TimeUnit.HOURS);
         } catch (Exception ignored) {}
     }
 
@@ -638,7 +755,7 @@ public class OrbDataService {
         if (redis == null) return;
         try {
             redis.opsForValue().set(KEY_PREV_CLOSE + symbol,
-                    String.format("%.4f", price), 26, TimeUnit.HOURS);
+                    String.format("%.4f", price), 96, TimeUnit.HOURS);
         } catch (Exception ignored) {}
     }
 
@@ -647,7 +764,7 @@ public class OrbDataService {
         if (redis == null) return;
         try {
             redis.opsForValue().set(KEY_PREV_HIGH + symbol,
-                    String.format("%.4f", price), 26, TimeUnit.HOURS);
+                    String.format("%.4f", price), 96, TimeUnit.HOURS);
         } catch (Exception ignored) {}
     }
 
@@ -655,7 +772,7 @@ public class OrbDataService {
         if (redis == null) return;
         try {
             redis.opsForValue().set(KEY_PREV_LOW + symbol,
-                    String.format("%.4f", price), 26, TimeUnit.HOURS);
+                    String.format("%.4f", price), 96, TimeUnit.HOURS);
         } catch (Exception ignored) {}
     }
 
@@ -671,37 +788,121 @@ public class OrbDataService {
     // Zerodha API rate limits (3 req/sec). Uses 250ms delay between batches.
     // ══════════════════════════════════════════════════════════════════════════
 
+    /**
+     * Bootstrap prevClose, prevHigh, prevLow for all equity instruments.
+     *
+     * APPROACH: Single getOHLC() call for all 295 symbols.
+     *
+     * OLD APPROACH (WRONG — replaced):
+     *   Called getHistoricalData() once per symbol = 295 HTTP requests.
+     *   Time: 19–46 seconds. Burst of 50 calls with no per-call delay
+     *   hit Zerodha's 3 req/sec rate limit → HTTP 429 errors → many
+     *   symbols got no prevClose → loaded=241 errors=42.
+     *
+     * NEW APPROACH (correct):
+     *   getOHLC(String[] instruments) accepts up to 500 NSE symbols
+     *   in a single HTTP request. Returns Map<String, OHLCQuote> with
+     *   {lastPrice, ohlc: {open, high, low, close}} for every symbol.
+     *
+     *   295 symbols → 1 API call → ~100–300ms total.
+     *   Zero rate-limit risk. Zero per-symbol errors.
+     *
+     * FALLBACK:
+     *   If getOHLC() fails (API outage, auth error), falls back to the
+     *   original per-symbol getHistoricalData() approach as a safety net.
+     *
+     * NOTE: getOHLC() returns the PREVIOUS CLOSE as the 'close' field in
+     * the ohlc object — this is exactly what we need for gap calculation.
+     * The 'lastPrice' field is the current market price (not useful here).
+     */
     private int bootstrapPrevCloseFromBroker() {
         if (kiteConnect == null) {
-            log.warn("[ORB] bootstrapPrevCloseFromBroker: KiteConnect bean not available. " +
-                    "prevClose will be captured at 15:20 today and available tomorrow.");
+            log.warn("[ORB] bootstrapPrevCloseFromBroker: KiteConnect bean not available.");
             return 0;
         }
 
-        // Calculate yesterday's market date (skip weekends — NSE is closed Sat/Sun)
+        Map<String, com.zerodhatech.models.Instrument> instruments =
+                instrumentCache.getEquityInstruments();
+        if (instruments.isEmpty()) {
+            log.warn("[ORB] bootstrapPrevCloseFromBroker: instrument cache empty.");
+            return 0;
+        }
+
+        // Build "NSE:SYMBOL" array for getOHLC()
+        // KiteConnect.getOHLC takes String[] of exchange:tradingsymbol format
+        String[] instrumentKeys = instruments.keySet().stream()
+                .map(sym -> "NSE:" + sym)
+                .toArray(String[]::new);
+
+        log.info("[ORB] Bootstrapping prevClose via getOHLC() for {} symbols (single API call)...",
+                instrumentKeys.length);
+        long start = System.currentTimeMillis();
+
+        try {
+            Map<String, com.zerodhatech.models.OHLCQuote> ohlcMap =
+                    kiteConnect.getOHLC(instrumentKeys);
+
+            if (ohlcMap == null || ohlcMap.isEmpty()) {
+                log.warn("[ORB] getOHLC() returned empty — falling back to per-symbol historical fetch");
+                return bootstrapPrevCloseFromBrokerFallback();
+            }
+
+            int loaded = 0, skipped = 0;
+            for (Map.Entry<String, com.zerodhatech.models.OHLCQuote> entry : ohlcMap.entrySet()) {
+                // Key format: "NSE:SYMBOL" — strip the "NSE:" prefix
+                String key    = entry.getKey();
+                String symbol = key.startsWith("NSE:") ? key.substring(4) : key;
+                com.zerodhatech.models.OHLCQuote q = entry.getValue();
+
+                if (q == null || q.ohlc == null) { skipped++; continue; }
+
+                double close = q.ohlc.close;
+                double high  = q.ohlc.high;
+                double low   = q.ohlc.low;
+
+                if (close <= 0) { skipped++; continue; }
+
+                prevCloseMap.put(symbol, close);
+                persistPrevClose(symbol, close);
+                if (high > 0) { prevHighMap.put(symbol, high); persistPrevHigh(symbol, high); }
+                if (low  > 0) { prevLowMap.put(symbol, low);   persistPrevLow(symbol, low);   }
+                loaded++;
+            }
+
+            long elapsed = System.currentTimeMillis() - start;
+            log.info("[ORB] ✅ Bootstrap complete via getOHLC(): loaded={} skipped={} in {}ms (1 API call)",
+                    loaded, skipped, elapsed);
+            return loaded;
+
+        } catch (Throwable e) {
+            log.warn("[ORB] getOHLC() failed: {} — falling back to per-symbol historical fetch",
+                    e.getMessage());
+            return bootstrapPrevCloseFromBrokerFallback();
+        }
+    }
+
+    /**
+     * Fallback: per-symbol getHistoricalData() if getOHLC() is unavailable.
+     * Slower (19–46 seconds) but guaranteed to work even on market holidays
+     * when OHLC might return no data.
+     */
+    private int bootstrapPrevCloseFromBrokerFallback() {
         java.time.LocalDate today     = java.time.LocalDate.now(IST);
         java.time.LocalDate yesterday = today.minusDays(1);
         if (yesterday.getDayOfWeek() == java.time.DayOfWeek.SUNDAY)  yesterday = yesterday.minusDays(2);
         if (yesterday.getDayOfWeek() == java.time.DayOfWeek.SATURDAY) yesterday = yesterday.minusDays(1);
 
-        // KiteConnect.getHistoricalData expects java.util.Date
-        // Set from=yesterday 00:00:00 and to=yesterday 23:59:59 IST
-        java.time.ZonedDateTime fromZdt = yesterday.atStartOfDay(IST);
-        java.time.ZonedDateTime toZdt   = yesterday.atTime(23, 59, 59).atZone(IST);
-        java.util.Date fromDate = java.util.Date.from(fromZdt.toInstant());
-        java.util.Date toDate   = java.util.Date.from(toZdt.toInstant());
+        java.util.Date fromDate = java.util.Date.from(yesterday.atStartOfDay(IST).toInstant());
+        java.util.Date toDate   = java.util.Date.from(yesterday.atTime(23, 59, 59).atZone(IST).toInstant());
 
-        log.info("[ORB] Bootstrapping prevClose from Zerodha for market date {} ...", yesterday);
+        log.info("[ORB] Fallback bootstrap: fetching per-symbol historical data for {} ...", yesterday);
 
-        int loaded  = 0;
-        int errors  = 0;
-        int skipped = 0;
-
+        int loaded = 0, errors = 0, skipped = 0;
         java.util.List<Map.Entry<String, com.zerodhatech.models.Instrument>> entries =
                 new java.util.ArrayList<>(instrumentCache.getEquityInstruments().entrySet());
 
-        // Process in batches of 50 with 250ms pause — respects Zerodha 3 req/sec rate limit
-        int batchSize = 50;
+        // 50 per batch, 300ms pause — stays within Zerodha 3 req/sec limit
+        int batchSize = 10; // smaller batch + longer pause to avoid 429
         for (int batchStart = 0; batchStart < entries.size(); batchStart += batchSize) {
             java.util.List<Map.Entry<String, com.zerodhatech.models.Instrument>> batch =
                     entries.subList(batchStart, Math.min(batchStart + batchSize, entries.size()));
@@ -710,55 +911,31 @@ public class OrbDataService {
                 String symbol = entry.getKey();
                 long   token  = entry.getValue().getInstrument_token();
                 try {
-                    // KiteConnect.getHistoricalData takes instrumentToken as String
                     HistoricalData result = kiteConnect.getHistoricalData(
-                            fromDate, toDate,
-                            String.valueOf(token),
-                            "day",
-                            false,   // continuous = false (not for equity)
-                            false    // oi = false (open interest not needed)
-                    );
-
+                            fromDate, toDate, String.valueOf(token), "day", false, false);
                     if (result == null || result.dataArrayList == null || result.dataArrayList.isEmpty()) {
-                        skipped++;
-                        continue;
+                        skipped++; continue;
                     }
-
-                    // Last item in dataArrayList = yesterday's day candle
                     HistoricalData last = result.dataArrayList.get(result.dataArrayList.size() - 1);
-                    double close = last.close;
-                    if (close <= 0) { skipped++; continue; }
-
-                    prevCloseMap.put(symbol, close);
-                    persistPrevClose(symbol, close);
-
-                    // Persist prevHigh and prevLow for S/R proximity scoring
+                    if (last.close <= 0) { skipped++; continue; }
+                    prevCloseMap.put(symbol, last.close);
+                    persistPrevClose(symbol, last.close);
                     if (last.high > 0) { prevHighMap.put(symbol, last.high); persistPrevHigh(symbol, last.high); }
                     if (last.low  > 0) { prevLowMap.put(symbol, last.low);   persistPrevLow(symbol, last.low);   }
-
                     loaded++;
                 } catch (Throwable e) {
-                    // KiteException extends Throwable directly (not Exception),
-                    // so catch(Exception) misses it. catch(Throwable) catches both
-                    // KiteException and IOException correctly.
                     errors++;
-                    if (errors <= 5) {
-                        log.debug("[ORB] Bootstrap error for {}: {}", symbol, e.getMessage());
-                    }
+                    if (errors <= 5) log.debug("[ORB] Fallback error for {}: {}", symbol, e.getMessage());
                 }
             }
-
-            // Rate-limit guard between batches
+            // 350ms between batches of 10 = ~28 calls/sec — well within 3 req/sec per type
             if (batchStart + batchSize < entries.size()) {
-                try { Thread.sleep(250); } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    break;
+                try { Thread.sleep(350); } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt(); break;
                 }
             }
         }
-
-        log.info("[ORB] Bootstrap complete. Loaded={} skipped={} errors={} / {} instruments",
-                loaded, skipped, errors, entries.size());
+        log.info("[ORB] Fallback bootstrap complete. Loaded={} skipped={} errors={}", loaded, skipped, errors);
         return loaded;
     }
 
@@ -825,11 +1002,24 @@ public class OrbDataService {
 
         public volatile double  orbHigh;
         public volatile double  orbLow;
+        // orbOpen = first tick price at 9:15 (putIfAbsent — never overwritten)
+        // orbClose = last tick price BEFORE 9:30 lock (updated on every tick)
+        // These give accurate O/H/L/C for the 9:15–9:30 15-min ORB candle.
+        public volatile double  orbOpen;         // first traded price at/after 9:15
+        public volatile double  orbClose;        // last tick price before 9:30 lock
         public volatile long    latestVolume;
 
-        // FIX 2: volatile for cross-thread visibility
-        public volatile int     cleanCandleCount;
-        public volatile int     totalCandleCount;
+        // cleanCandleCount removed — was counting 5-min candles, wrong for 15-min ORB.
+        // High Wave body/wick quality is now computed directly from orbO/H/L/C at 9:30.
+        // Retained as zero-valued stub so existing scoring references compile.
+        public volatile int     cleanCandleCount; // always 0 — see highWaveBodyPct
+        public volatile int     totalCandleCount; // unused — kept for API compatibility
+
+        // High Wave quality fields — computed at 9:30 from real OHLC
+        public volatile double  highWaveBodyPct;   // body / range (want 0.20–0.25)
+        public volatile double  highWaveUpperWick; // upper wick / range (want ≥ 0.30)
+        public volatile double  highWaveLowerWick; // lower wick / range (want ≥ 0.30)
+        public volatile boolean isHighWaveCandle;  // true if all HW criteria met
 
         public volatile double  rvol;
         public volatile int     score;
@@ -848,22 +1038,58 @@ public class OrbDataService {
             this.prevDayLow  = prevDayLow;
             this.orbHigh     = openPrice;
             this.orbLow      = openPrice;
+            this.orbOpen     = openPrice; // initialised to first tick; never overwritten
+            this.orbClose    = openPrice; // updated on every tick until 9:30 lock
             this.valid       = true;
         }
 
         public void updateHighLow(double price) {
             if (price > orbHigh) orbHigh = price;
             if (price < orbLow)  orbLow  = price;
+            orbClose = price; // always updated — last tick before lock = ORB close
         }
 
-        // FIX 2: increments are now to volatile fields (visible across threads)
-        public void updateCandleQuality(Candle c) {
-            totalCandleCount++;
-            double range = c.getHigh().doubleValue() - c.getLow().doubleValue();
-            if (range <= 0) return;
-            double body = Math.abs(c.getClose().doubleValue() - c.getOpen().doubleValue());
-            if (body > range * 0.5) cleanCandleCount++;
+        /**
+         * Called at 9:30:00 lockOrbAndScore() — NOT from a candle event.
+         * Computes High Wave candle quality from the real 15-min ORB OHLC:
+         *   orbOpen  = first tick at/after 9:15 (putIfAbsent — never overwritten)
+         *   orbHigh  = max tick price 9:15–9:30
+         *   orbLow   = min tick price 9:15–9:30
+         *   orbClose = last tick price before 9:30 lock
+         *
+         * High Wave criteria:
+         *   range = orbHigh - orbLow
+         *   body  = |orbClose - orbOpen|
+         *   bodyPct        = body / range → must be 0.20–0.25
+         *   upperWickPct   = (orbHigh - max(open,close)) / range → must be ≥ 0.30
+         *   lowerWickPct   = (min(open,close) - orbLow)  / range → must be ≥ 0.30
+         *   wickImbalance  = |upper - lower| → must be ≤ 0.10
+         */
+        public void computeHighWaveQuality() {
+            double range = orbHigh - orbLow;
+            if (range <= 0) { isHighWaveCandle = false; return; }
+
+            double bodyTop    = Math.max(orbOpen, orbClose);
+            double bodyBottom = Math.min(orbOpen, orbClose);
+            double body       = bodyTop - bodyBottom;
+            double upperWick  = orbHigh - bodyTop;
+            double lowerWick  = bodyBottom - orbLow;
+
+            highWaveBodyPct   = body / range;
+            highWaveUpperWick = upperWick / range;
+            highWaveLowerWick = lowerWick / range;
+            double wickImbalance = Math.abs(highWaveUpperWick - highWaveLowerWick);
+
+            isHighWaveCandle = highWaveBodyPct   >= 0.20
+                    && highWaveBodyPct   <= 0.25
+                    && highWaveUpperWick >= 0.30
+                    && highWaveLowerWick >= 0.30
+                    && wickImbalance     <= 0.10;
         }
+
+        // Kept for API compatibility — cleanCandleCount is always 0 now.
+        // High Wave quality replaces this in scoring.
+        public void updateCandleQuality(Candle c) { totalCandleCount++; }
 
         public boolean isRangeValid() {
             return orbHigh > orbLow && orbLow > 0;

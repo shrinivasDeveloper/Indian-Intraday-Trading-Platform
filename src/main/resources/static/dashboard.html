@@ -705,10 +705,12 @@
             <div class="sub" id="news-wr">Win Rate: —</div>
         </div>
     </div>
+
+    <!-- Fired trades + config row -->
     <div class="g g2" style="padding-top:0">
         <div class="card highlight-green">
-            <div class="ct">📋 Recent Events / Fired Today</div>
-            <div id="news-events-body"><div class="sub">No news events yet today</div></div>
+            <div class="ct">🚀 Fired Today — Traded Signals</div>
+            <div id="news-events-body"><div class="sub">No signals fired today</div></div>
         </div>
         <div class="card">
             <div class="ct">⚙ News Strategy Config</div>
@@ -731,6 +733,29 @@
                 </div>
             </div>
         </div>
+    </div>
+
+    <!-- ALL SCORED NEWS ITEMS TABLE — mirrors ORB scored-setups table -->
+    <div class="card" style="margin:0 9px 9px">
+        <div class="ct">📊 All Scored News Items Today (<span id="news-all-cnt">0</span> items · threshold 65)</div>
+        <div id="news-all-empty" class="sub" style="padding:5px 0">No news items scored yet — sources poll every 3–10 minutes</div>
+        <table id="news-all-tbl" style="display:none">
+            <thead>
+            <tr>
+                <th></th>
+                <th>Symbol</th>
+                <th>Score</th>
+                <th>Category</th>
+                <th>Sentiment</th>
+                <th>Direction</th>
+                <th>Age</th>
+                <th>Source</th>
+                <th>Headline</th>
+                <th>Status</th>
+            </tr>
+            </thead>
+            <tbody id="news-all-body"></tbody>
+        </table>
     </div>
 </div>
 
@@ -1374,14 +1399,17 @@
     // ── NEWS TAB ──────────────────────────────────────────────────────────────────
     function renderNews() {
         const nc = D.newsCatalyst || {};
-        const enabled  = nc.enabled  !== false;
-        const signals  = nc.sessionSignals  || 0;
-        const maxSig   = nc.maxSignals  || 2;
-        const ingested = nc.totalIngested   || 0;
-        const active   = nc.activeNewsItems || 0;
-        const fired    = Array.from(nc.firedToday || []);
-        const events   = nc.recentEvents    || [];
+        const enabled    = nc.enabled !== false;
+        const signals    = nc.sessionSignals  || 0;
+        const maxSig     = nc.maxSignals  || 2;
+        const ingested   = nc.totalIngested   || 0;
+        const active     = nc.activeNewsItems || 0;
+        const fired      = Array.from(nc.firedToday || []);
+        const events     = nc.recentEvents    || [];
+        const scoredItems= nc.scoredItems || nc.allScoredItems || [];
+        const firedSet   = new Set(fired);
 
+        // ── Status ──────────────────────────────────────────────────────────────
         const stEl = q('news-status');
         if(stEl){
             stEl.textContent = !enabled ? 'DISABLED' : signals >= maxSig ? '🏁 CAP REACHED' : '✅ ACTIVE';
@@ -1392,37 +1420,144 @@
         set('news-active-sub','Active: ' + active + ' items');
         set('news-signals',   signals);
 
+        // ── P&L ─────────────────────────────────────────────────────────────────
         const pnlMap = (D.strategyStatus || {}).perStrategyPnl || {};
         const nPnl   = pnlMap['NEWS_CATALYST_V1'] || {};
         const p = parseFloat(nPnl.pnl || 0);
         const npEl = q('news-pnl'); if(npEl){npEl.textContent=fp(p);npEl.className='stat '+pc(p);}
         set('news-wr','Win Rate: '+(nPnl.winRate||'—'));
 
-        // Events list
-        const allItems = [...events, ...fired.map(s=>({symbol:s,fired:true}))];
-        html('news-events-body', allItems.length
-            ? allItems.map(e=>{
-                const isFired = e.fired === true || fired.includes(e.symbol||e);
-                const sym = e.symbol || e;
-                const score = e.score || e.compositeScore || 0;
-                const headline = e.headline || e.title || '—';
-                const category = e.category || '—';
-                const sentiment = e.sentiment || '';
-                return `<div style="padding:7px;border-bottom:1px solid var(--border);border-left:3px solid ${isFired?'var(--green)':'var(--blue)'}">
-                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+        // ── Fired today panel ────────────────────────────────────────────────────
+        html('news-events-body', fired.length
+            ? fired.map(sym => {
+                const ev = events.find(e=>(e.symbol||e.tradingSymbol||e)===sym) || {};
+                const sc   = ev.score || ev.compositeScore || 0;
+                const cat  = ev.category || '—';
+                const sent = ev.sentiment || '';
+                const pv   = parseFloat(ev.netPnl || 0);
+                return `<div style="padding:8px;border-bottom:1px solid var(--border);border-left:3px solid var(--green)">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
                     <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
-                      <b>${sym}</b>
-                      ${score>0?'<span class="pill '+(score>=75?'pg':score>=65?'py':'pm')+'">Score '+score+'</span>':''}
-                      ${category!=='—'?'<span class="pill pb" style="font-size:9px">'+category+'</span>':''}
-                      ${sentiment?'<span class="pill '+(sentiment==='POSITIVE'?'pg':sentiment==='NEGATIVE'?'pr':'pm')+'" style="font-size:9px">'+sentiment+'</span>':''}
-                      ${isFired?'<span class="pill pg">✅ TRADED</span>':''}
+                      <b style="font-size:13px">${sym}</b>
+                      ${sc>0?`<span class="pill ${sc>=75?'pg':sc>=65?'py':'pm'}">Score ${sc}</span>`:''}
+                      ${cat!=='—'?`<span class="pill pb" style="font-size:9px">${cat}</span>`:''}
+                      ${sent?`<span class="pill ${sent==='POSITIVE'?'pg':sent==='NEGATIVE'?'pr':'pm'}" style="font-size:9px">${sent}</span>`:''}
+                      <span class="pill pg">✅ TRADED</span>
                     </div>
+                    ${pv!==0?`<span class="${pc(pv)}" style="font-weight:700">${fp(pv)}</span>`:''}
                   </div>
-                  <div style="font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${headline}</div>
+                  <div style="font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${ev.headline||ev.title||'—'}</div>
                 </div>`;
               }).join('')
-            : '<div class="sub">No news events ingested yet. Sources poll every 3–10 minutes.</div>'
+            : '<div class="sub">No signals fired today — waiting for EARNINGS/M&A with score ≥ 65</div>'
         );
+
+        // ── ALL SCORED ITEMS TABLE — mirrors ORB scored-setups ───────────────────
+        const allItemsMap = {};
+
+        // 1. recentEvents from backend
+        events.forEach(e => {
+            const sym = e.symbol || e.tradingSymbol || String(e) || '?';
+            allItemsMap[sym] = {
+                symbol:     sym,
+                score:      e.score || e.compositeScore || 0,
+                category:   e.category || '—',
+                sentiment:  e.sentiment || '—',
+                direction:  e.direction || e.tradeDirection || '—',
+                ageMin:     e.ageMinutes != null ? e.ageMinutes : (e.age || '—'),
+                source:     e.source || e.sourceName || '—',
+                headline:   e.headline || e.title || '—',
+                fired:      firedSet.has(sym),
+                aboveThresh:(e.score||e.compositeScore||0) >= 65,
+                skipReason: e.skipReason || e.directionReason || '',
+            };
+        });
+
+        // 2. scoredItems if backend exposes full list
+        scoredItems.forEach(e => {
+            const sym = e.symbol || e.tradingSymbol || '?';
+            if(!allItemsMap[sym]) allItemsMap[sym] = {
+                symbol: sym, score: e.score||e.compositeScore||0,
+                category: e.category||'—', sentiment: e.sentiment||'—',
+                direction: e.direction||'—', ageMin: e.ageMinutes!=null?e.ageMinutes:'—',
+                source: e.source||'—', headline: e.headline||e.title||'—',
+                fired: firedSet.has(sym), aboveThresh:(e.score||0)>=65,
+                skipReason: e.skipReason||'',
+            };
+        });
+
+        // 3. fired symbols not already in events
+        fired.forEach(sym => {
+            if(!allItemsMap[sym]) allItemsMap[sym] = {
+                symbol:sym, score:'—', category:'—', sentiment:'—',
+                direction:'—', ageMin:'—', source:'—', headline:'—',
+                fired:true, aboveThresh:true, skipReason:'',
+            };
+        });
+
+        const allItems = Object.values(allItemsMap)
+            .sort((a,b) => (parseFloat(b.score)||0) - (parseFloat(a.score)||0));
+
+        set('news-all-cnt', allItems.length);
+
+        if(!allItems.length){
+            q('news-all-empty').style.display = 'block';
+            q('news-all-tbl').style.display   = 'none';
+        } else {
+            q('news-all-empty').style.display = 'none';
+            q('news-all-tbl').style.display   = 'table';
+
+            html('news-all-body', allItems.map((item, idx) => {
+                const sc = parseFloat(item.score) || 0;
+                const isFired  = item.fired;
+                const sentCls  = item.sentiment==='POSITIVE'?'sg':item.sentiment==='NEGATIVE'?'sr':'sy';
+
+                // Score pill — mirrors ORB scorePill colours
+                const sPill = isFired
+                    ? `<span class="pill pg" style="font-weight:700">${sc||'—'}</span>`
+                    : sc >= 75 ? `<span class="pill pg">${sc}</span>`
+                    : sc >= 65 ? `<span class="pill py">${sc}</span>`
+                    : sc >= 50 ? `<span class="pill pm">${sc}</span>`
+                    : sc >  0  ? `<span class="pill pr">${sc}</span>`
+                    : `<span class="pill pm">—</span>`;
+
+                // Category pill
+                const catPill = item.category==='—' ? '—'
+                    : item.category.toUpperCase().includes('EARN') ? `<span class="pill pg" style="font-size:9px">${item.category}</span>`
+                    : item.category.toUpperCase().includes('M&A')  ? `<span class="pill pp" style="font-size:9px">${item.category}</span>`
+                    : `<span class="pill pb" style="font-size:9px">${item.category}</span>`;
+
+                // Status pill — TRADED / ELIGIBLE / SKIPPED / BELOW 65
+                const statusPill = isFired
+                    ? '<span class="pill pg">✅ TRADED</span>'
+                    : item.aboveThresh && !item.skipReason
+                        ? '<span class="pill py">⏳ ELIGIBLE</span>'
+                    : item.aboveThresh && item.skipReason
+                        ? `<span class="pill pm" title="${item.skipReason}">⛔ SKIPPED</span>`
+                    : `<span class="pill pr">BELOW 65</span>`;
+
+                const dirPill = item.direction==='LONG'  ? '<span class="pill pg">▲ LONG</span>'
+                              : item.direction==='SHORT' ? '<span class="pill pr">▼ SHORT</span>'
+                              : '<span class="pill pm">—</span>';
+
+                const rank = idx===0?'🥇':idx===1?'🥈':idx===2?'🥉':`<span class="rn rb" style="font-size:10px">${idx+1}</span>`;
+                const ageStr = item.ageMin!=='—' ? item.ageMin+'m' : '—';
+
+                return `<tr style="${isFired?'background:#0d1f0d':item.aboveThresh?'background:#1a1600':''}">
+                  <td>${rank}</td>
+                  <td><b>${item.symbol}</b></td>
+                  <td>${sPill}</td>
+                  <td>${catPill}</td>
+                  <td class="${sentCls}" style="font-size:11px">${item.sentiment}</td>
+                  <td>${dirPill}</td>
+                  <td style="color:var(--muted)">${ageStr}</td>
+                  <td style="font-size:10px;color:var(--muted)">${item.source}</td>
+                  <td style="font-size:10px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                      title="${item.headline}">${item.headline}</td>
+                  <td>${statusPill}</td>
+                </tr>`;
+            }).join(''));
+        }
     }
 
 

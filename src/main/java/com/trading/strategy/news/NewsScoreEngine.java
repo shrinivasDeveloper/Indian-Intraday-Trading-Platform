@@ -157,6 +157,82 @@ public class NewsScoreEngine {
         return scores;
     }
 
+    /**
+     * Score ALL symbols for dashboard visibility — no direction filter, no threshold.
+     * Returns EVERY scored stock including:
+     *   - Direction unclear (ASIANPAINT, BSE — shown as SKIPPED in dashboard)
+     *   - Below 65 threshold (TREJHARA — shown as BELOW 65)
+     *   - Above threshold and eligible
+     *
+     * CRITICAL DIFFERENCE from scoreAll():
+     *   scoreAll() drops items where direction is unclear (returns Optional.empty).
+     *   scoreAllForDashboard() keeps ALL items and sets direction=null for unclear.
+     *   This is what populates the "All Scored News Items" table in the News tab.
+     *
+     * Trading logic NEVER calls this method. Only DashboardController (via
+     * NewsTradingStrategy.getLastCycleScores()) reads these results.
+     */
+    public List<NewsScore> scoreAllForDashboard(List<NewsItem> allItems,
+                                                Set<String> tradableSymbols) {
+        Set<String> mentionedSymbols = allItems.stream()
+                .flatMap(item -> item.mentionedSymbols().stream())
+                .filter(tradableSymbols::contains)
+                .collect(Collectors.toSet());
+
+        List<NewsScore> results = new java.util.ArrayList<>();
+
+        for (String symbol : mentionedSymbols) {
+            List<NewsItem> symbolItems = allItems.stream()
+                    .filter(item -> item.mentionedSymbols().contains(symbol))
+                    .filter(item -> item.isActionable() || item.isActionableMonday())
+                    .sorted(Comparator.comparing(
+                            (NewsItem i) -> i.category().basePriority).reversed())
+                    .toList();
+
+            if (symbolItems.isEmpty()) continue;
+
+            NewsItem primary = symbolItems.get(0);
+
+            int categoryScore  = computeCategoryScore(primary.category());
+            int sentimentScore = computeSentimentScore(primary.sentiment());
+            int recencyScore   = computeRecencyScore(primary.ageMinutes());
+            int sourceScore    = SOURCE_WEIGHTS.getOrDefault(primary.source(), 5);
+            int keywordScore   = primary.keywordWeight() / 10;
+            int total = categoryScore + sentimentScore + recencyScore
+                    + sourceScore + keywordScore;
+
+            boolean corroborated = isCorroborated(symbolItems);
+            if (corroborated) total += 5;
+            if (primary.category() == NewsItem.NewsCategory.EARNINGS) total += 3;
+            if (primary.sentiment() == NewsItem.Sentiment.STRONGLY_POSITIVE ||
+                    primary.sentiment() == NewsItem.Sentiment.STRONGLY_NEGATIVE) total += 2;
+            total = Math.min(100, total);
+
+            // Direction: null if unclear — dashboard shows "SKIPPED (direction unclear)"
+            Optional<TradeDirection> dir = determineDirection(primary, symbolItems);
+
+            String sectorName = sectorClassify.getSector(symbol);
+
+            results.add(new NewsScore(
+                    symbol, sectorName, total,
+                    categoryScore, sentimentScore, recencyScore, sourceScore, keywordScore,
+                    dir.orElse(null),          // null = direction unclear
+                    primary.category(),
+                    primary.sentiment(),
+                    symbolItems,
+                    primary.headline(),
+                    primary.publishedAt(),
+                    primary.ageMinutes(),
+                    corroborated
+            ));
+        }
+
+        results.sort(Comparator.comparingInt(NewsScore::totalScore).reversed());
+        log.debug("[NEWS-SCORE] Dashboard: {} items scored (all directions, no threshold)",
+                results.size());
+        return results;
+    }
+
     // ── Score components ──────────────────────────────────────────────────────
 
     private int computeCategoryScore(NewsItem.NewsCategory category) {

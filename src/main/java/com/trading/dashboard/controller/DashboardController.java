@@ -23,6 +23,7 @@ import com.trading.strategy.channel.SmartChannelSignalHandler;
 import com.trading.strategy.highrr.HighRRStrategyEngine;
 import com.trading.strategy.highrr.HighRRTradeManager;
 import com.trading.strategy.orb.OrbDataService;
+import com.trading.strategy.news.NewsScore;
 import com.trading.strategy.news.NewsTradingStrategy;
 import com.trading.strategy.smc.BestTradeStrategy;
 import com.trading.strategy.orb.OrbStrategyEngine;
@@ -1304,6 +1305,36 @@ public class DashboardController {
                 events.add(ev);
             }
             out.put("recentEvents", events);
+
+            // ── scoredItems: ALL scored stocks from last cycle ──────────────────
+            // This powers the "All Scored News Items" table in the dashboard News tab.
+            // Includes every stock above threshold — traded, eligible, skipped, and below.
+            // The dashboard renders TRADED (green), ELIGIBLE (gold), SKIPPED, BELOW 65.
+            List<Map<String, Object>> scoredList = new ArrayList<>();
+            for (NewsScore ns : newsTradingStrategy.getLastCycleScores()) {
+                Map<String, Object> si = new LinkedHashMap<>();
+                si.put("symbol",     ns.symbol());
+                si.put("score",      ns.totalScore());
+                si.put("category",   ns.primaryCategory() != null ? ns.primaryCategory().name() : "—");
+                si.put("sentiment",  ns.dominantSentiment() != null ? ns.dominantSentiment().name() : "—");
+                // direction is null when unclear — dashboard shows SKIPPED row
+                si.put("direction",  ns.direction() != null ? ns.direction().name() : "—");
+                si.put("ageMinutes", ns.ageMinutes());
+                si.put("source",     ns.sourceArticles() != null && !ns.sourceArticles().isEmpty()
+                        ? ns.sourceArticles().get(0).source() : "—");
+                si.put("headline",   ns.primaryHeadline() != null
+                        ? (ns.primaryHeadline().length() > 120
+                        ? ns.primaryHeadline().substring(0, 120) + "…"
+                        : ns.primaryHeadline())
+                        : "—");
+                // skipReason: shown as tooltip on SKIPPED pill in dashboard
+                String skipReason = "";
+                if (ns.direction() == null) skipReason = "direction unclear";
+                else if (ns.totalScore() < 65) skipReason = "score " + ns.totalScore() + " below 65";
+                si.put("skipReason", skipReason);
+                scoredList.add(si);
+            }
+            out.put("scoredItems", scoredList);
         } catch (Exception e) {
             log.warn("[DASHBOARD] buildNewsCatalystSummary failed: {}", e.getMessage());
             out.put("error", e.getMessage());

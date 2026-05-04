@@ -1,6 +1,7 @@
 package com.trading.strategy.highrr;
 
 import com.trading.domain.enums.TradeDirection;
+import com.trading.events.CandleCompleteEvent;
 import com.trading.events.TickReceivedEvent;
 import com.trading.papertrading.model.PaperAccount;
 import com.trading.risk.service.RiskManagementService;
@@ -49,7 +50,15 @@ public class HighRRTradeManager {
     private static final String   STRATEGY      = "HIGH_RR_INTRADAY_V1";
     private static final double   EXIT_SLIP     = 0.0003;  // 0.03% exit slippage
     private static final LocalTime EOD_STOP     = LocalTime.of(15, 0); // 3:00 PM EOD stop
-    private static final double   TRAIL_STEP_PCT = 0.005;  // trailing SL step after T1
+    // ── Trailing SL — swing-based (replaces 0.5% fixed trail) ─────────────────
+    // OLD: TRAIL_STEP_PCT=0.005 — exited ADANIGREEN at 1211 (1.22R) on micro-bounce
+    //      when T2 was at 1190 (2.5R+). Fixed % fires on any 0.5% tick noise after T1.
+    // NEW: Trail = recent candle swing low/high ± 0.2% buffer.
+    //   LONG:  trail = min(last 3 candle lows)  × 0.998
+    //   SHORT: trail = max(last 3 candle highs) × 1.002
+    //   Updated on each completed candle (not every tick) — survives micro-bounces.
+    private static final int    SWING_LOOKBACK_CANDLES = 3;    // candles in swing window
+    private static final double SWING_TRAIL_BUFFER_PCT = 0.002; // 0.2% noise buffer
 
     // ── Dependencies ────────────────────────────────────────────────────────
     private final PaperAccount          paperAccount;
@@ -113,6 +122,52 @@ public class HighRRTradeManager {
     // Tracks which symbols have hit T1 (partial exit done, trailing SL active)
     private final Map<String, Double> trailingSl = new ConcurrentHashMap<>();
 
+    // Recent candle low/high history for swing-based trailing.
+    // LONG: stores candle lows. SHORT: stores candle highs.
+    // Updated on each completed 1-min candle while trailing is active.
+    private final Map<String, Deque<Double>> swingPriceHistory = new ConcurrentHashMap<>();
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // CANDLE LISTENER — feeds swing price history for swing-based trailing
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @EventListener
+    @Async("tradingExecutor")
+    public void onCandle(CandleCompleteEvent event) {
+        if (activeTrades.isEmpty() || trailingSl.isEmpty()) return;
+        String symbol = event.getCandle().getTradingSymbol();
+        if (symbol == null || !trailingSl.containsKey(symbol)) return;
+        HighRRTrade trade = activeTrades.get(symbol);
+        if (trade == null) return;
+        if (!"minute".equals(event.getCandle().getTimeframe())) return;
+
+        boolean isLong = trade.direction() == TradeDirection.LONG;
+        double swingPrice = isLong
+                ? event.getCandle().getLow().doubleValue()
+                : event.getCandle().getHigh().doubleValue();
+
+        Deque<Double> history = swingPriceHistory.computeIfAbsent(
+                symbol, k -> new java.util.ArrayDeque<>());
+        history.addFirst(swingPrice);
+        while (history.size() > SWING_LOOKBACK_CANDLES)
+            ((java.util.ArrayDeque<Double>) history).removeLast();
+
+        // Recompute swing trail after new candle data
+        double swingExtreme = isLong
+                ? history.stream().mapToDouble(Double::doubleValue).min().orElse(0)
+                : history.stream().mapToDouble(Double::doubleValue).max().orElse(0);
+        if (swingExtreme <= 0) return;
+        double newTrail = isLong
+                ? swingExtreme * (1.0 - SWING_TRAIL_BUFFER_PCT)
+                : swingExtreme * (1.0 + SWING_TRAIL_BUFFER_PCT);
+        Double current = trailingSl.get(symbol);
+        if (current == null) return;
+        if (isLong  && newTrail > current) trailingSl.put(symbol, newTrail);
+        if (!isLong && newTrail < current) trailingSl.put(symbol, newTrail);
+        log.debug("[HIGHRR-MGR] Swing trail updated: {} {} trail={}", symbol,
+                isLong?"LONG":"SHORT", String.format("%.2f", trailingSl.getOrDefault(symbol, 0.0)));
+    }
+
     @EventListener
     @Async("tickExecutor")
     public void onTick(TickReceivedEvent tick) {
@@ -147,31 +202,21 @@ public class HighRRTradeManager {
         if (activeTsl != null) {
             // Update trail level as price moves in our favour
             if (isLong) {
-                double newTsl = ltp * (1.0 - TRAIL_STEP_PCT);
-                if (newTsl > activeTsl) {
-                    trailingSl.put(symbol, newTsl);
-                    activeTsl = newTsl;
-                }
-                // Check if trail SL hit
+                // Swing trail: level updated by onCandle(). On tick: only CHECK.
                 if (ltp <= activeTsl) {
-                    log.info("[HIGHRR-MGR] 📈 Trailing SL hit (LONG): {} ltp={} trail={}",
+                    log.info("[HIGHRR-MGR] 📈 Swing Trail SL hit (LONG): {} ltp={} trail={}",
                             symbol, ltp, String.format("%.2f", activeTsl));
                     exitTrade(trade, ltp, "TRAIL_SL");
                     return;
                 }
-                // T2 target — full exit
                 if (ltp >= t2) {
                     log.info("[HIGHRR-MGR] 🎯 T2 hit (LONG): {} ltp={} t2={}", symbol, ltp, t2);
                     exitTrade(trade, ltp, "TARGET_2");
                 }
             } else {
-                double newTsl = ltp * (1.0 + TRAIL_STEP_PCT);
-                if (newTsl < activeTsl) {
-                    trailingSl.put(symbol, newTsl);
-                    activeTsl = newTsl;
-                }
+                // Swing trail: level updated by onCandle(). On tick: only CHECK.
                 if (ltp >= activeTsl) {
-                    log.info("[HIGHRR-MGR] 📉 Trailing SL hit (SHORT): {} ltp={} trail={}",
+                    log.info("[HIGHRR-MGR] 📉 Swing Trail SL hit (SHORT): {} ltp={} trail={}",
                             symbol, ltp, String.format("%.2f", activeTsl));
                     exitTrade(trade, ltp, "TRAIL_SL");
                     return;
@@ -193,11 +238,12 @@ public class HighRRTradeManager {
                 log.info("[HIGHRR-MGR] 🎯 T2 hit (LONG): {} ltp={} t2={}", symbol, ltp, t2);
                 exitTrade(trade, ltp, "TARGET_2");
             } else if (ltp >= t1) {
-                // T1 hit: activate trailing SL — do NOT exit yet, let it run to T2
-                // Trail starts at entry price (breakeven) + TRAIL_STEP_PCT
-                double initialTrail = trade.fillPrice().doubleValue() * (1.0 + TRAIL_STEP_PCT);
+                // T1 hit: activate swing trailing SL — do NOT exit yet, let it run to T2
+                // Swing seed: start at fill price - buffer (breakeven protection)
+                double initialTrail = trade.fillPrice().doubleValue() * (1.0 - SWING_TRAIL_BUFFER_PCT);
                 trailingSl.put(symbol, initialTrail);
-                log.info("[HIGHRR-MGR] ✅ T1 hit (LONG): {} ltp={} t1={} — trailing SL activated at {}",
+                swingPriceHistory.computeIfAbsent(symbol, k -> new java.util.ArrayDeque<>()).addFirst(ltp);
+                log.info("[HIGHRR-MGR] ✅ T1 hit (LONG): {} ltp={} t1={} — swing trail activated at {}",
                         symbol, ltp, t1, String.format("%.2f", initialTrail));
             }
         } else {
@@ -209,9 +255,11 @@ public class HighRRTradeManager {
                 exitTrade(trade, ltp, "TARGET_2");
             } else if (ltp <= t1) {
                 // T1 hit: activate trailing SL
-                double initialTrail = trade.fillPrice().doubleValue() * (1.0 - TRAIL_STEP_PCT);
+                // Swing seed: start at fill price + buffer
+                double initialTrail = trade.fillPrice().doubleValue() * (1.0 + SWING_TRAIL_BUFFER_PCT);
                 trailingSl.put(symbol, initialTrail);
-                log.info("[HIGHRR-MGR] ✅ T1 hit (SHORT): {} ltp={} t1={} — trailing SL activated at {}",
+                swingPriceHistory.computeIfAbsent(symbol, k -> new java.util.ArrayDeque<>()).addFirst(ltp);
+                log.info("[HIGHRR-MGR] ✅ T1 hit (SHORT): {} ltp={} t1={} — swing trail activated at {}",
                         symbol, ltp, t1, String.format("%.2f", initialTrail));
             }
         }
@@ -255,6 +303,7 @@ public class HighRRTradeManager {
 
         // Clear trailing SL state for this symbol
         trailingSl.remove(symbol);
+        swingPriceHistory.remove(symbol); // clear swing history on exit
 
         // Apply P&L to paper account
         paperAccount.applyPnl(netPnl);
@@ -348,8 +397,9 @@ public class HighRRTradeManager {
             forceCloseAll("DAILY_RESET");
         }
         trailingSl.clear();
+        swingPriceHistory.clear();
         closedTrades.clear();
-        log.info("[HIGHRR-MGR] Daily reset complete — trailing SL map and closed trade history cleared");
+        log.info("[HIGHRR-MGR] Daily reset complete — trailing SL, swing history and closed trade history cleared");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
