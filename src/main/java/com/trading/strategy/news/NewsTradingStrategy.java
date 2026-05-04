@@ -11,6 +11,7 @@ import com.trading.risk.service.CircuitBreakerService;
 import com.trading.risk.service.RiskManagementService;
 import com.trading.sector.service.SectorClassificationService;
 import com.trading.sector.service.SectorStrengthService;
+import com.trading.strategy.orb.OrbDataService; // for live tick prices
 import com.zerodhatech.models.Instrument;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -54,7 +55,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *     SL:     entry ± 0.8% (news trades need room — volatile after news)
  *     T1:     entry ± 1.6% (2:1 RR)
  *     T2:     entry ± 2.4% (3:1 RR)
- *   Time stop: 20 minutes (news impact fades quickly)
+ *   Time stop: DISABLED — exit on SL or T1/T2 target only
  *
  * SLOT BUDGET:
  *   NEWS_CATALYST_V1 gets max 2 slots per session.
@@ -79,7 +80,12 @@ public class NewsTradingStrategy {
 
     // ── Trade sizing for news catalyst ────────────────────────────────────────
     /** SL distance as % of entry price */
-    private static final double SL_PCT          = 0.008;  // 0.8%
+    // SL_PCT removed — SL is now dynamic based on news category.
+    // EARNINGS / M&A: 1.5% — these events cause 2-4% intraday swings
+    //                         0.8% SL gets hit by normal opening volatility
+    // All other news:  0.8% — sector/RBI/breaking news = tighter control
+    private static final double SL_PCT_EARNINGS = 0.015; // 1.5% for earnings/M&A
+    private static final double SL_PCT_DEFAULT  = 0.008; // 0.8% for other news
     /** T1 as multiple of risk (2R) */
     private static final double T1_RR           = 2.0;
     /** T2 as multiple of risk (3R) */
@@ -87,8 +93,11 @@ public class NewsTradingStrategy {
     /** Minimum ATR for market to be tradeable */
     // FIXED: was 0.30 → now 0.20 (news is event-driven, not range-dependent)
     private static final double MIN_ATR_PCT     = 0.20;
-    /** Time stop — news impact fades in ~20 minutes */
-    private static final int    TIME_STOP_MIN   = 20;
+    // TIME_STOP_MIN = 0 → DISABLED.
+    // PaperTradeExecutionService converts 0 → 480min sentinel (beyond market close).
+    // Trade exits ONLY on: SL hit, T1 hit, T2 hit, or 3:00 PM EOD stop.
+    // No automatic time-based exit — price has time to reach the target.
+    private static final int    TIME_STOP_MIN   = 0;
 
     // ── Dependencies ──────────────────────────────────────────────────────────
     private final NewsIngestionService      ingestionService;
@@ -103,6 +112,10 @@ public class NewsTradingStrategy {
     private final RiskManagementService    riskManagement;
     private final SectorClassificationService sectorClassify;
     private final SectorStrengthService    sectorStrength;
+    // Live tick price source — OrbDataService.livePrices is updated on every tick
+    // for all 295 subscribed symbols. This is the correct source for entry price.
+    // Zero overhead — pure ConcurrentHashMap read.
+    private final OrbDataService           orbDataService;
 
     // ── Config ────────────────────────────────────────────────────────────────
     @Value("${strategy.news.enabled:true}")
@@ -313,7 +326,11 @@ public class NewsTradingStrategy {
         boolean isBuy = score.direction() == TradeDirection.LONG;
 
         // Compute SL and targets
-        BigDecimal risk   = entryPrice.multiply(BigDecimal.valueOf(SL_PCT))
+        // Dynamic SL: EARNINGS and M&A need wider SL to survive opening volatility
+        boolean isHighVolCategory = score.primaryCategory() == NewsItem.NewsCategory.EARNINGS
+                || score.primaryCategory() == NewsItem.NewsCategory.MERGER_ACQUISITION;
+        double slPct = isHighVolCategory ? SL_PCT_EARNINGS : SL_PCT_DEFAULT;
+        BigDecimal risk = entryPrice.multiply(BigDecimal.valueOf(slPct))
                 .setScale(2, RoundingMode.HALF_UP);
         BigDecimal stopLoss = isBuy
                 ? entryPrice.subtract(risk).setScale(2, RoundingMode.FLOOR)
@@ -353,9 +370,11 @@ public class NewsTradingStrategy {
         int scoreKeyword   = score.keywordScore();
         int totalScore     = score.totalScore();
 
-        log.info("[NEWS] 🚀 SIGNAL: {} | dir={} | entry={} | sl={} | T1={} | T2={} | " +
+        log.info("[NEWS] 🚀 SIGNAL: {} | dir={} | entry={} | sl={} ({}%) | T1={} | T2={} | " +
                         "score={} | category={} | sentiment={} | age={}min | headline: \"{}\"",
-                symbol, score.direction(), entryPrice, stopLoss, target1, target2,
+                symbol, score.direction(), entryPrice, stopLoss,
+                String.format("%.1f", slPct * 100),
+                target1, target2,
                 totalScore, score.primaryCategory(), score.dominantSentiment(),
                 score.ageMinutes(), truncate(score.primaryHeadline(), 60));
 
@@ -440,11 +459,39 @@ public class NewsTradingStrategy {
      * PaperTradeExecutionService will use LTP from the tick stream at fill time.
      */
     private BigDecimal resolveCurrentPrice(String symbol, Instrument inst) {
+        // FIX: Use live tick price from OrbDataService.livePrices.
+        //
+        // WHY inst.getLast_price() WAS WRONG:
+        //   Zerodha's getInstruments() API returns an instrument file downloaded at
+        //   app startup (~9:00 AM). The last_price field = yesterday's closing price.
+        //   At 9:48 AM on earnings day, HDFCBANK inst.last_price = ₹1,820 (yesterday's close)
+        //   but the live market price = ₹1,840 (already moved +1.1% on earnings).
+        //   Entry at ₹1,820, SL at ₹1,805, T1 at ₹1,849 — all anchored to stale price.
+        //   PaperTradeExecutionService then adds 0.05% slippage on top of stale price.
+        //   Result: the trade is simulated at a price that no longer exists in the market.
+        //
+        // FIX: OrbDataService.livePrices is a ConcurrentHashMap updated on EVERY tick
+        //   for all 295 subscribed symbols via onTick(TickReceivedEvent).
+        //   At 9:48 AM, livePrices.get("HDFCBANK") = ₹1,840 — the actual current price.
+        //   Zero I/O, zero blocking — pure in-memory read.
+        //
+        // FALLBACK: If livePrices has no entry (symbol not yet subscribed or before 9:15),
+        //   fall back to inst.getLast_price(). This preserves existing behaviour
+        //   for edge cases without breaking anything.
+
+        // Priority 1: live tick price (accurate, always current)
+        double livePrice = orbDataService.getLivePrice(symbol);
+        if (livePrice > 0) {
+            return BigDecimal.valueOf(livePrice).setScale(2, RoundingMode.HALF_UP);
+        }
+
+        // Priority 2: instrument file price (stale fallback — only if live unavailable)
         try {
-            // Zerodha Instrument field is last_price — getter is getLast_price()
-            double ltp = inst.getLast_price();
-            if (ltp > 0) {
-                return BigDecimal.valueOf(ltp).setScale(2, RoundingMode.HALF_UP);
+            double instPrice = inst.getLast_price();
+            if (instPrice > 0) {
+                log.debug("[NEWS] {} using stale instrument price ₹{} (live price unavailable)",
+                        symbol, String.format("%.2f", instPrice));
+                return BigDecimal.valueOf(instPrice).setScale(2, RoundingMode.HALF_UP);
             }
         } catch (Exception ignored) {}
         return null;

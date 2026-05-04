@@ -462,55 +462,102 @@ public class OrbDataService {
         orbLocked = true;
         log.info("[ORB] ORB window closed. Scoring {} candidates...", orbDataMap.size());
 
-        int valid = 0;
+        // ── FILTER ORDER (your requirement — candle quality FIRST) ─────────────
+        // Step 1: Range valid           — basic sanity check
+        // Step 2: High Wave candle      — HARD FILTER first, most important
+        //                                 Non-HW stocks rejected immediately
+        // Step 3: RVOL ≥ 1.0           — volume confirmation AFTER candle passes
+        // Step 4: Score ≥ MIN_ORB_SCORE — quality ranking
+        //
+        // WHY THIS ORDER:
+        //   High Wave is the PRIMARY edge. If the 15-min ORB candle is NOT a
+        //   High Wave (body 20-25%, both wicks ≥30%), there is no indecision
+        //   at a key level — the setup has no structural basis. RVOL and score
+        //   are secondary confirmations. Checking candle first also means RVOL
+        //   failures on Day-1 (no baseline) only affect HW-qualified stocks,
+        //   not all 11 shortlisted stocks blindly.
+        // ─────────────────────────────────────────────────────────────────────
+
+        int valid       = 0;
+        int rejRange    = 0;
+        int rejNoHW     = 0;
+        int rejRvol     = 0;
+        int rejScore    = 0;
+
         for (OrbData od : orbDataMap.values()) {
+
+            // ── STEP 1: Range sanity ─────────────────────────────────────────
             if (!od.isRangeValid()) {
                 od.valid = false;
-                log.debug("[ORB] {} rejected: invalid range (H={} L={})", od.symbol, od.orbHigh, od.orbLow);
+                rejRange++;
+                log.debug("[ORB] {} ❌ RANGE: invalid (H={} L={})",
+                        od.symbol, od.orbHigh, od.orbLow);
                 continue;
             }
 
-            // Compute High Wave quality from real 15-min OHLC at lock time.
-            // orbOpen = first tick at 9:15, orbHigh/Low = tick extremes, orbClose = last tick.
-            // This gives the TRUE body/wick breakdown of the 15-min ORB candle.
+            // ── STEP 2: High Wave candle — HARD FILTER ───────────────────────
+            // Compute from real 15-min OHLC: orbOpen/High/Low/Close built from ticks.
             od.computeHighWaveQuality();
-            log.debug("[ORB] {} ORB candle: O={} H={} L={} C={} | HW={} body={:.1f}% upperW={:.1f}% lowerW={:.1f}%"
-                            .replace("{:.1f}", "{}"),
+
+            // Always log the candle shape so you can see what formed today
+            log.info("[ORB] {} candle: O={} H={} L={} C={} | HW={} body={}% upperW={}% lowerW={}%",
                     od.symbol,
                     String.format("%.2f", od.orbOpen),
                     String.format("%.2f", od.orbHigh),
                     String.format("%.2f", od.orbLow),
                     String.format("%.2f", od.orbClose),
-                    od.isHighWaveCandle,
-                    String.format("%.1f", od.highWaveBodyPct * 100),
+                    od.isHighWaveCandle ? "✅" : "❌",
+                    String.format("%.1f", od.highWaveBodyPct   * 100),
                     String.format("%.1f", od.highWaveUpperWick * 100),
                     String.format("%.1f", od.highWaveLowerWick * 100));
 
-            double rvol = rvolService.getRvolNow(od.symbol, od.latestVolume);
-            od.rvol = rvol;
-            if (rvol < MIN_RVOL) {
-                log.debug("[ORB] {} rejected: RVOL {} < min {}", od.symbol, rvol, MIN_RVOL);
+            if (!od.isHighWaveCandle) {
                 od.valid = false;
+                rejNoHW++;
+                // Not a High Wave — no indecision at key level — skip
+                // (body too large = trend candle, or wicks not balanced)
                 continue;
             }
 
+            // ── STEP 3: RVOL ≥ 1.0 ──────────────────────────────────────────
+            double rvol = rvolService.getRvolNow(od.symbol, od.latestVolume);
+            od.rvol = rvol;
+            if (rvol < MIN_RVOL) {
+                od.valid = false;
+                rejRvol++;
+                log.info("[ORB] {} ❌ RVOL: {} < {} (HW passed — volume weak)",
+                        od.symbol, String.format("%.2f", rvol), MIN_RVOL);
+                continue;
+            }
+
+            // ── STEP 4: Score ────────────────────────────────────────────────
             int score = computeScore(od, rvol);
             od.score = score;
+
+            if (score < MIN_ORB_SCORE) {
+                od.valid = false;
+                rejScore++;
+                log.info("[ORB] {} ❌ SCORE: {} < {} (HW✅ RVOL✅ but score too low)",
+                        od.symbol, score, MIN_ORB_SCORE);
+                continue;
+            }
+
             od.valid = true;
             valid++;
-
             persistOrbRange(od);
             persistScore(od.symbol, score);
-
-            log.debug("[ORB] {} | H={} L={} gap={}% rvol={} score={}",
+            log.info("[ORB] {} ✅ PASSED: H={} L={} rvol={} score={} gap={}%",
                     od.symbol,
                     String.format("%.2f", od.orbHigh),
                     String.format("%.2f", od.orbLow),
-                    od.gapPct * 100, rvol, score);
+                    String.format("%.2f", rvol),
+                    score,
+                    String.format("%.2f", od.gapPct * 100));
         }
 
         validOrbCount.set(valid);
-        log.info("[ORB] {} valid setups after scoring", valid);
+        log.info("[ORB] 📊 Results: total={} | ❌range={} ❌noHW={} ❌rvol={} ❌score={} | ✅valid={}",
+                orbDataMap.size(), rejRange, rejNoHW, rejRvol, rejScore, valid);
         selectTop10();
     }
 

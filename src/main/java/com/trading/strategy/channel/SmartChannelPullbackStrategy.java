@@ -14,6 +14,7 @@ import com.trading.papertrading.model.PaperAccount;
 import com.trading.position.service.PositionSizerService;
 import com.trading.risk.service.CircuitBreakerService;
 import com.trading.sector.service.SectorClassificationService;
+import com.trading.marketdata.service.InstrumentCacheService;
 import com.trading.sector.service.SectorStrengthService;
 import com.trading.strategy.channel.ChannelDetectionService.ChannelResult;
 import com.trading.strategy.channel.ChannelDetectionService.ChannelType;
@@ -185,6 +186,7 @@ public class SmartChannelPullbackStrategy {
     private final PositionSizerService        positionSizer;
     private final PaperAccount               paperAccount;
     private final ApplicationEventPublisher  publisher;
+    private final InstrumentCacheService     instrumentCache;
 
     // ── Config from application.yml (strategy.smart-channel-pullback.*) ───────
     @Value("${strategy.smart-channel-pullback.enabled:true}")
@@ -327,6 +329,27 @@ public class SmartChannelPullbackStrategy {
         if (currentWindow == TimeWindow.OBSERVATION) {
             log.debug("[SCPS] OBSERVATION window — skipping evaluation");
             return;
+        }
+
+        // ── SIDEWAYS MARKET BLOCK ─────────────────────────────────────────────
+        // CHOLAFIN SHORT (score=52) and ORIENTCEM LONG (score=44) both fired in
+        // SIDEWAYS market on 04-May-2026 — both SL hit within minutes.
+        // In SIDEWAYS: no directional trend, channel support/resistance breaks
+        // constantly. HighRR already blocks in SIDEWAYS. SCPS must do the same.
+        //
+        // Exception: strong market pressure (ratio >= 1.5) can create valid
+        // breakouts from channel levels even without a trend.
+        MarketDirectionService.MarketDirectionResult marketDir = marketDirection.getCurrentDirection();
+        boolean isSideways = marketDir.direction() == MarketDirectionService.Direction.SIDEWAYS;
+        if (isSideways) {
+            boolean strongPressure = pressureOk && pressure.ratio() >= 1.5;
+            if (!strongPressure) {
+                log.debug("[SCPS] SIDEWAYS market — skipping (pressure.ratio={} pressureOk={}).",
+                        String.format("%.2f", pressure.ratio()), pressureOk);
+                return;
+            }
+            log.info("[SCPS] SIDEWAYS but strong pressure ratio={} — proceeding.",
+                    String.format("%.2f", pressure.ratio()));
         }
 
         // During LUNCH, require HIGH_QUALITY channels only (stricter filter)
@@ -558,9 +581,14 @@ public class SmartChannelPullbackStrategy {
         }
 
         // ── Resolve instrument token ──────────────────────────────────────────
-        // ChannelResult does not expose instrumentToken — use 0L (safe for PAPER mode;
-        // live routing uses symbol name lookup at order placement time).
+        // FIX: Resolve actual instrument token from InstrumentCacheService.
+        // Was hardcoded to 0L which shows as instrumentToken=0 in dashboard.
+        // Token needed for correct position monitoring (live) and clean logging (paper).
         long instrumentToken = 0L;
+        try {
+            Long resolved = instrumentCache.getToken("NSE", symbol);
+            if (resolved != null && resolved > 0) instrumentToken = resolved;
+        } catch (Exception ignored) { }
 
         // ── Build probability score ───────────────────────────────────────────
         int scoreRvol    = rvol >= 2.0 ? 25 : rvol >= 1.5 ? 18 : rvol >= 1.1 ? 10 : 5;
@@ -578,6 +606,19 @@ public class SmartChannelPullbackStrategy {
                 : (resistancePrice - closePrice) / channelWidth;
         String pullbackStrength = rangePos <= 0.15 ? "BEST"
                 : rangePos <= 0.30 ? "GOOD" : "MODERATE";
+
+        // ── Minimum score gate ────────────────────────────────────────────
+        // CHOLAFIN (score=52) and ORIENTCEM (score=44) both fired in SIDEWAYS
+        // on 04-May-2026 — both hit SL immediately. Score floor prevents weak setups.
+        // LUNCH window: 65 (stricter). Normal session: 55.
+        int minScore = lunchWindow ? 65 : 55;
+        if (totalScore < minScore) {
+            log.info("[SCPS] {} BLOCKED — score {} < {} (window={} HQ={} rvol={})",
+                    symbol, totalScore, minScore,
+                    timingService.getCurrentWindow(), isHighQuality,
+                    String.format("%.2f", rvol));
+            return false;
+        }
 
         // ── Fire signal ───────────────────────────────────────────────────────
         log.info("[SCPS] 🚀 SIGNAL: {} | {} | entry={} | sl={} | T1={} | T2={} | " +

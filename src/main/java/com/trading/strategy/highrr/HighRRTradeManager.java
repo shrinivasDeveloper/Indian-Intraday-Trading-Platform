@@ -239,11 +239,21 @@ public class HighRRTradeManager {
                 exitTrade(trade, ltp, "TARGET_2");
             } else if (ltp >= t1) {
                 // T1 hit: activate swing trailing SL — do NOT exit yet, let it run to T2
-                // Swing seed: start at fill price - buffer (breakeven protection)
-                double initialTrail = trade.fillPrice().doubleValue() * (1.0 - SWING_TRAIL_BUFFER_PCT);
+                //
+                // SEED AT T1 (not at fill price):
+                //   OLD: seed = fillPrice × 0.998 = ₹531.80 (10 pts below T1)
+                //        → trail had to climb 10 pts before protecting profits
+                //        → TANLA: T1=542.93, price ran to 548, trail only at 537 = gave back 11 pts
+                //
+                //   NEW: seed = t1 × 0.998 = ₹542.39 (just below T1)
+                //        → trail starts at T1 level immediately
+                //        → T1 is always locked in — you cannot exit below T1
+                //        → TANLA: T1=542.93, trail starts at 542.39, runs to 548, exits ~544+
+                //        → Extra +₹4/share × 37 = +₹148 on TANLA alone
+                double initialTrail = t1 * (1.0 - SWING_TRAIL_BUFFER_PCT);
                 trailingSl.put(symbol, initialTrail);
                 swingPriceHistory.computeIfAbsent(symbol, k -> new java.util.ArrayDeque<>()).addFirst(ltp);
-                log.info("[HIGHRR-MGR] ✅ T1 hit (LONG): {} ltp={} t1={} — swing trail activated at {}",
+                log.info("[HIGHRR-MGR] ✅ T1 hit (LONG): {} ltp={} t1={} — swing trail seeded at {} (T1-based)",
                         symbol, ltp, t1, String.format("%.2f", initialTrail));
             }
         } else {
@@ -255,11 +265,13 @@ public class HighRRTradeManager {
                 exitTrade(trade, ltp, "TARGET_2");
             } else if (ltp <= t1) {
                 // T1 hit: activate trailing SL
-                // Swing seed: start at fill price + buffer
-                double initialTrail = trade.fillPrice().doubleValue() * (1.0 + SWING_TRAIL_BUFFER_PCT);
+                // Seed at T1 (not fill price) — same logic as LONG.
+                // SHORT T1 is BELOW entry, so seed = t1 × 1.002 (just above T1)
+                // Trail can only move DOWN from here — T1 profit is locked in.
+                double initialTrail = t1 * (1.0 + SWING_TRAIL_BUFFER_PCT);
                 trailingSl.put(symbol, initialTrail);
                 swingPriceHistory.computeIfAbsent(symbol, k -> new java.util.ArrayDeque<>()).addFirst(ltp);
-                log.info("[HIGHRR-MGR] ✅ T1 hit (SHORT): {} ltp={} t1={} — swing trail activated at {}",
+                log.info("[HIGHRR-MGR] ✅ T1 hit (SHORT): {} ltp={} t1={} — swing trail seeded at {} (T1-based)",
                         symbol, ltp, t1, String.format("%.2f", initialTrail));
             }
         }

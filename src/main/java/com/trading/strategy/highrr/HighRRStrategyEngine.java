@@ -8,6 +8,7 @@ import com.trading.marketdata.service.MarketTimingService;
 import com.trading.papertrading.model.PaperAccount;
 import com.trading.position.service.PositionSizerService;
 import com.trading.risk.service.CircuitBreakerService;
+import com.trading.risk.service.RiskManagementService;
 import com.trading.regime.service.MarketDirectionService;
 import com.trading.strategy.highrr.HighRRScannerService.SymbolState;
 import com.trading.strategy.highrr.HighRRStructureService;
@@ -73,8 +74,7 @@ public class HighRRStrategyEngine {
     // Indian Nifty 15-min ATR of 0.20% = ~48 point candle range. Individual stocks still move 3-5x Nifty.
     // Ultra-frozen days (ATR < 0.10% like Apr-21) are still blocked. Apr-22/23 now allowed.
 
-    // ── Limits ──────────────────────────────────────────────────────────────
-    private static final int    MAX_TRADES_PER_DAY = 2;
+    // MAX_TRADES_PER_DAY removed — governed by portfolio risk gates
     private static final int    TOP_N_CANDIDATES   = 2;
     private static final double MIN_RR_RATIO       = 2.0;
     /** Minimum SL distance as % of entry price.
@@ -117,6 +117,7 @@ public class HighRRStrategyEngine {
     private final MarketDirectionService     marketDirection; // Gate 1: ATR + regime
     private final MarketTimingService        timingService;   // Gate 2: lunch window
     private final InstrumentCacheService     instrumentCache;  // FIX 1: added for token resolution
+    private final RiskManagementService      riskManagement;   // for getDailyPnl() in portfolio risk gates
     private final HighRRStructureService     structureService; // Gate 5: S/R structural levels
 
     @Value("${trading.mode:PAPER}")
@@ -137,8 +138,16 @@ public class HighRRStrategyEngine {
     @Value("${strategy.high-rr.risk-per-trade:0.01}")
     private double riskPerTrade;
 
+    // ── Portfolio risk constants ─────────────────────────────────────────────
+    private static final double DAILY_LOSS_LIMIT_PCT    = 0.04; // -4%
+    private static final double PROFIT_LOCK_TRIGGER_PCT = 0.06; // +6%
+    private static final double PROFIT_LOCK_FLOOR_PCT   = 0.03; // +3%
+    private static final double PROFIT_LOCK_SIZE_FACTOR = 0.50; // 50%
+
     // ── Session state ────────────────────────────────────────────────────────
     private final AtomicInteger tradesExecutedToday = new AtomicInteger(0);  // FIX: volatile int++ is not atomic
+    /** True once daily P&L reaches +6%. Triggers 50% size + floor protection. */
+    private volatile boolean profitLocked = false;
     private final Set<String>   firedToday          = ConcurrentHashMap.newKeySet();
     private final Set<String>   activeSignals       = ConcurrentHashMap.newKeySet();
 
@@ -160,9 +169,36 @@ public class HighRRStrategyEngine {
             return;
         }
 
-        if (tradesExecutedToday.get() >= MAX_TRADES_PER_DAY) {
-            log.debug("[HIGHRR] Daily trade limit reached ({}/{}). Engine idle.",
-                    tradesExecutedToday.get(), MAX_TRADES_PER_DAY);
+        // ── PORTFOLIO RISK GATES ─────────────────────────────────────────────────
+        BigDecimal dailyPnl = riskManagement.getDailyPnl();
+        double startCap = resolveCapital().doubleValue();
+        double pnlVal   = dailyPnl.doubleValue();
+        double pnlPct   = startCap > 0 ? pnlVal / startCap : 0.0;
+
+        // RULE 1: Hard stop at -4% daily loss (all strategies combined)
+        if (pnlPct <= -DAILY_LOSS_LIMIT_PCT) {
+            log.warn("[HIGHRR] 🛑 LOSS LIMIT: pnl=₹{} ({}%) ≤ -{}%. Stopped for today.",
+                    String.format("%.0f", pnlVal),
+                    String.format("%.1f", pnlPct * 100),
+                    (int)(DAILY_LOSS_LIMIT_PCT * 100));
+            return;
+        }
+
+        // RULE 2: Activate profit lock at +6%
+        if (!profitLocked && pnlPct >= PROFIT_LOCK_TRIGGER_PCT) {
+            profitLocked = true;
+            log.info("[HIGHRR] 🔒 PROFIT LOCKED at +{}% (₹{}). 50% position size. Floor +{}%.",
+                    (int)(PROFIT_LOCK_TRIGGER_PCT * 100),
+                    String.format("%.0f", pnlVal),
+                    (int)(PROFIT_LOCK_FLOOR_PCT * 100));
+        }
+
+        // RULE 3: Protect locked profit — pause if drops below +3%
+        if (profitLocked && pnlPct < PROFIT_LOCK_FLOOR_PCT) {
+            log.warn("[HIGHRR] 🔒 PROFIT FLOOR: pnl=₹{} ({}%) below +{}%. Paused.",
+                    String.format("%.0f", pnlVal),
+                    String.format("%.1f", pnlPct * 100),
+                    (int)(PROFIT_LOCK_FLOOR_PCT * 100));
             return;
         }
 
@@ -204,6 +240,9 @@ public class HighRRStrategyEngine {
                 dir.direction(), String.format("%.2f", dir.niftyAtrPct()));
 
         BigDecimal cap = resolveCapital();
+        if (profitLocked) {
+            cap = cap.multiply(BigDecimal.valueOf(PROFIT_LOCK_SIZE_FACTOR));
+        }
         if (!circuitBreaker.checkPermission(cap).isAllowed()) {
             log.debug("[HIGHRR] Circuit breaker blocked evaluation cycle");
             return;
@@ -216,7 +255,7 @@ public class HighRRStrategyEngine {
         }
 
         log.info("[HIGHRR] Starting evaluation cycle @{} | symbols={} | tradesLeft={}",
-                now, symbols.size(), MAX_TRADES_PER_DAY - tradesExecutedToday.get());
+                now, symbols.size(), Integer.MAX_VALUE);
 
         List<ScoredCandidate> candidates = new ArrayList<>();
         int evaluated = 0, buySetups = 0, sellSetups = 0;
@@ -272,7 +311,7 @@ public class HighRRStrategyEngine {
 
         candidates.sort(Comparator.comparingDouble(ScoredCandidate::score).reversed());
 
-        int slotsLeft = MAX_TRADES_PER_DAY - tradesExecutedToday.get();
+        int slotsLeft = Integer.MAX_VALUE;
         int toFire    = Math.min(slotsLeft, Math.min(TOP_N_CANDIDATES, candidates.size()));
 
         for (int i = 0; i < toFire; i++) {
@@ -578,7 +617,7 @@ public class HighRRStrategyEngine {
         tradesExecutedToday.incrementAndGet();
 
         log.info("[HIGHRR] ✅ Signal #{}/{} fired for {}. Session complete for this symbol.",
-                tradesExecutedToday.get(), MAX_TRADES_PER_DAY, cand.symbol());
+                tradesExecutedToday.get(), -1 /* unlimited */, cand.symbol());
     }
 
     // ── Instrument token resolution (FIX 1) ────────────────────────────────
@@ -630,10 +669,15 @@ public class HighRRStrategyEngine {
     // ── Dashboard helpers ────────────────────────────────────────────────────
 
     public int     getTradesExecutedToday() { return tradesExecutedToday.get(); }
-    public int     getRemainingSlots()      { return MAX_TRADES_PER_DAY - tradesExecutedToday.get(); }
+    public int     getRemainingSlots()      { return Integer.MAX_VALUE; }
     public boolean isEnabled()              { return engineEnabled; }
-    public boolean isDailyLimitReached()    { return tradesExecutedToday.get() >= MAX_TRADES_PER_DAY; }
-    public int     getMaxTradesPerDay()     { return MAX_TRADES_PER_DAY; }
+    public boolean isDailyLimitReached()    { return false; }
+    public int     getMaxTradesPerDay()     { return -1; } // unlimited
+    public boolean isProfitLocked()         { return profitLocked; }
+    public double  getDailyPnlPct()         {
+        double cap = resolveCapital().doubleValue();
+        return cap > 0 ? riskManagement.getDailyPnl().doubleValue() / cap * 100 : 0.0;
+    }
     /** Dashboard: symbols that fired a signal today (may be closed or active). */
     public Set<String> getFiredToday()      { return Collections.unmodifiableSet(firedToday); }
     /** Dashboard: symbols with currently active (open) signals. */
@@ -642,6 +686,7 @@ public class HighRRStrategyEngine {
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
         tradesExecutedToday.set(0);
+        profitLocked = false;
         firedToday.clear();
         activeSignals.clear();
         volumeHistory.clear();
