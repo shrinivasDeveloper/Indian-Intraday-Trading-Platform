@@ -70,7 +70,12 @@ trading:
   mode: ${TRADING_MODE:PAPER}
   capital: ${TRADING_CAPITAL:100000}
   risk-per-trade: 0.01
-  max-position-pct: 0.20
+  # max-position-pct = 1.0 means full capital (₹1,00,000) per trade.
+  # PositionSizerService formula: qty = floor(capital × max_position_pct / entry)
+  # 0.20 → ₹20,000 per trade (old — too small)
+  # 1.00 → ₹1,00,000 per trade (new — full capital allocation per trade)
+  # Risk is still controlled by SL distance — 1% SL on ₹1L = ₹1,000 max loss.
+  max-position-pct: 1.0
   trade-window-start: "09:30"
   trade-window-end: "14:40"
   entry-mode: ${ENTRY_MODE:AGGRESSIVE}

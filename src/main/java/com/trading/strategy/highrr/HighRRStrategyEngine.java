@@ -67,14 +67,19 @@ public class HighRRStrategyEngine {
     private static final String STRATEGY_NAME = "HIGH_RR_INTRADAY_V1";
 
     private static final LocalTime TRADE_START  = LocalTime.of(9, 35);  // Gate: skip opening 5-min noise
-    private static final LocalTime TRADE_END    = LocalTime.of(13, 0);
-    private static final LocalTime LUNCH_START  = LocalTime.of(11, 0);  // Gate: skip lunch window
-    private static final LocalTime LUNCH_END    = LocalTime.of(12, 30);
-    private static final double    MIN_ATR_PCT  = 0.20;                 // FIXED: was 0.30 — blocked Apr-22(0.29%) and Apr-23(0.23%).
-    // Indian Nifty 15-min ATR of 0.20% = ~48 point candle range. Individual stocks still move 3-5x Nifty.
-    // Ultra-frozen days (ATR < 0.10% like Apr-21) are still blocked. Apr-22/23 now allowed.
+    private static final LocalTime TRADE_END    = LocalTime.of(14, 0);
+    // LUNCH_START / LUNCH_END removed — lunch window gate removed entirely.
+    // HighRR now scans continuously 9:35 AM – 2:00 PM without interruption.
+    private static final double    MIN_ATR_PCT  = 0.25;                 // 0.25% minimum ATR — ensures market has enough range for HighRR setups.
+    // 0.20% was too low — allowed marginal days where price barely moved.
+    // 0.25% = ~60 Nifty points on a 24,000 level — meaningful intraday range.
 
-    // MAX_TRADES_PER_DAY removed — governed by portfolio risk gates
+    // No hard trade count limit.
+    // Risk is governed entirely by the 3 portfolio rules below:
+    //   Rule 1: Stop if daily loss ≤ -4%  (protects capital on bad days)
+    //   Rule 2: Lock profit at +6%, trade at 50% size  (protects gains on good days)
+    //   Rule 3: Stop if profit drops below +3% floor  (never give back good days)
+    // On winning days → keep taking trades. On losing days → -4% stops it.
     private static final int    TOP_N_CANDIDATES   = 2;
     private static final double MIN_RR_RATIO       = 2.0;
     /** Minimum SL distance as % of entry price.
@@ -82,6 +87,7 @@ public class HighRRStrategyEngine {
      *  0.30% on ₹26 = ₹0.08 = 1-2 ticks → instant SL hit on opening noise.
      *  Raising to 0.50% ensures SL represents a real structural level. */
     private static final double MIN_SL_PCT         = 0.005;
+    private static final double FIXED_SL_PCT        = 0.010; // exactly 1% — always
     private static final double GOOD_RR_RATIO      = 3.0;
 
     // ── Gate 5: Structural S/R entry zone ────────────────────────────────────
@@ -89,7 +95,7 @@ public class HighRRStrategyEngine {
     // Prevents mid-air entries like ADANIGREEN ₹1,223 when resistance was ₹1,252 (2.4% away).
     private static final double SR_ENTRY_ZONE_PCT = 0.005; // 0.5%
     // Structural SL max distance from entry (avoids oversized risk)
-    private static final double SR_SL_MAX_PCT     = 0.015; // 1.5%
+    // SR_SL_MAX_PCT removed — SL is now fixed at exactly 1% (FIXED_SL_PCT)
     // Min RR for a structural T1 to be accepted
     private static final double SR_T1_MIN_RR      = 2.0;
 
@@ -99,7 +105,15 @@ public class HighRRStrategyEngine {
     // UTIAMC and PHOENIXLTD both would have scored below 50 — this gate blocks them.
     // Score breakdown: trend(20)+pullback(15)+volume(15)+clean(15)+liquidity(10) = 75 max
     // For a HIGH_RR trade, minimum entry quality = trend + pullback + one other = 50.
-    private static final int    MIN_CANDIDATE_SCORE = 50;
+    // MIN_CANDIDATE_SCORE raised 50 → 65.
+    // Old: RR(25) + trend(20) + any one signal(15) = 60 could pass at 50.
+    // MIN_CANDIDATE_SCORE = 110 — target setup minimum.
+    // Target: RR≥3(25) + trend(20) + confluence(5) + pullback(20) + volume(20)
+    //       + major_SR(20) = 110 ← best setup. Min path to 85:
+    //   RR≥3(25) + trend(20) + pullback(20) + major_SR(20) = 85 ✅
+    //   RR≥3(25) + trend(20) + confluence(5) + pullback(20) + volume(20) = 90 ✅
+    //   RR(15) + trend(20) + clean(15) = 50 ❌ (no pullback, no S/R)
+    private static final int    MIN_CANDIDATE_SCORE = 110;
 
     // ── SL placement ────────────────────────────────────────────────────────
     private static final double SL_BUFFER_PCT    = 0.002;
@@ -158,7 +172,7 @@ public class HighRRStrategyEngine {
     // 1-MINUTE EVALUATION CYCLE
     // ══════════════════════════════════════════════════════════════════════════
 
-    @Scheduled(fixedDelay = 60_000)  // FIX: fixedDelay fires 60s after completion, not start — prevents cycle overlap
+    @Scheduled(fixedDelay = 25_000)  // Reduced from 60s → 25s for faster opportunity capture
     public void runEvaluationCycle() {
         if (!engineEnabled) return;
 
@@ -214,13 +228,7 @@ public class HighRRStrategyEngine {
             return;
         }
 
-        // ── GATE 2: Lunch window (11:00–12:30) ────────────────────────────────
-        // Volume thins, spreads widen, momentum signals are unreliable.
-        // MARKET_PRESSURE proved this on Apr-17 and Apr-21.
-        if (!now.isBefore(LUNCH_START) && !now.isAfter(LUNCH_END)) {
-            log.debug("[HIGHRR] Gate 2 BLOCKED — Lunch window (11:00–12:30). Skipping cycle.");
-            return;
-        }
+        // Lunch window gate REMOVED — HighRR scans 9:35–14:00 without interruption.
 
         // ── GATE 3: Market must not be SIDEWAYS ───────────────────────────────
         // HighRR is a momentum/trend strategy. Sideways markets produce
@@ -255,7 +263,7 @@ public class HighRRStrategyEngine {
         }
 
         log.info("[HIGHRR] Starting evaluation cycle @{} | symbols={} | tradesLeft={}",
-                now, symbols.size(), Integer.MAX_VALUE);
+                now, symbols.size(), "∞");
 
         List<ScoredCandidate> candidates = new ArrayList<>();
         int evaluated = 0, buySetups = 0, sellSetups = 0;
@@ -311,6 +319,7 @@ public class HighRRStrategyEngine {
 
         candidates.sort(Comparator.comparingDouble(ScoredCandidate::score).reversed());
 
+        // No slot limit — portfolio risk rules govern when to stop.
         int slotsLeft = Integer.MAX_VALUE;
         int toFire    = Math.min(slotsLeft, Math.min(TOP_N_CANDIDATES, candidates.size()));
 
@@ -348,69 +357,46 @@ public class HighRRStrategyEngine {
         // Prevents mid-air entries. ADANIGREEN at ₹1,223 was 2.4% below
         // the ₹1,252 resistance — that entry had no structural edge.
         // A valid SHORT entry waits for price to reach ₹1,252 (near resistance).
+        // ── GATE 5: Entry within 0.5% of structural S/R — ALWAYS MANDATORY ──────
+        // No S/R data = no trade. Prevents mid-air entries with no structural edge.
+        // HighRRStructureService loads from Redis at startup (@PostConstruct) and
+        // refreshes at 8:50 AM daily. Data is available from the very first cycle.
+        // On first-ever deploy with empty Redis, bootstrap fetches from Zerodha.
+        if (structure == null) {
+            log.debug("[HIGHRR] {} Gate5 BLOCKED — no S/R structure data yet", symbol);
+            return null;
+        }
         SRLevel entryAnchorLevel = null;
-        if (structure != null) {
-            if (isBuy) {
-                SRLevel sup = structure.nearestSupportBelow(entryDbl);
-                if (sup != null && (entryDbl - sup.price()) / entryDbl <= SR_ENTRY_ZONE_PCT)
-                    entryAnchorLevel = sup;
-            } else {
-                SRLevel res = structure.nearestResistanceAbove(entryDbl);
-                if (res != null && (res.price() - entryDbl) / entryDbl <= SR_ENTRY_ZONE_PCT)
-                    entryAnchorLevel = res;
-            }
-            if (entryAnchorLevel == null) {
-                log.debug("[HIGHRR] {} {} Gate5 BLOCKED — not within {}% of S/R (price={})",
-                        symbol, isBuy?"BUY":"SELL",
-                        (int)(SR_ENTRY_ZONE_PCT*100), String.format("%.2f", entryDbl));
-                return null;
-            }
-        }
-        // If structure has no data yet (first deploy) → fall through to original logic.
-
-        // ── STRUCTURAL SL — placed at nearest S/R level, not 1-min candle ──────
-        double slD;
-        if (structure != null) {
-            if (isBuy) {
-                SRLevel structSl = structure.nearestSupportBelow(entryDbl * 0.9995);
-                if (structSl != null) {
-                    double pct = (entryDbl - structSl.price()) / entryDbl;
-                    if (pct >= MIN_SL_PCT && pct <= SR_SL_MAX_PCT) {
-                        slD = structSl.price() * (1.0 - SL_BUFFER_PCT);
-                    } else if (pct > SR_SL_MAX_PCT) {
-                        // Structural SL too wide — fall back to 1-min candle
-                        double sw = state.candleLow() > 0 ? state.candleLow() : price * 0.985;
-                        slD = sw * (1.0 - SL_BUFFER_PCT);
-                    } else { return null; } // too tight
-                } else {
-                    double sw = state.candleLow() > 0 ? state.candleLow() : price * 0.985;
-                    slD = sw * (1.0 - SL_BUFFER_PCT);
-                }
-            } else {
-                SRLevel structSl = structure.nearestResistanceAbove(entryDbl * 1.0005);
-                if (structSl != null) {
-                    double pct = (structSl.price() - entryDbl) / entryDbl;
-                    if (pct >= MIN_SL_PCT && pct <= SR_SL_MAX_PCT) {
-                        slD = structSl.price() * (1.0 + SL_BUFFER_PCT);
-                    } else if (pct > SR_SL_MAX_PCT) {
-                        double sw = state.candleHigh() > 0 ? state.candleHigh() : price * 1.015;
-                        slD = sw * (1.0 + SL_BUFFER_PCT);
-                    } else { return null; }
-                } else {
-                    double sw = state.candleHigh() > 0 ? state.candleHigh() : price * 1.015;
-                    slD = sw * (1.0 + SL_BUFFER_PCT);
-                }
-            }
+        if (isBuy) {
+            SRLevel sup = structure.nearestSupportBelow(entryDbl);
+            if (sup != null && (entryDbl - sup.price()) / entryDbl <= SR_ENTRY_ZONE_PCT)
+                entryAnchorLevel = sup;
         } else {
-            // No structure data — original 1-min candle logic unchanged
-            if (isBuy) {
-                double sw = state.candleLow()  > 0 ? state.candleLow()  : price * 0.985;
-                slD = sw * (1.0 - SL_BUFFER_PCT);
-            } else {
-                double sw = state.candleHigh() > 0 ? state.candleHigh() : price * 1.015;
-                slD = sw * (1.0 + SL_BUFFER_PCT);
-            }
+            SRLevel res = structure.nearestResistanceAbove(entryDbl);
+            if (res != null && (res.price() - entryDbl) / entryDbl <= SR_ENTRY_ZONE_PCT)
+                entryAnchorLevel = res;
         }
+        if (entryAnchorLevel == null) {
+            log.debug("[HIGHRR] {} {} Gate5 BLOCKED — not within {}% of S/R (price={})",
+                    symbol, isBuy?"BUY":"SELL",
+                    (int)(SR_ENTRY_ZONE_PCT*100), String.format("%.2f", entryDbl));
+            return null;
+        }
+
+        // ── FIXED 1% STOP LOSS ───────────────────────────────────────────────────
+        // SL is always exactly 1% from entry price.
+        // LONG:  SL = entry × 0.99  (1% below entry)
+        // SHORT: SL = entry × 1.01  (1% above entry)
+        //
+        // WHY FIXED 1%:
+        //   Structural SL was variable (0.5–1.5%) causing inconsistent losses.
+        //   Today ICICIPRULI lost 1.33%, SUNPHARMA 1.24%, APTUS 1.30% — all different.
+        //   Fixed 1% gives: every loss = exactly ₹1,000 per trade (1% of ₹1L).
+        //   Predictable. Max 4 SL losses before -4% Rule 1 fires.
+        //   T1 = 2R = entry ± 2%. T2 = 3R = entry ± 3%.
+        double slD = isBuy
+                ? entryDbl * (1.0 - FIXED_SL_PCT)
+                : entryDbl * (1.0 + FIXED_SL_PCT);
 
         BigDecimal stopLoss = BigDecimal.valueOf(slD).setScale(2,
                 isBuy ? RoundingMode.FLOOR : RoundingMode.CEILING);
@@ -418,17 +404,8 @@ public class HighRRStrategyEngine {
         if (risk.compareTo(BigDecimal.ZERO) == 0) return null;
         double riskD = risk.doubleValue();
 
-        if (riskD / price < MIN_SL_PCT) {
-            log.debug("[HIGHRR] {} SL {}% below minimum {}%",
-                    symbol, String.format("%.2f", riskD/price*100),
-                    String.format("%.2f", MIN_SL_PCT*100));
-            return null;
-        }
-        if (riskD / price > 0.05) {
-            log.trace("[HIGHRR] {} SL too far: {}%", symbol,
-                    String.format("%.2f", riskD/price*100));
-            return null;
-        }
+        // SL is fixed at exactly 1% — range checks not needed.
+        // riskD will always be entryDbl × 1% = predictable.
 
         // ── STRUCTURAL TARGET — T1 at next S/R level, not arbitrary 2×risk ─────
         // If the next S/R level gives RR ≥ 2.0, use it. This makes T1 a real
@@ -509,15 +486,26 @@ public class HighRRStrategyEngine {
         int score = 0;
 
         // ── Original scoring (all unchanged) ────────────────────────────────
+        // RR≥3.0: +25. Exceptional setup — 3× reward:risk.
         if (rr >= GOOD_RR_RATIO) score += 25;
         else if (rr >= MIN_RR_RATIO) score += 15;
 
+        // Trend alignment: +20 base.
+        // Confluence bonus +5 if ALSO at major S/R (checked again after entryLevel known).
+        // This rewards the strongest setups: trend + major institutional level.
+        // Trend alignment: +20. Core signal — must trade with the trend.
         if (s.isTrendingUp() && isBuy)    score += 20;
         if (s.isTrendingDown() && !isBuy) score += 20;
+        // Confluence bonus: trend + major level = +5 extra
+        if (entryLevel != null && entryLevel.isMajor()) {
+            if ((s.isTrendingUp() && isBuy) || (s.isTrendingDown() && !isBuy)) score += 5;
+        }
 
-        if (s.pullbackZone()) score += 15;
+        // Pullback zone raised 15 → 20: price near S/R is the core HighRR edge.
+        if (s.pullbackZone()) score += 20;
 
-        if (isVolumeSpike(symbol, s.candleVol())) score += 15;
+        // Volume spike raised 15 → 20: volume confirms institutional participation.
+        if (isVolumeSpike(symbol, s.candleVol())) score += 20;
 
         if (!s.hasExcessiveWick()) score += 15;
 
@@ -533,6 +521,7 @@ public class HighRRStrategyEngine {
         // These push a major-level entry from 100 → 135 score,
         // ensuring structural trades always rank above noise-level setups.
         if (entryLevel != null) {
+            // Major S/R: +20. Institutional level — highest edge.
             if (entryLevel.isMajor()) score += 20;
             else                      score += 10;
         }
@@ -669,7 +658,7 @@ public class HighRRStrategyEngine {
     // ── Dashboard helpers ────────────────────────────────────────────────────
 
     public int     getTradesExecutedToday() { return tradesExecutedToday.get(); }
-    public int     getRemainingSlots()      { return Integer.MAX_VALUE; }
+    public int     getRemainingSlots()      { return Integer.MAX_VALUE; } // unlimited
     public boolean isEnabled()              { return engineEnabled; }
     public boolean isDailyLimitReached()    { return false; }
     public int     getMaxTradesPerDay()     { return -1; } // unlimited
