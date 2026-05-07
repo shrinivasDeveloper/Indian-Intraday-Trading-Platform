@@ -244,18 +244,34 @@ public class HighRRStructureService {
             return;
         }
 
+        // ── Wait for InstrumentCacheService to load (auth completes after @PostConstruct) ──
+        // Problem: @PostConstruct fires before Zerodha auto-login completes (~10s delay).
+        // InstrumentCacheService is empty at that point → bootstrap aborts.
+        // Fix: poll every 2s for up to 90s until instruments are available.
+        Map<String, Instrument> instruments = instrumentCache.getEquityInstruments();
+        if (instruments.isEmpty()) {
+            log.info("[HRR-STRUCT] Instruments not ready yet — waiting for auth to complete (max 90s)...");
+            int waited = 0;
+            while (instruments.isEmpty() && waited < 90) {
+                try { Thread.sleep(2000); } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt(); break;
+                }
+                waited += 2;
+                instruments = instrumentCache.getEquityInstruments();
+            }
+            if (instruments.isEmpty()) {
+                log.warn("[HRR-STRUCT] Instruments still empty after {}s — bootstrap aborted. 8:50 AM refresh will retry.", waited);
+                bootstrapComplete = true;
+                return;
+            }
+            log.info("[HRR-STRUCT] Instruments available after {}s — proceeding with bootstrap.", waited);
+        }
+
         LocalDate today = LocalDate.now(IST);
         java.util.Date fromDate = java.util.Date.from(
                 today.minusDays(BOOTSTRAP_CALENDAR_DAYS).atStartOfDay(IST).toInstant());
         java.util.Date toDate = java.util.Date.from(
                 today.atTime(15, 31).atZone(IST).toInstant());
-
-        Map<String, Instrument> instruments = instrumentCache.getEquityInstruments();
-        if (instruments.isEmpty()) {
-            log.warn("[HRR-STRUCT] No instruments available — bootstrap aborted.");
-            bootstrapComplete = true;
-            return;
-        }
 
         List<Map.Entry<String, Instrument>> entries = new ArrayList<>(instruments.entrySet());
         int total = entries.size(), loaded = 0, failed = 0;
