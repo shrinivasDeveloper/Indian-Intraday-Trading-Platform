@@ -113,7 +113,10 @@ public class HighRRStrategyEngine {
     //   RR≥3(25) + trend(20) + pullback(20) + major_SR(20) = 85 ✅
     //   RR≥3(25) + trend(20) + confluence(5) + pullback(20) + volume(20) = 90 ✅
     //   RR(15) + trend(20) + clean(15) = 50 ❌ (no pullback, no S/R)
-    private static final int    MIN_CANDIDATE_SCORE = 110;
+    // Score threshold raised 110 → 125.
+    // Path to 125: RR≥3(25)+trend(20)+conf(5)+pullback(20)+volume(20)+major_SR(20)+clean(15) = 125
+    // Requires ALL 6 primary signals plus clean wick confirmation.
+    private static final int    MIN_CANDIDATE_SCORE = 125;
 
     // ── SL placement ────────────────────────────────────────────────────────
     private static final double SL_BUFFER_PCT    = 0.002;
@@ -162,6 +165,16 @@ public class HighRRStrategyEngine {
     private final AtomicInteger tradesExecutedToday = new AtomicInteger(0);  // FIX: volatile int++ is not atomic
     /** True once daily P&L reaches +6%. Triggers 50% size + floor protection. */
     private volatile boolean profitLocked = false;
+
+    // ── Batch cooldown state ─────────────────────────────────────────────────
+    // Rule: max 2 trades per 30-minute window.
+    // After 2 trades fire, cooldown starts. Prevents overtrading in volatile markets.
+    // Example: 9:35 fires 2 trades → cooldown until 10:05 → fires 2 more → etc.
+    private static final int  BATCH_SIZE_LIMIT   = 2;           // trades per batch
+    private static final long BATCH_COOLDOWN_MS  = 30 * 60_000L; // 30 minutes in ms
+    private static final int  MAX_TRADES_PER_DAY = 10;          // overall daily cap
+    private final AtomicInteger batchTradesCount  = new AtomicInteger(0); // trades in current batch
+    private volatile long       batchCooldownUntil = 0L; // epoch ms when cooldown ends
     private final Set<String>   firedToday          = ConcurrentHashMap.newKeySet();
     private final Set<String>   activeSignals       = ConcurrentHashMap.newKeySet();
 
@@ -180,6 +193,23 @@ public class HighRRStrategyEngine {
         if (now.isBefore(TRADE_START) || now.isAfter(TRADE_END)) return;
         if (latencyMonitor.isStale()) {
             log.debug("[HIGHRR] Latency stale – skipping cycle");
+            return;
+        }
+
+        // ── DAILY CAP GATE ───────────────────────────────────────────────────────
+        if (tradesExecutedToday.get() >= MAX_TRADES_PER_DAY) {
+            log.debug("[HIGHRR] Daily cap reached ({}/{}) — engine idle.", tradesExecutedToday.get(), MAX_TRADES_PER_DAY);
+            return;
+        }
+
+        // ── BATCH COOLDOWN GATE ──────────────────────────────────────────────────
+        // After BATCH_SIZE_LIMIT (2) trades fire, enforce 30-min cooldown.
+        // Prevents rapid-fire entries in volatile conditions.
+        long nowMs = System.currentTimeMillis();
+        if (batchCooldownUntil > nowMs) {
+            long remainSec = (batchCooldownUntil - nowMs) / 1000;
+            log.debug("[HIGHRR] Batch cooldown active — {}s remaining. Traded {}/{} today.",
+                    remainSec, tradesExecutedToday.get(), MAX_TRADES_PER_DAY);
             return;
         }
 
@@ -319,8 +349,10 @@ public class HighRRStrategyEngine {
 
         candidates.sort(Comparator.comparingDouble(ScoredCandidate::score).reversed());
 
-        // No slot limit — portfolio risk rules govern when to stop.
-        int slotsLeft = Integer.MAX_VALUE;
+        // Slots = min of remaining daily cap and remaining batch slots
+        int dailyRemaining = MAX_TRADES_PER_DAY - tradesExecutedToday.get();
+        int batchRemaining = BATCH_SIZE_LIMIT - batchTradesCount.get();
+        int slotsLeft = Math.min(dailyRemaining, batchRemaining);
         int toFire    = Math.min(slotsLeft, Math.min(TOP_N_CANDIDATES, candidates.size()));
 
         for (int i = 0; i < toFire; i++) {
@@ -362,9 +394,66 @@ public class HighRRStrategyEngine {
         // HighRRStructureService loads from Redis at startup (@PostConstruct) and
         // refreshes at 8:50 AM daily. Data is available from the very first cycle.
         // On first-ever deploy with empty Redis, bootstrap fetches from Zerodha.
+        // Gate 5a: No structure data → block
         if (structure == null) {
             log.debug("[HIGHRR] {} Gate5 BLOCKED — no S/R structure data yet", symbol);
             return null;
+        }
+
+        // Gate 5b: Insufficient history — need ≥ 5 trading days for reliable S/R
+        // With < 5 days, "major" levels (≥3 touches) are unreliable noise.
+        // TRIVENI/VSTIND/SUPREMEIND errors: fake major levels from 2-day history.
+        // Gate5b: need ≥ 2 days minimum for swing detection.
+        // Bootstrap fetches 14 calendar days (10 trading days) on every startup.
+        // After bootstrap: tradingDays = 10. Gate passes immediately.
+        // Gate5c/5d use the full 10-day tenDayHigh/Low and MA20.
+        if (structure.tradingDays() < 2) {
+            log.debug("[HIGHRR] {} Gate5b BLOCKED — only {} trading days of data (need 2)",
+                    symbol, structure.tradingDays());
+            return null;
+        }
+
+        // Gate 5c: Range-bound stock filter
+        // If stock has been in a tight range for 10 days, no trend edge.
+        // VSTIND: 10-day range = 254-268 = 5.5%. Passes this check.
+        // Additional check: entry must be in lower 40% of 10-day range (near support).
+        // Entering above 40% = entry near middle or top of range = no structural edge.
+        double tenDayRange = structure.tenDayHigh() - structure.tenDayLow();
+        if (tenDayRange > 0) {
+            double rangePosition = (entryDbl - structure.tenDayLow()) / tenDayRange;
+            if (isBuy && rangePosition > 0.60) {
+                log.debug("[HIGHRR] {} BUY Gate5c BLOCKED — entry at {}% of 10-day range (top 40%, not near support)",
+                        symbol, String.format("%.0f", rangePosition * 100));
+                return null;
+            }
+            if (!isBuy && rangePosition < 0.40) {
+                log.debug("[HIGHRR] {} SELL Gate5c BLOCKED — entry at {}% of 10-day range (bottom 40%, not near resistance)",
+                        symbol, String.format("%.0f", rangePosition * 100));
+                return null;
+            }
+        }
+
+        // Gate 5d: MA20 trend alignment
+        // LONG only when price > MA20 (uptrend). SHORT only when price < MA20 (downtrend).
+        // TRIVENI: crashed below MA20 — LONG should be blocked.
+        // CANFINHOME: declining from spike, below MA20 — LONG should be blocked.
+        // GRINDWELL/INDIGO: recovering stocks above or near MA20 — LONG allowed.
+        if (structure.ma20() > 0) {
+            double ma20 = structure.ma20();
+            // 1% threshold: INDIGO(-0.7%) fires, VSTIND(-1.1%) blocked
+            // Blocks: TRIVENI(-11.9%), CANFINHOME(-3.1%), VSTIND(-1.1%), SUPREMEIND(-1.2%)
+            // Allows: GRINDWELL(0%), INDIGO(-0.7%) — genuine near-MA20 recovery
+            double ma20ThresholdPct = 0.010; // 1% tolerance below MA20 for LONG
+            if (isBuy && entryDbl < ma20 * (1.0 - ma20ThresholdPct)) {
+                log.debug("[HIGHRR] {} BUY Gate5d BLOCKED — price {} below MA20 {} (downtrend stock)",
+                        symbol, String.format("%.2f", entryDbl), String.format("%.2f", ma20));
+                return null;
+            }
+            if (!isBuy && entryDbl > ma20 * (1.0 + ma20ThresholdPct)) {
+                log.debug("[HIGHRR] {} SELL Gate5d BLOCKED — price {} above MA20 {} (uptrend stock)",
+                        symbol, String.format("%.2f", entryDbl), String.format("%.2f", ma20));
+                return null;
+            }
         }
         SRLevel entryAnchorLevel = null;
         if (isBuy) {
@@ -604,6 +693,15 @@ public class HighRRStrategyEngine {
         firedToday.add(cand.symbol());
         activeSignals.add(cand.symbol());
         tradesExecutedToday.incrementAndGet();
+        int batchCount = batchTradesCount.incrementAndGet();
+        if (batchCount >= BATCH_SIZE_LIMIT) {
+            batchCooldownUntil = System.currentTimeMillis() + BATCH_COOLDOWN_MS;
+            batchTradesCount.set(0);
+            log.info("[HIGHRR] 🕐 Batch of {} trades complete. Cooldown for 30 min (until {}).",
+                    BATCH_SIZE_LIMIT,
+                    java.time.LocalTime.now(java.time.ZoneId.of("Asia/Kolkata"))
+                            .plusMinutes(30).format(java.time.format.DateTimeFormatter.ofPattern("HH:mm")));
+        }
 
         log.info("[HIGHRR] ✅ Signal #{}/{} fired for {}. Session complete for this symbol.",
                 tradesExecutedToday.get(), -1 /* unlimited */, cand.symbol());
@@ -676,6 +774,8 @@ public class HighRRStrategyEngine {
     public void dailyReset() {
         tradesExecutedToday.set(0);
         profitLocked = false;
+        batchTradesCount.set(0);
+        batchCooldownUntil = 0L;
         firedToday.clear();
         activeSignals.clear();
         volumeHistory.clear();

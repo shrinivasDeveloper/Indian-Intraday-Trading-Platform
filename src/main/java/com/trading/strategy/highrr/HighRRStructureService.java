@@ -37,8 +37,8 @@ import java.util.stream.Collectors;
  *   HighRRStrategyEngine can query levels immediately at 9:35 AM first cycle.
  *
  * LAYER 2 — BACKGROUND BOOTSTRAP (first deployment only, ~25 seconds):
- *   Fetches 5 calendar days of 15-min OHLCV from Zerodha for 295 symbols.
- *   5 days × 26 candles = 130 candles/symbol → detects 8-15 S/R levels.
+ *   Fetches 14 calendar days of 15-min OHLCV from Zerodha for 295 symbols.
+ *   10 trading days × 26 candles = 260 candles/symbol → detects 15-25 S/R levels.
  *   Only runs when Redis has no hrr:structure:* keys (first deploy or flush).
  *   Background daemon thread — does NOT block @Scheduled or ORB startup.
  *
@@ -107,16 +107,16 @@ public class HighRRStructureService {
     /** Minimum touches for a level to be considered significant. */
     private static final int    MIN_TOUCHES_MAJOR    = 3;
     /** Days of 15-min history to maintain per symbol. */
-    private static final int    HISTORY_DAYS         = 5;
-    /** Max candles kept in rolling buffer (5 days × 26 candles). */
-    private static final int    MAX_CANDLES          = 130;
+    private static final int    HISTORY_DAYS         = 10;
+    /** Max candles kept in rolling buffer (10 days × 26 candles). */
+    private static final int    MAX_CANDLES          = 260;
     /** Re-compute S/R after this many new candles arrive. */
     private static final int    RECOMPUTE_EVERY      = 4;
     /** Zerodha API rate limit — batch size and pause. */
     private static final int    BATCH_SIZE           = 50;
     private static final long   BATCH_PAUSE_MS       = 300;
-    /** Calendar days to fetch on bootstrap (covers 5 trading days). */
-    private static final int    BOOTSTRAP_CALENDAR_DAYS = 7;
+    /** Calendar days to fetch on bootstrap (covers 10 trading days = 2 weeks). */
+    private static final int    BOOTSTRAP_CALENDAR_DAYS = 14;
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
 
@@ -183,17 +183,23 @@ public class HighRRStructureService {
 
     @PostConstruct
     public void initialise() {
+        // STEP 1: Restore from Redis immediately — engine can use stale data
+        //         while fresh data is being fetched from API in background.
         int restored = restoreFromRedis();
-        log.info("[HRR-STRUCT] Startup: restored {} symbols from Redis.", restored);
+        log.info("[HRR-STRUCT] Startup: restored {} symbols from Redis (serving as warm cache).", restored);
 
-        if (restored == 0 && kiteConnect != null && instrumentCache != null) {
+        // STEP 2: ALWAYS fetch fresh from API in background — regardless of Redis state.
+        //         This ensures every deployment starts with current market data.
+        //         Even if Redis has data, it may be from a previous session/day.
+        if (kiteConnect != null && instrumentCache != null) {
             Thread boot = new Thread(() -> {
-                log.info("[HRR-STRUCT] Redis empty — starting background bootstrap...");
+                log.info("[HRR-STRUCT] Starting full API bootstrap on every deployment...");
                 bootstrapFromBroker();
             }, "hrr-structure-bootstrap");
             boot.setDaemon(true);
             boot.start();
         } else {
+            log.warn("[HRR-STRUCT] KiteConnect/InstrumentCache unavailable — skipping API bootstrap.");
             bootstrapComplete = true;
         }
     }
@@ -231,6 +237,7 @@ public class HighRRStructureService {
     // ── Layer 2: Zerodha bootstrap ────────────────────────────────────────────
 
     void bootstrapFromBroker() {
+        long bootstrapStartMs = System.currentTimeMillis();
         if (kiteConnect == null || instrumentCache == null) {
             log.warn("[HRR-STRUCT] KiteConnect/InstrumentCache unavailable — bootstrap skipped.");
             bootstrapComplete = true;
@@ -279,14 +286,18 @@ public class HighRRStructureService {
                         if (dq.size() >= MAX_CANDLES) break;
                     }
                     candleBuffer.put(symbol, dq);
+                    long stockMs = System.currentTimeMillis();
                     recomputeLevels(symbol);
+                    long stockElapsed = System.currentTimeMillis() - stockMs;
                     loaded++;
+                    // Log slow stocks (>500ms indicates API or processing issue)
+                    if (stockElapsed > 500) {
+                        log.warn("[HRR-STRUCT] Slow load: {} took {}ms", symbol, stockElapsed);
+                    }
 
                 } catch (Throwable e) {
-                    // KiteException extends Throwable directly (not Exception).
-                    // catch(Throwable) is the correct pattern — matches OrbDataService.
                     failed++;
-                    log.trace("[HRR-STRUCT] Bootstrap failed {}: {}", symbol, e.getMessage());
+                    log.debug("[HRR-STRUCT] Bootstrap failed {}: {}", symbol, e.getMessage());
                 }
             }
 
@@ -298,8 +309,27 @@ public class HighRRStructureService {
         }
 
         bootstrapComplete = true;
-        log.info("[HRR-STRUCT] ✅ Bootstrap complete: {}/{} loaded, {} failed. {} symbols have S/R levels.",
-                loaded, total, failed, levelCache.size());
+
+        // ── VALIDATION: data quality cross-check ─────────────────────────────
+        int withLevels      = 0;
+        int withMajorLevel  = 0;
+        int with5DayHistory = 0;
+        int missingData     = 0;
+        for (Map.Entry<String, Instrument> e : instruments.entrySet()) {
+            StructureLevels lvl = levelCache.get(e.getKey());
+            if (lvl == null) { missingData++; continue; }
+            withLevels++;
+            if (lvl.majorLevelCount() > 0) withMajorLevel++;
+            if (lvl.tradingDays() >= 2)    with5DayHistory++;
+        }
+        log.info("[HRR-STRUCT] ✅ Bootstrap complete in {}s: {}/{} loaded ({} failed).",
+                String.format("%.1f", (System.currentTimeMillis() - bootstrapStartMs) / 1000.0),
+                loaded, total, failed);
+        log.info("[HRR-STRUCT] Validation: {} have S/R levels | {} have major level | {} have ≥2 days history | {} missing",
+                withLevels, withMajorLevel, with5DayHistory, missingData);
+        if (missingData > 50) {
+            log.warn("[HRR-STRUCT] ⚠️ {} symbols missing data — check Zerodha API connectivity.", missingData);
+        }
     }
 
     // ── Layer 4: Daily refresh at 8:50 AM ────────────────────────────────────
@@ -494,14 +524,36 @@ public class HighRRStructureService {
         resistances.sort(Comparator.comparingDouble(SRLevel::price));
         supports.sort(Comparator.comparingDouble(SRLevel::price).reversed());
 
-        // ── Step 4: Build and cache result ─────────────────────────────────────
+        // ── Step 4: Compute multi-day context, build and cache result ─────────
         double currentPrice = candles.get(0).getClose().doubleValue();
+
+        // tradingDays: estimate from buffer size (26 candles per trading day on NSE)
+        // With MAX_CANDLES=260: max tradingDays = 260/26 = 10
+        int tradingDays = Math.max(1, n / 26);
+
+        // 10-day high/low: full buffer = 260 candles = 10 real trading days
+        int tenDayLen = Math.min(n, 260); // now n can be up to 260
+        double tenDayHigh = candles.subList(0, tenDayLen).stream()
+                .mapToDouble(c -> c.getHigh().doubleValue()).max().orElse(currentPrice);
+        double tenDayLow  = candles.subList(0, tenDayLen).stream()
+                .mapToDouble(c -> c.getLow().doubleValue()).min().orElse(currentPrice);
+
+        // MA20: simple moving average of last 20 closing prices
+        int ma20Len = Math.min(n, 20);
+        double ma20 = candles.subList(0, ma20Len).stream()
+                .mapToDouble(c -> c.getClose().doubleValue()).average().orElse(currentPrice);
+
         StructureLevels levels = new StructureLevels(
                 symbol, supports, resistances, currentPrice,
-                System.currentTimeMillis());
+                System.currentTimeMillis(),
+                tradingDays, tenDayHigh, tenDayLow, ma20);
 
+        // levelCache.put() first — engine reads from memory, never from Redis.
+        // persistToRedis() is fire-and-forget: Redis is only for restart recovery.
+        // A Redis timeout (rare) must NEVER block the tradingExecutor thread.
         levelCache.put(symbol, levels);
-        persistToRedis(symbol, levels);
+        final StructureLevels toSave = levels;
+        new Thread(() -> persistToRedis(symbol, toSave), "hrr-redis-persist").start();
 
         log.trace("[HRR-STRUCT] {} computed: {} supports, {} resistances (from {} candles)",
                 symbol, supports.size(), resistances.size(), n);
@@ -621,7 +673,11 @@ public class HighRRStructureService {
             List<SRLevel> supports,
             List<SRLevel> resistances,
             double        lastPrice,
-            long          computedAt
+            long          computedAt,
+            int           tradingDays,
+            double        tenDayHigh,
+            double        tenDayLow,
+            double        ma20
     ) {
         /** Nearest support strictly below a given price. Null if none found. */
         public SRLevel nearestSupportBelow(double price) {

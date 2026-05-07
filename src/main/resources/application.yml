@@ -167,7 +167,7 @@ strategy:
   # SMART CHANNEL PULLBACK
   # ================================
   smart-channel-pullback:
-    enabled: ${SCPS_ENABLED:true}
+    enabled: ${SCPS_ENABLED:false}  # DISABLED — only HighRR + News active
     require-high-quality-channel: false
     time-stop-minutes: 0  # FIXED: was 90. Now uses 3:00 PM EOD stop only.
     # FIX: was 1.0 (average RVOL = no conviction). Internal floor is 1.1.
@@ -193,7 +193,7 @@ strategy:
   # SIDEWAYS SCALP
   # ================================
   sideways-scalp:
-    enabled: ${SCALP_ENABLED:true}
+    enabled: ${SCALP_ENABLED:false}  # DISABLED — only HighRR + News active
     min-rvol: 1.1
     max-signals-per-session: 2  # CHANGED: was 5. Hard limit: 2 trades/day per requirements.
     time-stop-minutes: 0  # FIXED: was 90. Now uses 3:00 PM EOD stop only.
@@ -233,7 +233,7 @@ strategy:
   # Explicitly declared here for visibility and easy tuning.
   # ================================
   orb:
-    enabled: ${ORB_ENABLED:true}
+    enabled: ${ORB_ENABLED:false}  # DISABLED — only HighRR + News active
     # Reward:risk multiplier for T1 target.
     # T1 = entry ± (orbRange × target-rr)
     # T2 = entry ± (orbRange × target-rr × 1.6)
@@ -275,7 +275,7 @@ strategy:
   # Scoring 0-9, min 4 to qualify. Picks single best setup per day.
   # ================================
   best-trade:
-    enabled: ${BEST_TRADE_ENABLED:true}
+    enabled: ${BEST_TRADE_ENABLED:false}  # DISABLED
     # Minimum composite score (0-9) to qualify for trade execution
     # 4 = two strong scoring factors (VWAP+FVG) or four minor factors
     # 6 = high conviction setups only
