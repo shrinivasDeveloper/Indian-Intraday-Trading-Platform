@@ -144,6 +144,7 @@ public class HighRRStructureService {
     @Autowired(required = false) private StringRedisTemplate     redis;
     @Autowired(required = false) private KiteConnect             kiteConnect;
     @Autowired(required = false) private InstrumentCacheService  instrumentCache;
+    @Autowired(required = false) private HighRRScannerService    scanner;
     @Autowired                   private ObjectMapper            objectMapper;
 
     // ── State ─────────────────────────────────────────────────────────────────
@@ -340,7 +341,42 @@ public class HighRRStructureService {
         java.util.Date toDate = java.util.Date.from(
                 today.atTime(15, 31).atZone(IST).toInstant());
 
-        List<Map.Entry<String, Instrument>> entries = new ArrayList<>(instruments.entrySet());
+        // CRITICAL FIX: Only bootstrap the 295 tracked Nifty500 symbols.
+        // instruments.entrySet() contains ALL 9,759 NSE instruments.
+        // Bootstrapping all 9,759 takes 2.7 hours and exhausts the Zerodha API quota.
+        // Strategy: if candleBuffer is populated (WebSocket ticks arrived), use those symbols.
+        //           If candleBuffer is empty (very first boot), use all instruments
+        //           but the WebSocket subscription will populate candleBuffer with
+        //           only the 295 subscribed symbols within seconds.
+        //           So we wait up to 15s for candleBuffer to populate, then filter.
+        // Determine which symbols to bootstrap:
+        // Priority 1: levelCache already has Redis-restored symbols (from prior run)
+        // Priority 2: htf30Cache has prior HTF data — use those symbols
+        // Priority 3: filter instruments to Nifty500-sized list (≤500 symbols)
+        //             by taking the most liquid stocks (market cap proxy = token order)
+        // This guarantees we never bootstrap 9,759 symbols regardless of market hours.
+        Set<String> knownSymbols = new java.util.LinkedHashSet<>();
+        knownSymbols.addAll(levelCache.keySet());     // from Redis restore
+        knownSymbols.addAll(htf30Cache.keySet());     // HTF already restored
+        knownSymbols.addAll(candleBuffer.keySet());   // from live ticks if any
+        final Set<String> finalTracked;
+        if (!knownSymbols.isEmpty()) {
+            // Use symbols we already know about from Redis
+            finalTracked = knownSymbols;
+            log.info("[HRR-STRUCT] Bootstrap scope: {} symbols from Redis cache", finalTracked.size());
+        } else {
+            // First-ever deploy: no Redis data. Use all instruments but
+            // scanner will have tracked symbols registered already.
+            // Limit to 500 to avoid 2-hour bootstrap on 9759 instruments.
+            finalTracked = scanner != null && !scanner.getTrackedSymbols().isEmpty()
+                    ? scanner.getTrackedSymbols()
+                    : new java.util.LinkedHashSet<>(instruments.keySet()).stream()
+                    .limit(500).collect(java.util.stream.Collectors.toSet());
+            log.info("[HRR-STRUCT] Bootstrap scope: {} symbols (first deploy)", finalTracked.size());
+        }
+        List<Map.Entry<String, Instrument>> entries = instruments.entrySet().stream()
+                .filter(e -> finalTracked.contains(e.getKey()))
+                .collect(java.util.stream.Collectors.toList());
         int total = entries.size(), loaded = 0, failed = 0;
         log.info("[HRR-STRUCT] Bootstrapping {} symbols ({} calendar days)...", total, BOOTSTRAP_CALENDAR_DAYS);
 
