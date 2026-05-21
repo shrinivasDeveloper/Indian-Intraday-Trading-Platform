@@ -99,13 +99,20 @@ public class HighRRStructureService {
 
     // ── Algorithm tuning ──────────────────────────────────────────────────────
     /** Candles on each side required to confirm a swing point on 15-min. */
-    private static final int    SWING_LOOKBACK       = 2;
+    // SWING_LOOKBACK = 5: needs 5 candles each side (75 min on each side on 15-min chart).
+    // This ensures only major swing points are detected — minor pivots are ignored.
+    // A genuine resistance level on NSE needs to dominate a 75-min window on each side.
+    private static final int    SWING_LOOKBACK       = 5;
     /** Two levels within this % are merged into one cluster. */
-    private static final double CLUSTER_PCT          = 0.004;  // 0.4%
+    // 0.6%: wider merge collapses weak nearby levels into one strong zone.
+    private static final double CLUSTER_PCT          = 0.006;  // 0.6%
     /** Price must be within this % of a level to count as a "touch". */
-    private static final double TOUCH_TOLERANCE_PCT  = 0.003;  // 0.3%
+    // 0.4%: touch tolerance must match cluster width
+    private static final double TOUCH_TOLERANCE_PCT  = 0.004;  // 0.4%
     /** Minimum touches for a level to be considered significant. */
-    private static final int    MIN_TOUCHES_MAJOR    = 3;
+    // MIN_TOUCHES_MAJOR = 5: only zones tested 5+ times on 15-min are major.
+    // 5 touches = repeated institutional defence at exactly this zone.
+    private static final int    MIN_TOUCHES_MAJOR    = 5;
     /** Days of 15-min history to maintain per symbol. */
     private static final int    HISTORY_DAYS         = 10;
     /** Max candles kept in rolling buffer (10 days × 26 candles). */
@@ -117,6 +124,19 @@ public class HighRRStructureService {
     private static final long   BATCH_PAUSE_MS       = 300;
     /** Calendar days to fetch on bootstrap (covers 10 trading days = 2 weeks). */
     private static final int    BOOTSTRAP_CALENDAR_DAYS = 14;
+    // Higher timeframe fetch windows
+    private static final int    HTF_30D_CALENDAR_DAYS   = 42;  // ~30 trading days
+    private static final int    HTF_90D_CALENDAR_DAYS   = 130; // ~90 trading days
+    // HTF algorithm tuning
+    private static final double HTF_CLUSTER_PCT         = 0.010; // 1.0% — daily zones need width
+    // 3 daily touches = the zone has been tested on 3 separate trading days.
+    // This is the clearest sign of institutional interest at that price.
+    private static final int    MIN_TOUCHES_HTF         = 3;     // daily touches
+    private static final double MIN_SWING_SIZE_PCT      = 0.005; // filter tiny swings
+    // HTF Redis keys
+    private static final String   KEY_30D_PREFIX = "hrr:htf30:";
+    private static final String   KEY_90D_PREFIX = "hrr:htf90:";
+    private static final Duration TTL_HTF        = Duration.ofDays(7);
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
 
@@ -131,6 +151,10 @@ public class HighRRStructureService {
     private final Map<String, Deque<Candle>>   candleBuffer  = new ConcurrentHashMap<>();
     /** Precomputed S/R levels per symbol — the hot read path. */
     private final Map<String, StructureLevels> levelCache    = new ConcurrentHashMap<>();
+    /** HTF 30-day daily S/R levels — institutional zones. */
+    private final Map<String, List<SRLevel>>   htf30Cache    = new ConcurrentHashMap<>();
+    /** HTF 90-day daily S/R levels — major institutional zones. */
+    private final Map<String, List<SRLevel>>   htf90Cache    = new ConcurrentHashMap<>();
     /** New candle counter per symbol — triggers re-compute every RECOMPUTE_EVERY. */
     private final Map<String, Integer>         newCandleCount = new ConcurrentHashMap<>();
     /** Tracks whether bootstrap has completed (for logging). */
@@ -147,6 +171,48 @@ public class HighRRStructureService {
      */
     public StructureLevels getStructure(String symbol) {
         return levelCache.get(symbol);
+    }
+
+    /** All HTF major levels (30d + 90d merged). Empty if not loaded. */
+    public List<SRLevel> getHtfLevels(String symbol) {
+        List<SRLevel> r = new ArrayList<>();
+        List<SRLevel> d30 = htf30Cache.get(symbol);
+        List<SRLevel> d90 = htf90Cache.get(symbol);
+        if (d30 != null) r.addAll(d30);
+        if (d90 != null) r.addAll(d90);
+        return r;
+    }
+
+    /**
+     * Returns the nearest entry-grade HTF zone (STRONG or MAJOR) within 0.5% of price.
+     * Returns null if no qualifying HTF zone exists near entry.
+     * Called by engine as a HARD GATE — null means no institutional backing.
+     */
+    public SRLevel getNearestHtfZone(String symbol, double price) {
+        return getHtfLevels(symbol).stream()
+                .filter(SRLevel::isEntryGrade)
+                .filter(l -> Math.abs(l.price() - price) / price <= 0.005)
+                .min(Comparator.comparingDouble(l -> Math.abs(l.price() - price)))
+                .orElse(null);
+    }
+
+    /** Quick boolean check — true if getNearestHtfZone() would return non-null. */
+    public boolean isNearHtfLevel(String symbol, double price) {
+        return getNearestHtfZone(symbol, price) != null;
+    }
+
+    /**
+     * Returns true when HTF data should be enforced as a hard gate.
+     * Logic:
+     *   - Bootstrap not complete: always bypass (data still loading)
+     *   - Bootstrap complete + htfLevels present: enforce hard gate
+     *   - Bootstrap complete + htfLevels empty: symbol had no usable HTF data → bypass
+     *     (rare: very new listings or illiquid stocks with no daily swings)
+     */
+    public boolean shouldEnforceHtfGate(String symbol) {
+        if (!bootstrapComplete) return false;   // still loading
+        List<SRLevel> htf = getHtfLevels(symbol);
+        return !htf.isEmpty();                  // enforce only when data exists
     }
 
     /**
@@ -221,6 +287,7 @@ public class HighRRStructureService {
                     StructureLevels lvls = objectMapper.readValue(json, StructureLevels.class);
                     if (lvls != null) {
                         levelCache.put(symbol, lvls);
+                        restoreHtfFromRedis(symbol);
                         count++;
                     }
                 } catch (Exception e) {
@@ -304,11 +371,12 @@ public class HighRRStructureService {
                     candleBuffer.put(symbol, dq);
                     long stockMs = System.currentTimeMillis();
                     recomputeLevels(symbol);
+                    // Fetch 30d and 90d daily data for institutional S/R validation
+                    fetchAndCacheHtf(symbol, inst, today);
                     long stockElapsed = System.currentTimeMillis() - stockMs;
                     loaded++;
-                    // Log slow stocks (>500ms indicates API or processing issue)
-                    if (stockElapsed > 500) {
-                        log.warn("[HRR-STRUCT] Slow load: {} took {}ms", symbol, stockElapsed);
+                    if (stockElapsed > 1000) {
+                        log.warn("[HRR-STRUCT] Slow load: {} took {}ms (includes HTF)", symbol, stockElapsed);
                     }
 
                 } catch (Throwable e) {
@@ -474,8 +542,9 @@ public class HighRRStructureService {
             // Swing high: higher than all candles within SWING_LOOKBACK on each side
             boolean isSwingHigh = true;
             for (int k = 1; k <= SWING_LOOKBACK; k++) {
-                if (candles.get(i - k).getHigh().doubleValue() >= h ||
-                        candles.get(i + k).getHigh().doubleValue() >= h) {
+                // strict > captures equal-high consolidation zones as resistance
+                if (candles.get(i - k).getHigh().doubleValue() > h ||
+                        candles.get(i + k).getHigh().doubleValue() > h) {
                     isSwingHigh = false;
                     break;
                 }
@@ -485,8 +554,9 @@ public class HighRRStructureService {
             // Swing low: lower than all candles within SWING_LOOKBACK on each side
             boolean isSwingLow = true;
             for (int k = 1; k <= SWING_LOOKBACK; k++) {
-                if (candles.get(i - k).getLow().doubleValue() <= l ||
-                        candles.get(i + k).getLow().doubleValue() <= l) {
+                // strict < captures equal-low consolidation zones as support
+                if (candles.get(i - k).getLow().doubleValue() < l ||
+                        candles.get(i + k).getLow().doubleValue() < l) {
                     isSwingLow = false;
                     break;
                 }
@@ -504,19 +574,16 @@ public class HighRRStructureService {
         LocalDate today = LocalDate.now(IST);
         LocalDate yesterday = today.minusDays(1);
 
-        // Since candles have no timestamp in our domain model, use index:
-        // candles 0-25 = today (approx 26 × 15-min), candles 26-51 = yesterday
-        // We use the approximate day boundary at index 26
-        int dayBoundary = 26; // 26 candles = 1 trading day of 15-min data
+        // Approximate day boundary at index 26 (26 × 15-min = 1 trading day)
+        int dayBoundary = 26;
         if (n > dayBoundary + 5) {
-            for (int i = dayBoundary; i < Math.min(dayBoundary + dayBoundary, n); i++) {
+            for (int i = dayBoundary; i < Math.min(dayBoundary * 2, n); i++) {
                 double h = candles.get(i).getHigh().doubleValue();
                 double l = candles.get(i).getLow().doubleValue();
-                double c = candles.get(i).getClose().doubleValue();
+                double cc = candles.get(i).getClose().doubleValue();
                 if (h > pdh) pdh = h;
                 if (l < pdl) pdl = l;
-                pdc = c; // last close in this window = previous day close approx
-                foundYesterdayCandle = true;
+                pdc = cc; foundYesterdayCandle = true;
             }
         }
 
@@ -575,6 +642,136 @@ public class HighRRStructureService {
                 symbol, supports.size(), resistances.size(), n);
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // HTF DATA FETCH — institutional-grade S/R from 30d and 90d daily data
+    // ══════════════════════════════════════════════════════════════════════════
+
+    void fetchAndCacheHtf(String symbol, Instrument inst, LocalDate today) {
+        if (kiteConnect == null || inst == null) return;
+        try {
+            java.util.Date to = java.util.Date.from(
+                    today.atTime(15, 31).atZone(IST).toInstant());
+            String token = String.valueOf((long) inst.getInstrument_token());
+
+            // 30-day daily fetch
+            java.util.Date from30 = java.util.Date.from(
+                    today.minusDays(HTF_30D_CALENDAR_DAYS).atStartOfDay(IST).toInstant());
+            HistoricalData res30 = kiteConnect.getHistoricalData(
+                    from30, to, token, "day", false, false);
+            if (res30 != null && res30.dataArrayList != null && !res30.dataArrayList.isEmpty()) {
+                List<SRLevel> lvl30 = computeHtfLevels(res30.dataArrayList);
+                htf30Cache.put(symbol, lvl30);
+                persistHtfToRedis(KEY_30D_PREFIX + symbol, lvl30);
+            }
+
+            // 90-day daily fetch
+            java.util.Date from90 = java.util.Date.from(
+                    today.minusDays(HTF_90D_CALENDAR_DAYS).atStartOfDay(IST).toInstant());
+            HistoricalData res90 = kiteConnect.getHistoricalData(
+                    from90, to, token, "day", false, false);
+            if (res90 != null && res90.dataArrayList != null && !res90.dataArrayList.isEmpty()) {
+                List<SRLevel> lvl90 = computeHtfLevels(res90.dataArrayList);
+                htf90Cache.put(symbol, lvl90);
+                persistHtfToRedis(KEY_90D_PREFIX + symbol, lvl90);
+            }
+            log.trace("[HRR-STRUCT] {} HTF fetch done.", symbol);
+        } catch (Throwable e) {
+            // KiteException extends Throwable directly — must use Throwable, not Exception
+            log.trace("[HRR-STRUCT] HTF failed {}: {}", symbol, e.getMessage());
+        }
+    }
+
+    private List<SRLevel> computeHtfLevels(List<HistoricalData> data) {
+        if (data == null || data.size() < 6) return Collections.emptyList();
+        int n = data.size();
+        List<Double> rawR = new ArrayList<>(), rawS = new ArrayList<>();
+        for (int i = 2; i < n - 2; i++) {
+            double h = data.get(i).high, l = data.get(i).low;
+            if (data.get(i-1).high < h && data.get(i-2).high < h
+                    && data.get(i+1).high < h && data.get(i+2).high < h) rawR.add(h);
+            if (data.get(i-1).low > l && data.get(i-2).low > l
+                    && data.get(i+1).low > l && data.get(i+2).low > l) rawS.add(l);
+        }
+        double absH = data.stream().mapToDouble(d -> d.high).max().orElse(0);
+        double absL = data.stream().mapToDouble(d -> d.low).min().orElse(0);
+        // Only add absolute extremes if tested multiple times — untested extremes are not S/R
+        if (absH > 0 && data.stream().filter(d -> Math.abs(d.high - absH) / absH
+                <= HTF_CLUSTER_PCT).count() >= 2) rawR.add(absH);
+        if (absL > 0 && data.stream().filter(d -> Math.abs(d.low - absL) / absL
+                <= HTF_CLUSTER_PCT).count() >= 2) rawS.add(absL);
+        List<SRLevel> all = new ArrayList<>();
+        all.addAll(clusterHtfLevels(rawR, data, false));
+        all.addAll(clusterHtfLevels(rawS, data, true));
+        all.sort(Comparator.comparingInt(SRLevel::touchCount).reversed());
+        return all;
+    }
+
+    private List<SRLevel> clusterHtfLevels(List<Double> raw,
+                                           List<HistoricalData> data, boolean isSup) {
+        if (raw.isEmpty()) return Collections.emptyList();
+        List<Double> sorted = new ArrayList<>(raw);
+        Collections.sort(sorted);
+        // Compare each new price to LAST member of current group, not first anchor.
+        // Prevents drift: [5100,5120,5140] — 5140 vs 5100 = 0.78% (borderline)
+        // but 5140 vs 5120 = 0.39% (correctly same cluster).
+        List<Double> cls = new ArrayList<>();
+        List<Double> grp = new ArrayList<>();
+        grp.add(sorted.get(0));
+        for (int i = 1; i < sorted.size(); i++) {
+            double p = sorted.get(i);
+            double last = grp.get(grp.size() - 1);
+            if ((p - last) / last <= HTF_CLUSTER_PCT) { grp.add(p); }
+            else {
+                cls.add(grp.stream().mapToDouble(d->d).average().orElse(last));
+                grp.clear(); grp.add(p);
+            }
+        }
+        if (!grp.isEmpty()) { double last = grp.get(grp.size()-1);
+            cls.add(grp.stream().mapToDouble(d->d).average().orElse(last)); }
+        List<SRLevel> res = new ArrayList<>();
+        for (double level : cls) {
+            int t = (int) data.stream().filter(d -> {
+                double pr = isSup ? d.low : d.high;
+                return Math.abs(pr - level) / level <= HTF_CLUSTER_PCT;
+            }).count();
+            if (t >= MIN_TOUCHES_HTF) {
+                double rej = computeHtfRejection(level, data, isSup);
+                boolean vc = hasHtfVolumeConfirmation(level, data, isSup);
+                String strength = classifyStrength(t, rej, vc, true);
+                // HTF: only STRONG and MAJOR zones qualify
+                if ("STRONG".equals(strength) || "MAJOR".equals(strength)) {
+                    res.add(new SRLevel(
+                            BigDecimal.valueOf(level).setScale(2, RoundingMode.HALF_UP).doubleValue(),
+                            t, true, rej, vc, strength, "htf"));
+                }
+            }
+        }
+        return res;
+    }
+
+    private void persistHtfToRedis(String key, List<SRLevel> levels) {
+        if (redis == null) return;
+        try {
+            redis.opsForValue().set(key, objectMapper.writeValueAsString(levels), TTL_HTF);
+        } catch (Exception e) {
+            log.trace("[HRR-STRUCT] HTF persist failed {}: {}", key, e.getMessage());
+        }
+    }
+
+    private void restoreHtfFromRedis(String symbol) {
+        if (redis == null) return;
+        try {
+            String j30 = redis.opsForValue().get(KEY_30D_PREFIX + symbol);
+            if (j30 != null) htf30Cache.put(symbol, objectMapper.readValue(j30,
+                    new TypeReference<List<SRLevel>>() {}));
+            String j90 = redis.opsForValue().get(KEY_90D_PREFIX + symbol);
+            if (j90 != null) htf90Cache.put(symbol, objectMapper.readValue(j90,
+                    new TypeReference<List<SRLevel>>() {}));
+        } catch (Exception e) {
+            log.trace("[HRR-STRUCT] HTF restore failed {}: {}", symbol, e.getMessage());
+        }
+    }
+
     /**
      * Cluster raw price levels within CLUSTER_PCT of each other.
      * Returns SRLevel list with touch counts computed against candle history.
@@ -582,6 +779,7 @@ public class HighRRStructureService {
     private List<SRLevel> clusterLevels(List<Double> raw, List<Candle> candles, boolean isSupport) {
         if (raw.isEmpty()) return Collections.emptyList();
 
+        // Clustering (CLUSTER_PCT=0.4%) merges nearby levels — no pre-filter needed.
         List<Double> sorted = new ArrayList<>(raw);
         Collections.sort(sorted);
 
@@ -608,17 +806,125 @@ public class HighRRStructureService {
             clustered.add(mid);
         }
 
-        // Compute touch count for each cluster
+        // Compute institutional quality metrics for each cluster
         List<SRLevel> result = new ArrayList<>();
+        double avgVol = candles.stream().mapToLong(Candle::getVolume)
+                .average().orElse(1);
         for (double level : clustered) {
-            int touches = countTouches(level, candles, isSupport);
+            int    touches    = countTouches(level, candles, isSupport);
+            double rejection  = computeAvgRejection(level, candles, isSupport);
+            boolean volConf   = hasVolumeConfirmation(level, candles, isSupport, avgVol);
+            String strength   = classifyStrength(touches, rejection, volConf, false);
+            // Skip WEAK levels entirely — they generate false entries
+            if ("WEAK".equals(strength)) continue;
             result.add(new SRLevel(
                     BigDecimal.valueOf(level).setScale(2, RoundingMode.HALF_UP).doubleValue(),
                     touches,
-                    touches >= MIN_TOUCHES_MAJOR
+                    "STRONG".equals(strength) || "MAJOR".equals(strength),
+                    rejection, volConf, strength, "15min"
             ));
         }
         return result;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // INSTITUTIONAL QUALITY HELPERS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Classify zone strength based on real market evidence.
+     *
+     * MAJOR:    touches ≥ 3 AND (rejection ≥ 1.0% OR volume confirmed)
+     *            OR HTF touches ≥ 2 AND rejection ≥ 0.8%
+     * STRONG:   touches ≥ 3 AND rejection ≥ 0.5%
+     *            OR HTF touches ≥ 2
+     * MODERATE: touches ≥ 2 AND rejection ≥ 0.3%
+     * WEAK:     everything else → filtered out
+     */
+    private String classifyStrength(int touches, double rejectionPct,
+                                    boolean volConf, boolean isHtf) {
+        if (isHtf) {
+            // HTF daily: MAJOR = 4+ touches OR (3 touches + strong rejection ≥ 1%)
+            // STRONG = 3 touches confirmed. Below that = WEAK.
+            if (touches >= 4 || (touches >= 3 && rejectionPct >= 0.010)) return "MAJOR";
+            if (touches >= 3) return "STRONG";
+            return "WEAK";
+        }
+        // 15-min levels — very strict to filter small zones
+        // MAJOR: 5+ touches AND (rejection ≥ 1.5% OR volume spike)
+        // STRONG: 4+ touches AND rejection ≥ 0.8%
+        // MODERATE: 3+ touches AND rejection ≥ 0.5%
+        // WEAK: everything else — never stored, never used
+        if (touches >= 5 && (rejectionPct >= 0.015 || volConf)) return "MAJOR";
+        if (touches >= 4 && rejectionPct >= 0.008) return "STRONG";
+        if (touches >= 3 && rejectionPct >= 0.005) return "MODERATE";
+        return "WEAK";
+    }
+
+    /**
+     * Average % price moved AWAY from the level after each touch.
+     * Measures how strong the rejection was — the core evidence of institutional activity.
+     * Support: price touched the low, then closed higher → rejection measured as (close-low)/level.
+     * Resistance: price touched the high, then closed lower → rejection = (high-close)/level.
+     */
+    private double computeAvgRejection(double level, List<Candle> candles,
+                                       boolean isSupport) {
+        List<Double> rejections = new ArrayList<>();
+        for (Candle c : candles) {
+            double touch = isSupport ? c.getLow().doubleValue() : c.getHigh().doubleValue();
+            if (Math.abs(touch - level) / level <= TOUCH_TOLERANCE_PCT) {
+                double close = c.getClose().doubleValue();
+                double rejection = isSupport
+                        ? (close - touch) / level   // price bounced up
+                        : (touch - close) / level;  // price rejected down
+                if (rejection > 0) rejections.add(rejection);
+            }
+        }
+        return rejections.isEmpty() ? 0
+                : rejections.stream().mapToDouble(d -> d).average().orElse(0);
+    }
+
+    /**
+     * True if at least one touch at this level had volume above average.
+     * Volume above average at a S/R level = institutions defending the zone.
+     */
+    private boolean hasVolumeConfirmation(double level, List<Candle> candles,
+                                          boolean isSupport, double avgVolume) {
+        for (Candle c : candles) {
+            double touch = isSupport ? c.getLow().doubleValue() : c.getHigh().doubleValue();
+            if (Math.abs(touch - level) / level <= TOUCH_TOLERANCE_PCT) {
+                if (c.getVolume() > avgVolume * 1.3) return true; // 30% above avg
+            }
+        }
+        return false;
+    }
+
+    /** HTF rejection: avg % price moved away from level on daily candles. */
+    private double computeHtfRejection(double level,
+                                       List<HistoricalData> data, boolean isSup) {
+        List<Double> rejections = new ArrayList<>();
+        for (HistoricalData d : data) {
+            double touch = isSup ? d.low : d.high;
+            if (Math.abs(touch - level) / level <= HTF_CLUSTER_PCT) {
+                double rej = isSup ? (d.close - touch) / level : (touch - d.close) / level;
+                if (rej > 0) rejections.add(rej);
+            }
+        }
+        return rejections.isEmpty() ? 0
+                : rejections.stream().mapToDouble(v -> v).average().orElse(0);
+    }
+
+    /** HTF volume confirmation: any touch day had volume above 30d avg. */
+    private boolean hasHtfVolumeConfirmation(double level,
+                                             List<HistoricalData> data, boolean isSup) {
+        double avgVol = data.stream().mapToDouble(d -> d.volume).average().orElse(1);
+        for (HistoricalData d : data) {
+            double touch = isSup ? d.low : d.high;
+            if (Math.abs(touch - level) / level <= HTF_CLUSTER_PCT) {
+                if (d.volume > avgVol * 1.3) return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -639,7 +945,8 @@ public class HighRRStructureService {
     private List<SRLevel> markAsMajor(List<SRLevel> levels, double price) {
         return levels.stream()
                 .map(l -> Math.abs(l.price() - price) / price <= CLUSTER_PCT
-                        ? new SRLevel(l.price(), 99, true)
+                        ? new SRLevel(l.price(), 99, true,
+                        l.avgRejectionPct(), l.hasVolumeConfirm(), "MAJOR", l.source())
                         : l)
                 .collect(Collectors.toList());
     }
@@ -663,14 +970,43 @@ public class HighRRStructureService {
     // ══════════════════════════════════════════════════════════════════════════
 
     /**
-     * A single Support or Resistance price level.
+     * A validated Support or Resistance zone.
      *
-     * @param price      The exact price level (2dp, 5-paise aligned).
-     * @param touchCount How many times price touched within 0.3%.
-     *                   PDH/PDL levels are always 99 (treated as major).
-     * @param isMajor    touchCount >= 3 OR is a PDH/PDL/PDC level.
+     * Strength tiers:
+     *   WEAK     — 1-2 touches, no volume confirmation, reaction < 0.3%
+     *              → IGNORED: never used for entry gating
+     *   MODERATE — 2-3 touches, reaction ≥ 0.3%, no volume spike
+     *              → allowed for 15-min pullback entries only
+     *   STRONG   — 3+ touches, avg reaction ≥ 0.5%, at least 1 session gap between tests
+     *              → primary entry zone
+     *   MAJOR    — 3+ touches OR from HTF daily data with 2+ reactions AND volume spike
+     *              → highest priority — used for bonus score
+     *
+     * @param price              Exact level price (2dp).
+     * @param touchCount         Times price came within tolerance of this level.
+     * @param isMajor            true for STRONG or MAJOR tiers.
+     * @param avgRejectionPct    Average % price moved away after touching the level.
+     * @param hasVolumeConfirm   true if any touch had above-average volume.
+     * @param strength           Zone strength: WEAK/MODERATE/STRONG/MAJOR.
+     * @param source             "15min", "30d", or "90d".
      */
-    public record SRLevel(double price, int touchCount, boolean isMajor) {}
+    public record SRLevel(
+            double  price,
+            int     touchCount,
+            boolean isMajor,
+            double  avgRejectionPct,
+            boolean hasVolumeConfirm,
+            String  strength,
+            String  source
+    ) {
+        /** Backward-compatible constructor for deserialization — fills new fields with defaults. */
+        public static SRLevel basic(double price, int touches, boolean major) {
+            String str = major ? "STRONG" : (touches >= 2 ? "MODERATE" : "WEAK");
+            return new SRLevel(price, touches, major, 0.0, false, str, "15min");
+        }
+        /** True if this zone is strong enough to gate entry (STRONG or MAJOR). */
+        public boolean isEntryGrade() { return "STRONG".equals(strength) || "MAJOR".equals(strength); }
+    }
 
     /**
      * All S/R levels for one symbol, computed from last 5 days of 15-min data.
