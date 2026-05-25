@@ -674,7 +674,10 @@ public class HighRRStrategyEngine {
             // LONG: candle must close bullish (green). Bearish close at support
             //       = price still falling = no confirmation yet.
             // SHORT: candle must close bearish (red) at resistance.
-            if (bodyRatio >= MIN_BODY_RATIO) {
+            // Threshold: 0.20 (same as C3 floor) so every non-doji candle
+            // that passes C3 also has direction enforced by C1.
+            // Previously 0.30 — left a 0.20-0.30 body gap with no direction check.
+            if (bodyRatio >= 0.20) {
                 if (isBuy && cClose < cOpen) {
                     log.debug("[HIGHRR] {} BUY Gate-C1 BLOCKED — bearish candle body at support "
                                     + "(close={} < open={})",
