@@ -383,8 +383,8 @@ public class HighRRStrategyEngine {
         // Grade B (45-79): good structure but marginal breadth → BNF must confirm.
         // Grade C (25-44): weak signals → only exceptional setups (score ≥ 160) fire.
         marketGrade = qualityPoints >= 80 ? "A"
-                : qualityPoints >= 45 ? "B"
-                : qualityPoints >= 25 ? "C" : "D";
+                    : qualityPoints >= 45 ? "B"
+                    : qualityPoints >= 25 ? "C" : "D";
 
         // Grade D still blocks
         if ("D".equals(marketGrade)) {
@@ -636,10 +636,10 @@ public class HighRRStrategyEngine {
                 SectorStrengthService.SectorData sd = sectorStrength.getSector(sector);
                 if (sd != null) {
                     boolean sectorAligned = isBuy
-                            ? (sd.alignedBullish() && sd.changePercent() >= 0.50)
-                            : (sd.alignedBearish() && sd.changePercent() <= -0.50);
+                            ? (sd.alignedBullish() && sd.changePercent() >= 0.25)
+                            : (sd.alignedBearish() && sd.changePercent() <= -0.25);
                     if (!sectorAligned) {
-                        log.debug("[HIGHRR] {} {} Gate6 BLOCKED — sector {} {}% (need ≥0.50%)",
+                        log.debug("[HIGHRR] {} {} Gate6 BLOCKED — sector {} {}% (need ≥0.25%)",
                                 symbol, isBuy ? "BUY" : "SELL", sector,
                                 String.format("%.2f", sd.changePercent()));
                         return null;
@@ -680,14 +680,14 @@ public class HighRRStrategyEngine {
             if (bodyRatio >= 0.20) {
                 if (isBuy && cClose < cOpen) {
                     log.debug("[HIGHRR] {} BUY Gate-C1 BLOCKED — bearish candle body at support "
-                                    + "(close={} < open={})",
+                            + "(close={} < open={})",
                             symbol,
                             String.format("%.2f", cClose), String.format("%.2f", cOpen));
                     return null;
                 }
                 if (!isBuy && cClose > cOpen) {
                     log.debug("[HIGHRR] {} SELL Gate-C1 BLOCKED — bullish candle body at resistance "
-                                    + "(close={} > open={})",
+                            + "(close={} > open={})",
                             symbol,
                             String.format("%.2f", cClose), String.format("%.2f", cOpen));
                     return null;
@@ -702,7 +702,7 @@ public class HighRRStrategyEngine {
                 double bodyDist = zonePx > 0 ? Math.abs(bodyMid - zonePx) / zonePx : 0;
                 if (bodyDist > 0.005) {
                     log.debug("[HIGHRR] {} {} Gate-C2 BLOCKED — body midpoint ({}) is "
-                                    + "{}% from zone ({}) — wick-only touch, body not near zone",
+                            + "{}% from zone ({}) — wick-only touch, body not near zone",
                             symbol, isBuy ? "BUY" : "SELL",
                             String.format("%.2f", bodyMid),
                             String.format("%.2f", bodyDist * 100),
@@ -716,7 +716,7 @@ public class HighRRStrategyEngine {
             // At a zone, doji = indecision. Wait for next candle to confirm.
             if (bodyRatio < 0.20 && rangeAsPct > 0.001) {
                 log.debug("[HIGHRR] {} {} Gate-C3 BLOCKED — doji/spinning top "
-                                + "(body={}% of range), no directional conviction",
+                        + "(body={}% of range), no directional conviction",
                         symbol, isBuy ? "BUY" : "SELL",
                         String.format("%.0f", bodyRatio * 100));
                 return null;
@@ -731,11 +731,11 @@ public class HighRRStrategyEngine {
             double zonePx = entryAnchorLevel.price();
             double drift  = zonePx > 0
                     ? (isBuy ? (entryDbl - zonePx) / zonePx
-                    : (zonePx - entryDbl) / zonePx)
+                             : (zonePx - entryDbl) / zonePx)
                     : 0;
             if (drift > MAX_ZONE_DRIFT_PCT) {
                 log.debug("[HIGHRR] {} {} Gate-C4 BLOCKED — price already {}% from zone "
-                                + "(max {}%, late entry / momentum chasing)",
+                        + "(max {}%, late entry / momentum chasing)",
                         symbol, isBuy ? "BUY" : "SELL",
                         String.format("%.2f", drift * 100),
                         String.format("%.1f", MAX_ZONE_DRIFT_PCT * 100));
@@ -758,7 +758,7 @@ public class HighRRStrategyEngine {
             atFallingTrendline = structure.atFallingTrendline(entryDbl, tl);
             if (atRisingTrendline) {
                 log.debug("[HIGHRR] {} TRENDLINE CONFLUENCE — price at rising trendline {} "
-                                + "AND horizontal zone {} (ascending triangle pattern)",
+                        + "AND horizontal zone {} (ascending triangle pattern)",
                         symbol,
                         String.format("%.2f", structure.trendlineSupport()),
                         entryAnchorLevel != null
@@ -766,7 +766,7 @@ public class HighRRStrategyEngine {
             }
             if (atFallingTrendline && !isBuy) {
                 log.debug("[HIGHRR] {} TRENDLINE CONFLUENCE — price at falling trendline {} "
-                                + "AND horizontal resistance {} (descending triangle SHORT)",
+                        + "AND horizontal resistance {} (descending triangle SHORT)",
                         symbol,
                         String.format("%.2f", structure.trendlineResistance()),
                         entryAnchorLevel != null
@@ -823,7 +823,7 @@ public class HighRRStrategyEngine {
                         : (corrected - entryDbl) >= atr14Dist;
                 if (correctedSafeFromNoise) {
                     log.debug("[HIGHRR] {} {} Gate-C5: SL tightened {} → {} "
-                                    + "(zone={}, 0.3% cap, ATR safe)",
+                            + "(zone={}, 0.3% cap, ATR safe)",
                             symbol, isBuy ? "BUY" : "SELL",
                             String.format("%.2f", slD),
                             String.format("%.2f", corrected),
@@ -831,7 +831,7 @@ public class HighRRStrategyEngine {
                     slD = corrected;
                 } else {
                     log.debug("[HIGHRR] {} {} Gate-C5: SL kept at {} (C5 correction would "
-                                    + "breach ATR floor {}, skipping)",
+                            + "breach ATR floor {}, skipping)",
                             symbol, isBuy ? "BUY" : "SELL",
                             String.format("%.2f", slD),
                             String.format("%.2f", atr14Dist));
