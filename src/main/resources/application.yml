@@ -304,6 +304,31 @@ strategy:
     # Time-stop for news catalyst trades: 20 minutes (news impact fades fast)
     time-stop-minutes: 20  # 20 min time stop for news — news impact fades quickly
 
+  # ================================
+  # SMC INSTITUTIONAL V1
+  # Fires at most 2 signals/session via SmartChannelPullbackSignalEvent pipeline.
+  # Minimum 1:3 RR required. Bootstrap fetches daily + 15m + 5m candles on startup.
+  # ================================
+  smc:
+    enabled: ${SMC_ENABLED:true}
+    # Bootstrap: wait N seconds after startup before fetching candles from Zerodha.
+    # Allows InstrumentCacheService to finish loading instrument list first.
+    # Increase to 180s if instruments take longer to load in your environment.
+    bootstrap-delay-seconds: 120
+    # Minimum confidence score (0-100) required to fire a signal.
+    # Higher = fewer but higher quality signals.
+    # Recommended: 60-70 for paper trading, raise to 70-80 for live.
+    min-confidence: 60
+    # Minimum 1:N risk-reward ratio. Spec requires 1:3 minimum.
+    # Do not lower below 3.0.
+    min-rr: 3.0
+    # Risk per trade as fraction of capital (1% = 0.01).
+    risk-per-trade: 0.01
+    # Time-stop in minutes. Positions older than this are closed by PaperTradeManagementService.
+    time-stop-minutes: 90
+    # Max trades per session (2 per day, consistent with platform pattern).
+    max-trades-per-day: 2
+
 # ================================
 # WARMUP CONFIG
 # ================================
