@@ -108,6 +108,11 @@ public class DashboardController {
     private final OrbDataService               orbDataService;
     private final OrbStrategyEngine            orbStrategyEngine;
 
+    // ── SMC Institutional V1 ──────────────────────────────────────────────
+    private final com.trading.strategy.smc.SmcInstitutionalStrategyEngine  smcEngine;
+    private final com.trading.strategy.smc.SmcInstitutionalCandleService   smcCandleService;
+    private final com.trading.strategy.smc.SmcSignalLoggerService           smcSignalLogger;
+
     @Value("${trading.capital:100000}") private BigDecimal capital;
     @Value("${trading.mode:PAPER}")     private String     tradingMode;
 
@@ -1380,6 +1385,26 @@ public class DashboardController {
             out.put("error", e.getMessage());
         }
         return out;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // GET /api/dashboard/smc/status — SMC_INSTITUTIONAL_V1 live status
+    // ══════════════════════════════════════════════════════════════════════
+
+    @GetMapping("/smc/status")
+    @ResponseBody
+    public Map<String, Object> getSmcStatus() {
+        Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("strategyName",        "SMC_INSTITUTIONAL_V1");
+        m.put("enabled",             smcEngine.isEnabled());
+        m.put("tradesExecutedToday", smcEngine.getTradesExecutedToday());
+        m.put("remainingSlots",      smcEngine.getRemainingSlots());
+        m.put("bootstrapComplete",   smcCandleService.isBootstrapComplete());
+        m.put("symbolsLoaded",       smcCandleService.getSymbolsLoaded());
+        m.put("signalsFiredToday",   smcSignalLogger.getSignalCountToday());
+        m.put("minRr",               3.0);
+        m.put("maxTradesPerDay",     2);
+        return m;
     }
 
 }
