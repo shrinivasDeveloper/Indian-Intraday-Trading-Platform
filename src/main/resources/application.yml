@@ -326,8 +326,11 @@ strategy:
     risk-per-trade: 0.01
     # Time-stop in minutes. Positions older than this are closed by PaperTradeManagementService.
     time-stop-minutes: 90
-    # Max trades per session (2 per day, consistent with platform pattern).
-    max-trades-per-day: 2
+    # Max trades per session: no SMC-specific cap — uses platform circuit-breaker
+    # (circuit-breaker.max-trades-per-day: 10) which applies across all strategies.
+    # Last candle close time to evaluate (HH:mm). Signals after this are not fired.
+    # 14:40 = last 5m candle that can realistically be managed before 15:00 EOD close.
+    trade-end: "14:40"
 
 # ================================
 # WARMUP CONFIG

@@ -100,7 +100,6 @@
         .metric-box{flex:1;background:#21262d;border-radius:6px;padding:6px 9px;text-align:center;}
         .metric-box .mv{font-size:16px;font-weight:700;}
         .metric-box .ml{font-size:10px;color:var(--muted);margin-top:2px;}
-        /* ORB */
         .orb-setup-card{background:#0d1117;border:1px solid var(--border);border-radius:8px;
           padding:10px;margin-bottom:7px;transition:border-color .2s;}
         .orb-setup-card.selected{border-color:var(--gold);background:#1a1600;}
@@ -123,7 +122,6 @@
         .tl-line-done{background:var(--green);}
         .tl-line-wait{background:var(--border);}
         .tl-line-active{background:linear-gradient(90deg,var(--green),var(--blue));}
-        /* HighRR */
         .hrr-trade-card{background:#12101f;border:1px solid var(--purple);border-radius:8px;
           padding:10px;margin-bottom:7px;}
         .hrr-trade-card.short{background:#1a0d1a;border-color:var(--red);}
@@ -187,8 +185,7 @@
             <div class="ct">🎯 Market Phase</div>
             <div style="display:flex;gap:9px;align-items:flex-start;margin-bottom:7px">
                 <div id="phase-big" class="pc pp2" style="font-size:13px;padding:4px 12px;flex-shrink:0">PRE_OPEN</div>
-                <div><div id="phase-desc" class="sub">—</div>
-                </div>
+                <div><div id="phase-desc" class="sub">—</div></div>
             </div>
             <div class="bt"><div id="phase-prog" class="bf" style="width:0%;background:var(--muted)"></div></div>
         </div>
@@ -304,7 +301,6 @@
 
 <!-- HIGH RR TAB -->
 <div id="tc-highrr" class="tc">
-    <!-- Summary cards -->
     <div class="g g4" style="padding-bottom:0">
         <div class="card highlight-purple">
             <div class="ct">🏆 Trades Executed</div>
@@ -327,8 +323,6 @@
             <div class="sub" id="hrr-wr">Win Rate: —</div>
         </div>
     </div>
-
-    <!-- Slot visualizer + details -->
     <div class="g g2" style="padding-top:0">
         <div class="card highlight-purple">
             <div class="ct">🎰 Daily Execution Slots</div>
@@ -349,8 +343,6 @@
             </div>
         </div>
     </div>
-
-    <!-- P&L breakdown -->
     <div class="g g2" style="padding-top:0">
         <div class="card">
             <div class="ct">💹 High RR P&L Today</div>
@@ -559,7 +551,6 @@
 
 <!-- PORTFOLIO -->
 <div id="tc-portfolio" class="tc">
-    <!-- Summary row -->
     <div class="g g4" style="padding-bottom:0">
         <div class="card highlight-gold">
             <div class="ct">📊 Total P&L Today</div>
@@ -582,62 +573,36 @@
             <div class="sub" id="port-active-count">0 active</div>
         </div>
     </div>
-
-    <!-- Strategy allocation cards -->
-    <div class="g" style="padding-top:0" id="port-strat-grid">
-        <!-- populated by JS -->
-    </div>
-
-    <!-- Full trade log table -->
+    <div class="g" style="padding-top:0" id="port-strat-grid"></div>
     <div class="card" style="margin:0 9px 9px">
         <div class="ct">📋 Daily Trade Log — All Strategies (<span id="port-log-count">0</span> trades)</div>
         <div id="port-log-empty" class="sub" style="padding:5px 0">No trades today</div>
         <div style="overflow-x:auto">
             <table id="port-log-tbl" style="display:none;min-width:900px">
-                <thead>
-                <tr>
-                    <th>#</th>
-                    <th>Symbol</th>
-                    <th>Strategy</th>
-                    <th>Dir</th>
-                    <th>Qty</th>
-                    <th>Entry ₹</th>
-                    <th>Entry Time</th>
-                    <th>Exit ₹</th>
-                    <th>Exit Time</th>
-                    <th>SL ₹</th>
-                    <th>T1 ₹</th>
-                    <th>LTP ₹</th>
-                    <th>P&L</th>
-                    <th>R</th>
-                    <th>Reason</th>
-                    <th>Status</th>
-                </tr>
-                </thead>
+                <thead><tr><th>#</th><th>Symbol</th><th>Strategy</th><th>Dir</th><th>Qty</th><th>Entry ₹</th><th>Entry Time</th><th>Exit ₹</th><th>Exit Time</th><th>SL ₹</th><th>T1 ₹</th><th>LTP ₹</th><th>P&L</th><th>R</th><th>Reason</th><th>Status</th></tr></thead>
                 <tbody id="port-log-body"></tbody>
             </table>
         </div>
     </div>
 </div>
 
-
-<!-- SMC / BEST TRADE TAB -->
+<!-- SMC TAB — SMC_INSTITUTIONAL_V1 -->
 <div id="tc-smc" class="tc">
     <div class="g g4" style="padding-bottom:0">
         <div class="card highlight-purple">
             <div class="ct">🧠 SMC Status</div>
             <div class="stat spur" id="smc-status">—</div>
-            <div class="sub" id="smc-fired">Trade fired: —</div>
+            <div class="sub" id="smc-fired">Signals fired: —</div>
         </div>
         <div class="card">
-            <div class="ct">🔍 Cycles Run</div>
-            <div class="stat sb" id="smc-cycles">0</div>
-            <div class="sub">Every 15min from 9:30</div>
+            <div class="ct">🔄 Bootstrap</div>
+            <div class="stat sb" id="smc-cycles">⏳</div>
+            <div class="sub">Candle data readiness</div>
         </div>
         <div class="card">
-            <div class="ct">📊 Scanned</div>
+            <div class="ct">📊 Symbols Loaded</div>
             <div class="stat" id="smc-scanned">0</div>
-            <div class="sub" id="smc-qualified">0 qualified</div>
+            <div class="sub" id="smc-qualified">— slots left</div>
         </div>
         <div class="card">
             <div class="ct">💰 SMC P&L</div>
@@ -647,39 +612,43 @@
     </div>
     <div class="g g2" style="padding-top:0">
         <div class="card highlight-purple">
-            <div class="ct">🎯 Best Setup Today</div>
-            <div id="smc-setup-body"><div class="sub">No setup found yet — waiting for 4 days of data accumulation</div></div>
+            <div class="ct">🎯 SMC_INSTITUTIONAL_V1 Live State</div>
+            <div class="ir"><span class="il">Trades Executed</span><span class="iv sg" id="smc-trades-exec">—</span></div>
+            <div class="ir"><span class="il">Remaining Slots</span><span class="iv sb" id="smc-remain">—</span></div>
+            <div class="ir"><span class="il">Bootstrap Complete</span><span class="iv" id="smc-bootstrap">—</span></div>
+            <div class="ir"><span class="il">Symbols Loaded</span><span class="iv sb" id="smc-symbols">—</span></div>
+            <div class="ir"><span class="il">Signals Fired Today</span><span class="iv sg" id="smc-signals-fired">—</span></div>
+            <div style="margin-top:9px" id="smc-setup-body"><div class="sub">Waiting for candle bootstrap to complete…</div></div>
         </div>
         <div class="card">
             <div class="ct">📋 SMC Engine State</div>
             <div class="ir"><span class="il">Last Scan Summary</span><span class="iv" id="smc-summary" style="font-size:10px">—</span></div>
             <div class="ir"><span class="il">No-Trade Reason</span><span class="iv sr" id="smc-noreason" style="font-size:10px">—</span></div>
-            <div class="ir"><span class="il">Strategy</span><span class="iv">BEST_TRADE_V1</span></div>
-            <div class="ir"><span class="il">Max Trades/Day</span><span class="iv">1 (highest scoring setup)</span></div>
-            <div class="ir"><span class="il">Scan Window</span><span class="iv">9:30–14:45 every 15min</span></div>
-            <div class="ir"><span class="il">Min Score</span><span class="iv">4 / 9</span></div>
-            <div class="ir"><span class="il">Time Stop</span><span class="iv">15:00 IST EOD</span></div>
+            <div class="ir"><span class="il">Strategy</span><span class="iv">SMC_INSTITUTIONAL_V1</span></div>
+            <div class="ir"><span class="il">Max Trades/Day</span><span class="iv" id="smc-max-trades">2</span></div>
+            <div class="ir"><span class="il">Scan Window</span><span class="iv">9:30–14:40 every candle</span></div>
+            <div class="ir"><span class="il">Min RR</span><span class="iv" id="smc-min-rr">3.0×</span></div>
+            <div class="ir"><span class="il">Time Stop</span><span class="iv">90 min per trade</span></div>
             <div style="margin-top:8px;background:#21262d;border-radius:6px;padding:8px">
-                <div class="ct" style="margin-bottom:5px">5 SMC Hard Rules</div>
+                <div class="ct" style="margin-bottom:5px">SMC Institutional Logic</div>
                 <div style="font-size:11px;line-height:1.7;color:var(--muted)">
-                    1. 4H price vs EMA50 → institutional bias<br>
-                    2. 1H HH/HL or LH/LL → structure confirmation<br>
-                    3. 15min FVG ≤ 6 candles → entry zone<br>
-                    4. ADX &gt; 20 on 15min → trending market<br>
-                    5. Liquidity sweep ≤ 4 candles → institutional entry
+                    1. HTF structure (daily S/R + trendlines)<br>
+                    2. Liquidity sweep detection<br>
+                    3. Fair Value Gap (FVG) entry zones<br>
+                    4. 15m + 5m candle confirmation<br>
+                    5. Min 1:3 RR · Min confidence 60
                 </div>
             </div>
         </div>
     </div>
     <div class="card" style="margin:0 9px 9px">
-        <div class="ct">⏳ Data Readiness</div>
+        <div class="ct">⏳ Bootstrap Progress</div>
         <div id="smc-readiness" style="padding:4px 0">
-            <div class="sub">SMC requires ~80 fifteen-minute candles per symbol (≈4 trading days after first deployment).</div>
+            <div class="sub">SMC_INSTITUTIONAL_V1 bootstraps daily + 15m + 5m candles on startup (~120s delay). Scans 293 Nifty500 symbols every candle during 9:30–14:40.</div>
             <div style="margin-top:8px" id="smc-data-bar"></div>
         </div>
     </div>
 </div>
-
 
 <!-- NEWS CATALYST TAB -->
 <div id="tc-news" class="tc">
@@ -734,10 +703,10 @@
     </div>
 </div>
 
-
 <script>
     const API = '/api/dashboard';
     let D = {};
+    let SMC = {};  // SMC_INSTITUTIONAL_V1 live status
 
     function switchTab(name, el) {
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -761,9 +730,13 @@
 
     async function load() {
         try {
-            const r = await fetch(API + '/snapshot');
+            const [r, rs] = await Promise.all([
+                fetch(API + '/snapshot'),
+                fetch(API + '/smc/status').catch(() => null)
+            ]);
             if (r.status === 401) { window.location.href = '/login'; return; }
             D = await r.json();
+            if (rs && rs.ok) SMC = await rs.json();
             render();
             q('loading').style.display = 'none';
             set('rtime', new Date().toLocaleTimeString('en-IN'));
@@ -802,29 +775,28 @@
                   else{le.textContent=lat.lagMs>0?lat.lagMs+'ms':'OK';le.style.color=lat.lagMs>5000?'var(--yellow)':'var(--green)';} }
         q('stale-banner').style.display = lat.isStale?'block':'none';
 
-        // SCPS badge
         const sc = scps.sessionSignalCount||0;
         const se = q('h-scps'); if(se){se.textContent='SCPS:'+sc;se.style.display=sc>0?'inline-block':'none';}
 
-        // HighRR badge
         const hrrExec = hrr.tradesExecutedToday||0, hrrMax = hrr.maxTradesPerDay||2;
         const he = q('h-hrr');
         if(he){he.textContent='HRR:'+hrrExec+'/'+hrrMax;he.style.display=hrrExec>0?'inline-block':'none';}
 
-        // ORB badge
         const orbSel = orb.selectedCount||0;
         const oe = q('h-orb');
         if(oe){oe.textContent='ORB:'+orbSel;oe.style.display=orbSel>0?'inline-block':'none';}
 
-        // SMC badge
-        const bt = D.bestTrade||{};
+        // SMC badge — SMC_INSTITUTIONAL_V1
         const smcEl = q('h-smc');
         if(smcEl){
-            smcEl.textContent = 'SMC:'+(bt.tradeFiredToday?'FIRED':bt.cyclesRun>0?bt.cyclesRun+'cyc':'—');
-            smcEl.style.display = bt.cyclesRun>0?'inline-block':'none';
+            const smcFired = (SMC.tradesExecutedToday||0) > 0;
+            const smcBooted = SMC.bootstrapComplete === true;
+            smcEl.textContent = 'SMC:'+(smcFired ? SMC.tradesExecutedToday+'/'+SMC.maxTradesPerDay
+                                        : smcBooted ? '✓READY' : 'BOOT');
+            smcEl.style.display = SMC.enabled === false ? 'none' : 'inline-block';
+            smcEl.className = 'badge ' + (smcFired ? 'badge-green' : smcBooted ? 'badge-purple' : 'badge-yellow');
         }
 
-        // News badge
         const nc = D.newsCatalyst||{};
         const newsEl = q('h-news');
         if(newsEl){
@@ -887,16 +859,6 @@
         set('any-be',risk.anyAtBreakeven?'✅ Yes':'—');
         const se=risk.sectorExposure||{};
         set('sec-exp','Sectors: '+(Object.entries(se).filter(([,v])=>v>0).map(([k,v])=>k+':'+v).join(', ')||'None'));
-
-        // ORB quick
-        const selSyms=orb.selectedSymbols||[],sel=orb.selectedCount||0;
-        const trig=orb.triggeredCount||0;
-
-        // HighRR quick
-        const hrrExec=hrr.tradesExecutedToday||0,hrrSlots=hrr.remainingSlots||0;
-        const firedArr=Array.from(hrr.firedToday||[]);
-        const hrrPnl=parseFloat(hrr.realisedPnl||0);
-        const hrrPnlSuffix=hrrPnl!==0?' (₹'+hrrPnl.toFixed(2)+')':'';
     }
 
     // ── ORB TAB ──────────────────────────────────────────────────────────────────
@@ -910,14 +872,13 @@
         if(ls){ls.textContent=locked?'🔒 LOCKED':'⏳ WAITING';ls.className='stat '+(locked?'sgold':'sy');}
         set('orb-prevclose-stat',orb.prevCloseAvailable===false?'⚠ No prev-close (first run)':'Prev-close data ✅');
 
-        // Timeline
         const now=new Date(),mins=now.getHours()*60+now.getMinutes();
         const steps=[
-            {label:'9:00\nReset',   done:mins>=9*60},
-            {label:'9:15\nOpen',    done:mins>=9*60+15},
+            {label:'9:00\nReset',done:mins>=9*60},
+            {label:'9:15\nOpen',done:mins>=9*60+15},
             {label:'9:20\nShortlist',done:mins>=9*60+20},
             {label:'9:30\nLock+Score',done:locked},
-            {label:'9:30:05\nCache', done:locked&&(orb.selectedCount||0)>0},
+            {label:'9:30:05\nCache',done:locked&&(orb.selectedCount||0)>0},
             {label:'9:30-11:30\nMonitor',done:(orb.triggeredCount||0)>0},
             {label:'11:30\nAutoCancel',done:mins>=11*60+30},
             {label:'15:00\nEOD Close',done:mins>=15*60},
@@ -935,7 +896,6 @@
             tlEl.innerHTML=h;
         }
 
-        // P&L
         const pnlMap=(D.strategyStatus||{}).perStrategyPnl||{};
         const orbPnl=pnlMap['ORB_BREAKOUT_V1']||{};
         set('orb-pnl',fp(orbPnl.pnl||0));
@@ -950,7 +910,6 @@
             ?orbTrades.map(t=>{const pv=parseFloat(t.unrealPnl||0);return`<div class="signal-card ${t.direction==='SHORT'?'short':''}" style="margin-top:7px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><b>${t.tradingSymbol}</b> ${dpill(t.direction)}<span class="${pc(pv)}">${fp(pv)}</span></div><div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px"><span class="pill pm">Entry:₹${f2(t.entryPrice)}</span><span class="pill pr">SL:₹${f2(t.stopLoss)}</span><span class="pill pg">T1:₹${f2(t.target)}</span><span class="pill pb">${t.rMultiple||'—'}</span>${phpill(t.phase)}</div></div>`;}).join('')
             :'<div class="sub">No active ORB trades</div>');
 
-        // Selected cards
         if(!locked||selSyms.length===0){
             html('orb-selected-body',`<div class="sub">${locked?'No stocks passed scoring today':'Waiting for 9:30 ORB lock…'}</div>`);
         } else {
@@ -984,7 +943,6 @@
             }).join(''));
         }
 
-        // All setups table
         const allSetups=Object.values(setups);
         set('orb-all-cnt',allSetups.length);
         if(!allSetups.length){q('orb-all-empty').style.display='block';q('orb-all-tbl').style.display='none';}
@@ -1012,7 +970,6 @@
         const enabled=hrr.enabled!==false;
         const limitReached=hrr.dailyLimitReached===true;
 
-        // ── Summary cards ─────────────────────────────────────────────────────
         set('hrr-executed',executed);
         set('hrr-max-sub','Max '+maxTrades+' per day');
         const slotsEl=q('hrr-slots');
@@ -1020,13 +977,11 @@
         set('hrr-limit-sub',limitReached?'🏁 Daily limit reached':'Slots available');
         set('hrr-active-cnt',active.length);
 
-        // Strategy P&L card — now sourced from hrr.realisedPnl (from HighRRTradeManager)
         const realisedPnl = parseFloat(hrr.realisedPnl||0);
         const hpEl=q('hrr-pnl');
         if(hpEl){hpEl.textContent=fp(realisedPnl);hpEl.className='stat '+pc(realisedPnl);}
         set('hrr-wr','Win Rate: '+(hrr.winRate||'—'));
 
-        // ── Slot visualizer ───────────────────────────────────────────────────
         html('hrr-slot-track',Array.from({length:maxTrades},(_,i)=>{
             let cls,label;
             if(i<executed){cls='slot-done';label='✓';}
@@ -1039,13 +994,9 @@
         const hsEl=q('hrr-status');if(hsEl)hsEl.style.color=enabled?(limitReached?'var(--yellow)':'var(--green)'):'var(--red)';
         set('hrr-limit-reached',limitReached?'✅ Yes ('+executed+'/'+maxTrades+')':'No ('+executed+'/'+maxTrades+')');
 
-        // ── Fired Today panel ─────────────────────────────────────────────────
-        // Now uses hrr.activeTradeDetails (active) and hrr.closedTradeDetails (closed)
-        // to correctly show live P&L for open trades and final P&L for closed ones.
         const activeDetails  = hrr.activeTradeDetails  || [];
         const closedDetails  = hrr.closedTradeDetails  || [];
 
-        // Build a lookup: symbol → detail (prefer active, fallback to closed)
         const detailBySymbol = {};
         closedDetails.forEach(d=>{ detailBySymbol[d.symbol]={...d,isClosed:true}; });
         activeDetails.forEach(d=>{ detailBySymbol[d.symbol]={...d,isClosed:false}; });
@@ -1053,11 +1004,8 @@
         html('hrr-fired-body', fired.length
             ? fired.map(sym=>{
                 const d=detailBySymbol[sym];
-                if(!d){
-                    return`<div class="channel-bar"><b>${sym}</b><span class="pill pm">—</span></div>`;
-                }
+                if(!d){return`<div class="channel-bar"><b>${sym}</b><span class="pill pm">—</span></div>`;}
                 if(d.isClosed){
-                    // Closed trade — show exit P&L and reason
                     const pv=parseFloat(d.netPnl||0);
                     const exitReason=d.exitReason||'—';
                     const exitTag=exitReason.includes('TARGET')?'<span class="pill pg">✅ '+exitReason+'</span>':
@@ -1066,9 +1014,7 @@
                                   '<span class="pill pm">'+exitReason+'</span>';
                     return`<div class="hrr-trade-card" style="opacity:.85">
                       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
-                        <div style="display:flex;align-items:center;gap:6px">
-                          <b>${sym}</b>${dpill(d.direction)}<span class="pill pm">CLOSED</span>
-                        </div>
+                        <div style="display:flex;align-items:center;gap:6px"><b>${sym}</b>${dpill(d.direction)}<span class="pill pm">CLOSED</span></div>
                         <span class="${pc(pv)}" style="font-size:14px;font-weight:700">${fp(pv)}</span>
                       </div>
                       <div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px;margin-bottom:4px">
@@ -1079,13 +1025,10 @@
                       <div>${exitTag}</div>
                     </div>`;
                 } else {
-                    // Active trade — show live unrealised P&L
                     const pv=parseFloat(d.unrealPnl||0);
                     return`<div class="hrr-trade-card">
                       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
-                        <div style="display:flex;align-items:center;gap:6px">
-                          <b>${sym}</b>${dpill(d.direction)}<span class="pill py">● LIVE</span>
-                        </div>
+                        <div style="display:flex;align-items:center;gap:6px"><b>${sym}</b>${dpill(d.direction)}<span class="pill py">● LIVE</span></div>
                         <span class="${pc(pv)}" style="font-size:14px;font-weight:700">${fp(pv)}</span>
                       </div>
                       <div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px">
@@ -1100,8 +1043,6 @@
               }).join('')
             : '<div class="sub">No signals fired today</div>');
 
-        // ── Active trades section ─────────────────────────────────────────────
-        // Uses hrr.activeTradeDetails from HighRRTradeManager directly
         html('hrr-active-trades', activeDetails.length
             ? activeDetails.map(t=>{
                 const pv=parseFloat(t.unrealPnl||0);
@@ -1122,14 +1063,12 @@
               }).join('')
             : '<div class="sub">No active High RR trades</div>');
 
-        // ── P&L summary — from HighRRTradeManager closed trades ──────────────
         set('hrr-realised-pnl', fp(realisedPnl));
         const hrpEl=q('hrr-realised-pnl');if(hrpEl)hrpEl.className='iv '+pc(realisedPnl);
         set('hrr-wins',   hrr.winsToday  || 0);
         set('hrr-losses', hrr.lossesToday|| 0);
         set('hrr-winrate',hrr.winRate    || '—');
 
-        // ── Closed trades table — from hrr.closedTradeDetails ────────────────
         if(!closedDetails.length){
             q('hrr-closed-empty').style.display='block';
             q('hrr-closed-tbl').style.display='none';
@@ -1139,19 +1078,10 @@
             html('hrr-closed-body', closedDetails.map(t=>{
                 const pv=parseFloat(t.netPnl||0);
                 const exitReason=t.exitReason||'—';
-                // Colour-code exit reason
                 const reasonStyle=exitReason.includes('TARGET')?'color:var(--green)':
                                   exitReason.includes('STOP')||exitReason.includes('SL')?'color:var(--red)':
                                   exitReason.includes('TIME')?'color:var(--yellow)':'';
-                return`<tr>
-                  <td><b>${t.symbol}</b></td>
-                  <td>${dpill(t.direction)}</td>
-                  <td>₹${f2(t.entryPrice)}</td>
-                  <td>₹${f2(t.exitPrice)}</td>
-                  <td class="${pc(pv)}">${fp(pv)}</td>
-                  <td>${t.rMultiple||'—'}</td>
-                  <td style="font-size:10px;${reasonStyle}">${exitReason}</td>
-                </tr>`;
+                return`<tr><td><b>${t.symbol}</b></td><td>${dpill(t.direction)}</td><td>₹${f2(t.entryPrice)}</td><td>₹${f2(t.exitPrice)}</td><td class="${pc(pv)}">${fp(pv)}</td><td>${t.rMultiple||'—'}</td><td style="font-size:10px;${reasonStyle}">${exitReason}</td></tr>`;
             }).join(''));
         }
     }
@@ -1195,25 +1125,19 @@
         const slotsLeft  = P.slotsRemaining || 0;
         const maxDay     = P.maxTradesPerDay || 10;
 
-        // ── Summary cards ─────────────────────────────────────────────────────
         const tpEl=q('port-total-pnl');
         if(tpEl){tpEl.textContent=fp(totalPnl);tpEl.className='stat '+pc(totalPnl);}
         set('port-pnl-sub','Realised '+fp(realisedPnl)+' + Live '+fp(unrealPnl));
-
         const ttEl=q('port-total-trades');
         if(ttEl){ttEl.textContent=totalTr+' / '+maxDay;ttEl.className='stat '+(totalTr>=maxDay?'sr':'sb');}
         set('port-slots-sub',slotsLeft+' slot'+(slotsLeft!==1?'s':'')+' remaining');
-
         const rpEl=q('port-realised');
         if(rpEl){rpEl.textContent=fp(realisedPnl);rpEl.className='stat '+pc(realisedPnl);}
         set('port-closed-count',closedCnt+' closed');
-
         const upEl=q('port-unreal');
         if(upEl){upEl.textContent=fp(unrealPnl);upEl.className='stat '+pc(unrealPnl);}
         set('port-active-count',activeCnt+' active');
 
-        // ── Strategy allocation grid ──────────────────────────────────────────
-        // Colour by strategy group
         const stratColors = {
             'ORB_BREAKOUT_V1':           {border:'var(--gold)',   bg:'#1a1600', icon:'🎯', label:'ORB'},
             'HIGH_RR_INTRADAY_V1':       {border:'var(--purple)', bg:'#12101f', icon:'🏆', label:'High RR'},
@@ -1221,6 +1145,7 @@
             'SIDEWAYS_SCALP_V1':         {border:'var(--blue)',   bg:'#0d1f30', icon:'↔', label:'Sideways'},
             'SCALP_PRESSURE_V2':         {border:'var(--blue)',   bg:'#0d1f30', icon:'↔', label:'Scalp'},
             'NEWS_CATALYST_V1':          {border:'var(--green)',  bg:'#0d1f15', icon:'📰', label:'News'},
+            'SMC_INSTITUTIONAL_V1':      {border:'var(--purple)', bg:'#12101f', icon:'🧠', label:'SMC'},
             'BEST_TRADE_V1':             {border:'var(--purple)', bg:'#12101f', icon:'🧠', label:'SMC'},
         };
 
@@ -1252,7 +1177,6 @@
               }).join('') + `</div>`
             : '<div class="sub" style="padding:9px">No trades yet today</div>');
 
-        // ── Trade log table ───────────────────────────────────────────────────
         set('port-log-count', log.length);
         if(!log.length){
             q('port-log-empty').style.display='block';
@@ -1260,7 +1184,6 @@
         } else {
             q('port-log-empty').style.display='none';
             q('port-log-tbl').style.display='table';
-
             html('port-log-body', log.map((t, idx) => {
                 const pv   = parseFloat(t.pnl||0);
                 const isClosed = t.status==='CLOSED';
@@ -1296,77 +1219,72 @@
         }
     }
 
-
-    // ── SMC TAB ───────────────────────────────────────────────────────────────────
+    // ── SMC TAB ── SMC_INSTITUTIONAL_V1 ─────────────────────────────────────────
     function renderSmc() {
-        const bt = D.bestTrade || {};
-        const enabled = bt.enabled !== false;
-        const fired   = bt.tradeFiredToday === true;
+        const enabled  = SMC.enabled !== false;
+        const booted   = SMC.bootstrapComplete === true;
+        const executed = SMC.tradesExecutedToday || 0;
+        const remaining= SMC.remainingSlots      || 0;
+        const symbols  = SMC.symbolsLoaded       || 0;
+        const fired    = SMC.signalsFiredToday   || 0;
+        const maxTrades= SMC.maxTradesPerDay      || 2;
+        const minRr    = SMC.minRr               || 3.0;
 
         const stEl = q('smc-status');
         if(stEl){
-            stEl.textContent = !enabled ? 'DISABLED' : fired ? '✅ FIRED' : 'SCANNING';
-            stEl.className = 'stat ' + (!enabled ? 'sr' : fired ? 'sg' : 'spur');
+            stEl.textContent = !enabled ? 'DISABLED' : executed > 0 ? '✅ '+executed+' TRADE'+(executed>1?'S':'') : booted ? 'SCANNING' : 'BOOTING';
+            stEl.className   = 'stat ' + (!enabled ? 'sr' : executed > 0 ? 'sg' : booted ? 'spur' : 'sy');
         }
-        set('smc-fired', 'Trade fired: ' + (fired ? 'YES ✅' : 'No'));
-        set('smc-cycles',    bt.cyclesRun    || 0);
-        set('smc-scanned',   bt.totalScanned || 0);
-        set('smc-qualified', (bt.totalQualified || 0) + ' qualified');
-        set('smc-summary',   bt.lastScanSummary || '—');
+        set('smc-fired', 'Signals fired: ' + fired);
+        set('smc-cycles',   booted ? '✅ Done' : '⏳ Pending');
+        set('smc-scanned',  symbols);
+        set('smc-qualified', remaining + ' slots left');
+        set('smc-summary',  booted
+            ? symbols + ' symbols loaded · ' + executed + '/' + maxTrades + ' trades'
+            : 'Bootstrapping candle data…');
 
-        const nr = bt.noTradeReason || '—';
         const nrEl = q('smc-noreason');
-        if(nrEl){ nrEl.textContent = nr; nrEl.style.color = nr.includes('SIDEWAYS') ? 'var(--yellow)' : nr==='—' ? 'var(--muted)' : 'var(--red)'; }
+        if(nrEl){
+            nrEl.textContent = !booted ? 'Candle bootstrap pending' : executed >= maxTrades ? 'Daily limit reached' : '—';
+            nrEl.style.color = !booted ? 'var(--yellow)' : 'var(--muted)';
+        }
+
+        const teEl = q('smc-trades-exec');
+        if(teEl){ teEl.textContent = executed + ' / ' + maxTrades; teEl.className = 'iv ' + (executed >= maxTrades ? 'sg' : 'sb'); }
+        const rmEl = q('smc-remain');
+        if(rmEl){ rmEl.textContent = remaining; rmEl.className = 'iv ' + (remaining === 0 ? 'sr' : 'sg'); }
+        const btEl = q('smc-bootstrap');
+        if(btEl){ btEl.textContent = booted ? '✅ Yes (' + symbols + ' symbols)' : '⏳ Loading…'; btEl.style.color = booted ? 'var(--green)' : 'var(--yellow)'; }
+        set('smc-symbols', symbols);
+        const sfEl = q('smc-signals-fired');
+        if(sfEl){ sfEl.textContent = fired; sfEl.className = 'iv ' + (fired > 0 ? 'sg' : 'sb'); }
+        set('smc-max-trades', maxTrades);
+        set('smc-min-rr', minRr + '×');
+
+        const setupEl = q('smc-setup-body');
+        if(setupEl){
+            if(!booted){
+                setupEl.innerHTML = '<div class="sub">⏳ Candle bootstrap in progress — SMC will begin scanning after all symbols are loaded.</div>';
+            } else if(executed > 0){
+                setupEl.innerHTML = '<div style="background:#0d1f0d;border:1px solid var(--green);border-radius:8px;padding:10px"><div style="font-weight:700;color:var(--green);margin-bottom:5px">✅ ' + executed + ' trade'+(executed>1?'s':'')+' executed today</div><div class="sub">Check Trades and Portfolio tabs for full details.</div></div>';
+            } else {
+                setupEl.innerHTML = '<div class="sub">Scanning ' + symbols + ' symbols every candle · Min RR ' + minRr + '× · Min confidence 60</div>';
+            }
+        }
 
         const pnlMap = (D.strategyStatus || {}).perStrategyPnl || {};
-        const smcPnl = pnlMap['BEST_TRADE_V1'] || {};
+        const smcPnl = pnlMap['SMC_INSTITUTIONAL_V1'] || pnlMap['BEST_TRADE_V1'] || {};
         const p = parseFloat(smcPnl.pnl || 0);
         const pEl = q('smc-pnl'); if(pEl){pEl.textContent=fp(p);pEl.className='stat '+pc(p);}
-        set('smc-wr','Win Rate: '+(smcPnl.winRate||'—'));
+        set('smc-wr', 'Win Rate: ' + (smcPnl.winRate || '—'));
 
-        // Best setup card
-        const best = bt.bestSetup;
-        if(best && best.symbol) {
-            html('smc-setup-body',
-                `<div style="background:#1a102a;border:1px solid var(--purple);border-radius:8px;padding:12px">
-                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-                    <div style="display:flex;align-items:center;gap:8px">
-                      <b style="font-size:16px">${best.symbol}</b>
-                      <span class="pill ${best.direction==='LONG'?'pg':'pr'}">${best.direction||'—'}</span>
-                      <span class="pill pp">Score ${best.totalScore||0}/9</span>
-                    </div>
-                    ${fired ? '<span class="pill pg">✅ TRADED</span>' : '<span class="pill py">⏳ WATCHING</span>'}
-                  </div>
-                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:11px;margin-bottom:8px">
-                    <div class="ir"><span class="il">Entry</span><span class="iv">₹${f2(best.entryPrice)}</span></div>
-                    <div class="ir"><span class="il">Stop Loss</span><span class="iv sr">₹${f2(best.stopLoss)}</span></div>
-                    <div class="ir"><span class="il">T1 (2.5R)</span><span class="iv sg">₹${f2(best.target1)}</span></div>
-                    <div class="ir"><span class="il">T2 (3.5R)</span><span class="iv sg">₹${f2(best.target2)}</span></div>
-                    <div class="ir"><span class="il">ADX</span><span class="iv">${f2(best.adx)}</span></div>
-                    <div class="ir"><span class="il">ATR</span><span class="iv">${f2(best.atr)}</span></div>
-                  </div>
-                  <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">
-                    ${best.rule1Passed?'<span class="pill pg">✅ R1:4H Bias</span>':'<span class="pill pr">❌ R1:4H Bias</span>'}
-                    ${best.rule2Passed?'<span class="pill pg">✅ R2:Structure</span>':'<span class="pill pr">❌ R2:Structure</span>'}
-                    ${best.rule3Passed?'<span class="pill pg">✅ R3:FVG</span>':'<span class="pill pr">❌ R3:FVG</span>'}
-                    ${best.rule4Passed?'<span class="pill pg">✅ R4:ADX</span>':'<span class="pill pr">❌ R4:ADX</span>'}
-                    ${best.rule5Passed?'<span class="pill pg">✅ R5:Sweep</span>':'<span class="pill pr">❌ R5:Sweep</span>'}
-                  </div>
-                </div>`
-            );
-        } else {
-            html('smc-setup-body', '<div class="sub">' + (nr !== '—' ? '⏳ ' + nr : 'No setup qualified today') + '</div>');
-        }
-
-        // Data readiness bar
-        const candleCount = bt.buf15mSize || 0; // if backend exposes it
-        const needed = 80, pct = Math.min(100, Math.round(candleCount / needed * 100));
+        const needed = 293, pct = booted ? 100 : Math.min(99, Math.round(symbols / needed * 100));
         html('smc-data-bar',
             `<div style="display:flex;align-items:center;gap:8px">
               <div style="flex:1;height:8px;border-radius:4px;background:#21262d;overflow:hidden">
                 <div style="height:100%;border-radius:4px;width:${pct}%;background:${pct>=100?'var(--green)':'var(--yellow)'};transition:width .5s"></div>
               </div>
-              <span class="sub" style="white-space:nowrap">${candleCount||'?'}/${needed} candles (${pct}%${pct>=100?' ✅ Ready':' — accumulating'})</span>
+              <span class="sub" style="white-space:nowrap">${symbols}/${needed} symbols (${pct}%${pct>=100?' ✅ Ready':' — loading'})</span>
             </div>`
         );
     }
@@ -1398,7 +1316,6 @@
         const npEl = q('news-pnl'); if(npEl){npEl.textContent=fp(p);npEl.className='stat '+pc(p);}
         set('news-wr','Win Rate: '+(nPnl.winRate||'—'));
 
-        // Events list
         const allItems = [...events, ...fired.map(s=>({symbol:s,fired:true}))];
         html('news-events-body', allItems.length
             ? allItems.map(e=>{
@@ -1424,7 +1341,6 @@
             : '<div class="sub">No news events ingested yet. Sources poll every 3–10 minutes.</div>'
         );
     }
-
 
     // ── STRATEGY TAB ─────────────────────────────────────────────────────────────
     function renderStrategy() {

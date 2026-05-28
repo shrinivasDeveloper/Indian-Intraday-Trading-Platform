@@ -2,7 +2,7 @@ package com.trading.strategy.smc;
 
 import com.trading.domain.Candle;
 import com.trading.domain.enums.TradeDirection;
-import com.trading.events.SmartChannelPullbackSignalEvent;
+import com.trading.events.CandleCompleteEvent;
 import com.trading.events.TickReceivedEvent;
 import com.trading.marketdata.service.InstrumentCacheService;
 import com.trading.marketdata.service.LatencyMonitor;
@@ -55,7 +55,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   Gate 6 : RR ≥ 3.0 (min 1:3 per spec)
  *   Gate 7 : No opposite strong zone blocking target
  *   Gate 8 : Confidence score ≥ threshold (60 by default)
- *   Gate 9 : Daily trade limit (2 trades/day)
+ *   Gate 9 : Removed — platform circuit breaker handles daily cap globally
  *   Gate 10: Sector alignment
  * ─────────────────────────────────────────────────────────────────────────────
  */
@@ -70,11 +70,8 @@ public class SmcInstitutionalStrategyEngine {
     // ── Session window: 9:30 AM – 2:00 PM IST ────────────────────────────────
     private static final ZoneId    IST         = ZoneId.of("Asia/Kolkata");
     private static final LocalTime TRADE_START = LocalTime.of(9, 30);
-    private static final LocalTime TRADE_END   = LocalTime.of(14, 0);
 
     // ── Trade limits ──────────────────────────────────────────────────────────
-    private static final int    MAX_TRADES_PER_DAY = 2;
-    private static final double MIN_RR             = 3.0; // 1:3 minimum (spec section 26)
     private static final double PREFERRED_RR       = 5.0;
 
     // ── Zone proximity tolerances ─────────────────────────────────────────────
@@ -84,7 +81,7 @@ public class SmcInstitutionalStrategyEngine {
     private static final double MAX_SL_PCT       = 0.025; // 2.5% max SL distance
 
     // ── Confidence threshold ──────────────────────────────────────────────────
-    private static final int MIN_CONFIDENCE      = 60;
+    // MIN_CONFIDENCE removed — use @Value minConfidence field only
 
     // ── Dependencies (all existing platform services) ─────────────────────────
     private final SmcInstitutionalCandleService    candleService;
@@ -118,6 +115,12 @@ public class SmcInstitutionalStrategyEngine {
     @Value("${strategy.smc.min-confidence:60}")
     private int minConfidence;
 
+    @Value("${strategy.smc.min-rr:3.0}")
+    private double minRr;                // yml: strategy.smc.min-rr
+
+    @Value("${strategy.smc.trade-end:14:40}")
+    private String tradeEndConfig;       // yml: strategy.smc.trade-end (HH:mm)
+
     // ── Session state ─────────────────────────────────────────────────────────
     private final AtomicInteger       tradesExecutedToday = new AtomicInteger(0);
     private final Set<String>         firedToday          = ConcurrentHashMap.newKeySet();
@@ -127,13 +130,63 @@ public class SmcInstitutionalStrategyEngine {
     // MAIN EVALUATION CYCLE — runs every 5 minutes
     // (Lower cadence than HighRR's 1-min because this is HTF-driven, not tick-driven)
     // ══════════════════════════════════════════════════════════════════════════
+    // CANDLE-DRIVEN EVALUATION — fires on every 5m candle close
+    //
+    // WHY NOT @Scheduled(fixedRate=300_000):
+    //   A fixed 5-min timer fires at arbitrary offsets from candle boundaries.
+    //   Example: timer fires at 09:32:17 but the 09:30 candle closed at 09:35:00.
+    //   That means evaluation runs on stale data (the 09:25 candle), missing the
+    //   setup that formed in the 09:30 candle entirely.
+    //
+    //   CandleCompleteEvent on "5minute" fires EXACTLY when a 5m candle closes —
+    //   immediately after CandleAggregatorService completes the candle. Evaluation
+    //   always runs on the freshest possible data, aligned to candle boundaries.
+    //
+    // CADENCE: every 5 minutes (same as before) but candle-aligned.
+    //   ~12 evaluations/hour × 4.5 trading hours = ~54 evaluations/day.
+    //
+    // THREAD SAFETY: CandleCompleteEvent fires from trade-N threads.
+    //   Multiple 5m candles may close in the same second (different symbols).
+    //   We guard with a per-candle-close dedup: only evaluate once per candle close
+    //   time, regardless of how many symbols close at the same timestamp.
+    // ══════════════════════════════════════════════════════════════════════════
 
-    @Scheduled(fixedRate = 300_000) // 5 minutes
-    public void runEvaluationCycle() {
+    /** Tracks the last 5m candle close time we evaluated, to deduplicate. */
+    private volatile long lastEvalCandleMs = 0L;
+
+    @org.springframework.context.event.EventListener
+    @org.springframework.scheduling.annotation.Async("tradingExecutor")
+    public void onCandleClose(CandleCompleteEvent event) {
         if (!enabled) return;
 
+        // Only react to 5m candle closes — the SMC confirmation timeframe
+        if (!"5minute".equals(event.getCandle().getTimeframe())) return;
+        if (!event.getCandle().isComplete()) return;
+
+        // Deduplicate: multiple 5m candles close at the same timestamp (one per symbol).
+        // We only want to run ONE full evaluation scan per candle close time.
+        // Use the candle's close time (rounded to minute) as the dedup key.
+        long candleCloseMs = event.getCandle().getCandleTime() != null
+                ? event.getCandle().getCandleTime().toEpochMilli()
+                : System.currentTimeMillis();
+
+        // Atomic check-and-set — only the first candle close at this timestamp proceeds
+        synchronized (this) {
+            if (candleCloseMs <= lastEvalCandleMs) return;
+            lastEvalCandleMs = candleCloseMs;
+        }
+
+        runEvaluationCycle();
+    }
+
+    /**
+     * Core evaluation logic — called on every 5m candle close.
+     * Also kept package-visible for testing.
+     */
+    void runEvaluationCycle() {
         LocalTime now = LocalTime.now(IST);
-        if (now.isBefore(TRADE_START) || now.isAfter(TRADE_END)) return;
+        LocalTime tradeEnd = parseTradeEnd();
+        if (now.isBefore(TRADE_START) || now.isAfter(tradeEnd)) return;
 
         // Gate 1: Market regime
         MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
@@ -142,7 +195,8 @@ public class SmcInstitutionalStrategyEngine {
             return;
         }
         if (dir.niftyAtrPct() < 0.15) {
-            log.debug("[SMC] Gate1 BLOCKED — market frozen (ATR {:.3f}%)", dir.niftyAtrPct());
+            log.debug("[SMC] Gate1 BLOCKED — market frozen (ATR {}%)",
+                    String.format("%.3f", dir.niftyAtrPct()));
             return;
         }
 
@@ -152,12 +206,9 @@ public class SmcInstitutionalStrategyEngine {
             return;
         }
 
-        // Gate 9: Daily trade limit
-        if (tradesExecutedToday.get() >= MAX_TRADES_PER_DAY) {
-            log.debug("[SMC] Daily limit reached ({}/{}). Engine idle.",
-                    tradesExecutedToday.get(), MAX_TRADES_PER_DAY);
-            return;
-        }
+        // NOTE: No SMC-specific daily trade limit.
+        // The platform circuit breaker (max-trades-per-day: 10) handles the global cap
+        // across all strategies. RiskManagementService enforces slot limits.
 
         // Gate CB
         BigDecimal cap = resolveCapital();
@@ -172,18 +223,17 @@ public class SmcInstitutionalStrategyEngine {
             return;
         }
 
-        // Get all symbols with structure data
-        Set<String> symbols = instrumentCache.getEquityInstruments().keySet();
+        // Only symbols with loaded candle data (~253 Nifty500)
+        Set<String> symbols = candleService.getLoadedSymbols();
         if (symbols.isEmpty()) return;
 
-        log.debug("[SMC] Evaluation cycle @{} | symbols={} | tradesLeft={}",
-                now, symbols.size(), MAX_TRADES_PER_DAY - tradesExecutedToday.get());
+        log.debug("[SMC] Evaluation @{} | symbols={} | firedToday={}",
+                now, symbols.size(), tradesExecutedToday.get());
 
         List<SmcCandidate> candidates = new ArrayList<>();
 
         for (String symbol : symbols) {
             if (firedToday.contains(symbol) || activeSignals.contains(symbol)) continue;
-
             try {
                 SmcCandidate c = evaluateSymbol(symbol, dir, cap);
                 if (c != null) candidates.add(c);
@@ -197,15 +247,13 @@ public class SmcInstitutionalStrategyEngine {
             return;
         }
 
-        // Sort by confidence score descending — best setup fires first
+        // Best setup first — fire top candidate(s)
+        // Platform RiskManagementService enforces the global 10-trade cap.
         candidates.sort(Comparator.comparingInt(SmcCandidate::confidence).reversed());
 
-        int slotsLeft = MAX_TRADES_PER_DAY - tradesExecutedToday.get();
-        int toFire    = Math.min(slotsLeft, candidates.size());
-
-        for (int i = 0; i < toFire; i++) {
-            fireSignal(candidates.get(i));
-        }
+        // Fire only the top 1 candidate per cycle to avoid flooding slots
+        // (SMC is a high-conviction strategy — one best setup is sufficient)
+        fireSignal(candidates.get(0));
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -244,9 +292,10 @@ public class SmcInstitutionalStrategyEngine {
         List<Candle> candles15m = candleService.getSmcIntraday15m(symbol);
         if (candles15m == null || candles15m.size() < 10) return null;
 
-        // Get 5m candles for fine-grained momentum confirmation
-        List<Candle> candles5m = candleService.getSmc5mCandles(symbol);
-        boolean has5mData = (candles5m != null && candles5m.size() >= 5);
+        // 5m candles: SmcCandleStore only buffers 15m data.
+        // 5m momentum check is supplementary — evaluation proceeds without it.
+        List<Candle> candles5m = null;
+        boolean has5mData = false;
 
         // Current price = last 15m close (HTF-aligned price reference)
         Candle lastCandle = candles15m.get(candles15m.size() - 1);
@@ -300,10 +349,10 @@ public class SmcInstitutionalStrategyEngine {
         }
 
         // Gate 6: RR ≥ 3.0
-        double target = setup.isBuy ? entry + risk * MIN_RR : entry - risk * MIN_RR;
+        double target = setup.isBuy ? entry + risk * minRr : entry - risk * minRr;
         double rr     = risk > 0 ? Math.abs(target - entry) / risk : 0;
-        if (rr < MIN_RR) {
-            log.trace("[SMC] {} Gate6 BLOCKED — RR {:.2f} < {}", symbol, rr, MIN_RR);
+        if (rr < minRr) {
+            log.trace("[SMC] {} Gate6 BLOCKED — RR {:.2f} < {}", symbol, rr, minRr);
             return null;
         }
         double t2 = setup.isBuy ? entry + risk * PREFERRED_RR : entry - risk * PREFERRED_RR;
@@ -316,7 +365,7 @@ public class SmcInstitutionalStrategyEngine {
 
         // Gate 8: Confidence score
         int confidence = computeConfidence(htf, setup, pattern, rr, dir, shortTermBull, shortTermBear);
-        if (confidence < Math.max(minConfidence, MIN_CONFIDENCE)) {
+        if (confidence < minConfidence) {
             log.trace("[SMC] {} Gate8 BLOCKED — confidence {} < threshold {}",
                     symbol, confidence, minConfidence);
             return null;
@@ -595,7 +644,7 @@ public class SmcInstitutionalStrategyEngine {
 
         // RR quality (+10 if ≥1:5, +5 if ≥1:3)
         if (rr >= PREFERRED_RR)                  score += 10;
-        else if (rr >= MIN_RR)                   score +=  5;
+        else if (rr >= minRr)                   score +=  5;
 
         // Market regime confirmation (+5)
         boolean mktBull = dir.direction() == MarketDirectionService.Direction.BULLISH;
@@ -638,55 +687,39 @@ public class SmcInstitutionalStrategyEngine {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // SIGNAL FIRING — publishes SmartChannelPullbackSignalEvent
-    // EXACT same event type as HighRR and other strategies — no new event class needed.
-    // Standard pipeline (SmartChannelSignalHandler → PaperTradeExecutionService) handles it.
+    // SIGNAL FIRING — publishes SmcSignalEvent (SMC-owned event)
+    // SmcSignalHandler converts SmcSignalEvent → SmartChannelPullbackSignalEvent
+    // so the standard pipeline handles it without any coupling to SCPS strategy.
     // ══════════════════════════════════════════════════════════════════════════
 
     private void fireSignal(SmcCandidate c) {
-        // Score breakdown for signal event fields
-        int scoreSr        = c.anchorZone != null ? Math.min(c.anchorZone.strength, 30) : 0;
-        int scoreHtf       = (!c.htfTrend.equals(TrendDirection.SIDEWAYS)) ? 25 : 10;
-        int scoreSweep     = c.liquiditySweepDetected ? 20 : 0;
-        int scoreConf      = c.confidence >= 80 ? 25 : (c.confidence >= 60 ? 15 : 5);
-        int scoreRr        = c.rr >= PREFERRED_RR ? 20 : 10;
-        int totalScore     = c.confidence; // use confidence as total score
+        int totalScore = c.confidence; // composite confidence as total score
 
         log.info("[SMC] 🚀 FIRING SIGNAL: {} | {} | setup={} | conf={} | entry={} sl={} T1={} T2={} | RR={} | pattern={}",
                 c.symbol, c.direction, c.setupType, c.confidence,
                 c.entryPrice, c.stopLoss, c.target1, c.target2,
                 String.format("%.2f", c.rr), c.pattern);
 
-        SmartChannelPullbackSignalEvent signal = new SmartChannelPullbackSignalEvent(
-                this,
-                c.symbol,
-                c.instrumentToken,
-                c.direction,
-                c.entryPrice,
-                c.stopLoss,
-                c.target1,
-                c.target2,
-                c.quantity,
-                c.riskAmount,
-                STRATEGY_NAME,           // "SMC_INSTITUTIONAL_V1"
-                totalScore,
-                c.sector,
-                riskPerTrade,
-                "SMC_INSTITUTIONAL",     // strategy type label
-                c.setupType,             // setup description
-                c.rr,
-                c.volume > 0 ? 1.2 : 1.0,
-                c.liquiditySweepDetected,
-                "LIMIT",
-                c.htfTrend.name() + "_" + (c.direction == TradeDirection.LONG ? "BUY" : "SELL"),
-                0,
-                scoreSr,
-                scoreHtf,
-                scoreSweep,
-                scoreConf,
-                scoreRr,
-                totalScore,
-                timeStopMinutes
+        SmcSignalEvent signal = new SmcSignalEvent(
+                this,                       // source
+                c.symbol,                   // tradingSymbol
+                c.instrumentToken,          // instrumentToken
+                c.direction,                // direction
+                c.entryPrice,               // entryPrice
+                c.stopLoss,                 // stopLoss
+                c.target1,                  // target1
+                c.target2,                  // target2
+                c.quantity,                 // quantity
+                c.riskAmount,               // riskAmount
+                STRATEGY_NAME,              // strategyName = "SMC_INSTITUTIONAL_V1"
+                (double) totalScore,        // probabilityScore
+                c.sector,                   // sectorName
+                c.rr,                       // rrRatio
+                c.setupType,                // setupType
+                c.confidence,               // confidenceScore
+                totalScore,                 // totalScore
+                timeStopMinutes,            // timeStopMinutes
+                c.liquiditySweepDetected    // liquiditySweepDetected
         );
 
         publisher.publishEvent(signal);
@@ -696,7 +729,7 @@ public class SmcInstitutionalStrategyEngine {
         tradesExecutedToday.incrementAndGet();
 
         log.info("[SMC] ✅ Signal #{}/{} fired for {} | HTF={} | setup={} | conf={}",
-                tradesExecutedToday.get(), MAX_TRADES_PER_DAY,
+                tradesExecutedToday.get(), "(platform cap)",  // no SMC-specific limit
                 c.symbol, c.htfTrend, c.setupType, c.confidence);
     }
 
@@ -732,7 +765,8 @@ public class SmcInstitutionalStrategyEngine {
     public void onTick(TickReceivedEvent tick) {
         // Only active during trading window
         LocalTime now = LocalTime.now(IST);
-        if (now.isBefore(TRADE_START) || now.isAfter(TRADE_END)) return;
+        LocalTime tradeEnd = parseTradeEnd();
+        if (now.isBefore(TRADE_START) || now.isAfter(tradeEnd)) return;
 
         // Only process symbols with active signals (prevents hot-path overhead)
         String symbol = tick.getTradingSymbol();
@@ -760,10 +794,19 @@ public class SmcInstitutionalStrategyEngine {
 
     // ── Dashboard helpers ────────────────────────────────────────────────────
     public int     getTradesExecutedToday() { return tradesExecutedToday.get(); }
-    public int     getRemainingSlots()      { return MAX_TRADES_PER_DAY - tradesExecutedToday.get(); }
+    public int     getRemainingSlots()      { return 10 - tradesExecutedToday.get(); } // platform cap
     public boolean isEnabled()              { return enabled; }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /** Parses strategy.smc.trade-end (HH:mm) into LocalTime. Defaults to 14:40. */
+    private LocalTime parseTradeEnd() {
+        try {
+            return LocalTime.parse(tradeEndConfig);
+        } catch (Exception e) {
+            return LocalTime.of(14, 40); // safe default
+        }
+    }
 
     private BigDecimal resolveCapital() {
         return "PAPER".equalsIgnoreCase(tradingMode) ? paperAccount.getCapital() : configCapital;

@@ -1,6 +1,6 @@
 package com.trading.strategy.smc;
 
-import com.trading.events.SmartChannelPullbackSignalEvent;
+// SmcSignalLoggerService listens to SmcSignalEvent — SMC-owned event, no SCPS dependency
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Async;
@@ -12,14 +12,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 /**
  * SmcSignalLoggerService
  * ─────────────────────────────────────────────────────────────────────────────
- * Listens to SmartChannelPullbackSignalEvent and logs SMC_INSTITUTIONAL_V1
+ * Listens to SmcSignalEvent and logs SMC_INSTITUTIONAL_V1
  * signals to the application log for analytics and performance tracking.
  *
  * NO database dependency — logs to SLF4J only.
  * The trade itself is persisted by PaperTradeExecutionService via the
  * existing Trade entity, which already covers all required trade data.
  *
- * Confirmed SmartChannelPullbackSignalEvent fields (from actual source):
+ * Confirmed SmcSignalEvent fields (from actual source):
  *   getTarget1()          → BigDecimal  (NOT getTarget())
  *   getProbabilityScore() → double      (NOT int)
  *   getTotalScore()       → int
@@ -38,9 +38,8 @@ public class SmcSignalLoggerService {
 
     @EventListener
     @Async("tradingExecutor")
-    public void onSignal(SmartChannelPullbackSignalEvent event) {
-        // ONLY log SMC signals — ignore all other strategies
-        if (!SMC_STRATEGY.equals(event.getStrategyName())) return;
+    public void onSignal(SmcSignalEvent event) {
+        // SmcSignalEvent is only fired by SMC_INSTITUTIONAL_V1 — no guard needed
 
         try {
             String     symbol     = event.getTradingSymbol();
@@ -50,7 +49,7 @@ public class SmcSignalLoggerService {
             BigDecimal sl         = event.getStopLoss();
             BigDecimal target1    = event.getTarget1();           // confirmed: getTarget1()
             int        totalScore = event.getTotalScore();         // confirmed: int
-            int        confidence = (int) Math.round(event.getProbabilityScore()); // double → int
+            int        confidence = (int) Math.round((int) Math.round(event.getProbabilityScore())); // double → int
 
             // Compute RR from entry/sl/target1
             double rr = 0.0;
@@ -62,14 +61,13 @@ public class SmcSignalLoggerService {
 
             signalCountToday.incrementAndGet();
 
-            log.info("[SMC-LOGGER] Signal #{} | {} {} | entry={} sl={} T1={} | RR={} score={} conf={} | rvol={} bias={}",
+            log.info("[SMC-LOGGER] Signal #{} | {} {} | entry={} sl={} T1={} | RR={} score={} conf={} | setup={}",
                     signalCountToday.get(),
                     symbol, direction,
                     entry, sl, target1,
                     String.format("%.2f", rr),
                     totalScore, confidence,
-                    String.format("%.2f", event.getRvol()),
-                    event.getMarketBias());
+                    event.getSetupType());
 
         } catch (Exception e) {
             // Non-critical: never let logging failure affect signal pipeline

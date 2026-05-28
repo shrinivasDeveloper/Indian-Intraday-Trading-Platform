@@ -29,10 +29,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * Bootstrap service for the SMC_INSTITUTIONAL_V1 strategy.
  *
  * Responsibilities:
- *   1. On startup: fetch 1-year daily candles + 90-day 15m candles via Zerodha
+ *   1. On startup: fetch 60-day daily candles + 45-day 15m candles via Zerodha (2 API calls/symbol)
  *      Historical API for all Nifty500 symbols.
  *   2. Cache daily OHLCV in Redis (key: SMC:DAY:{symbol}) with 25h TTL.
- *   3. Cache 15m OHLCV in Redis (key: SMC:15M:{symbol}) with 4h TTR.
+ *   3. Cache 15m OHLCV in Redis (key: SMC:15M:{symbol}) with 4h TTL.
  *   4. Refresh daily candles every morning at 9:05 AM IST (pre-market).
  *   5. Expose getSmcDailyCandles(symbol) and getSmc15mCandles(symbol) to
  *      SmcInstitutionalStructureService for HTF analysis.
@@ -50,14 +50,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class SmcInstitutionalCandleService {
 
     private static final ZoneId  IST              = ZoneId.of("Asia/Kolkata");
-    private static final int     DAILY_HISTORY_DAYS = 365;   // 1 year daily candles
-    private static final int     INTRADAY_HISTORY_DAYS = 90; // 90 days 15m candles
-    private static final int     INTRADAY_5M_DAYS      = 30;  // 30 days 5m candles (spec s5)
-    private static final int     MAX_CANDLES_5M        = 2400; // 30d × ~80 candles/day
-    private static final int     MAX_CANDLES_DAILY = 270;    // ~252 trading days/yr + buffer
-    private static final int     MAX_CANDLES_15M   = 2400;   // 90d × ~27 candles/day
-    private static final int     RATE_LIMIT_DELAY_MS = 340;  // ~3 req/sec Zerodha limit
-    private static final int     FETCH_PARALLELISM   = 3;    // parallel fetch threads
+    private static final int     DAILY_HISTORY_DAYS    = 60;   // 60 trading days (~3 months) — enough for HTF S/R
+    private static final int     INTRADAY_HISTORY_DAYS = 45;   // 45 days 15m — enough for structure + recent setups
+    private static final int     MAX_CANDLES_DAILY     = 90;   // 60d + weekend buffer
+    private static final int     MAX_CANDLES_15M       = 1500; // 45d × ~27 candles/day
+    private static final int     RATE_LIMIT_DELAY_MS = 500;  // ms between API calls within a symbol
     private static final long    REDIS_TTL_DAILY_SEC = 90_000;  // ~25h
     private static final long    REDIS_TTL_15M_SEC   = 14_400;  // 4h
 
@@ -137,45 +134,32 @@ public class SmcInstitutionalCandleService {
             return;
         }
 
-        log.info("[SMC-CANDLE] Starting bootstrap for {} symbols | daily={}d | 15m={}d",
+        log.info("[SMC-CANDLE] Starting bootstrap for {} symbols | daily={}d | 15m={}d (5m=live)",
                 symbols.size(), DAILY_HISTORY_DAYS, INTRADAY_HISTORY_DAYS);
 
-        ExecutorService pool = Executors.newFixedThreadPool(FETCH_PARALLELISM,
-                r -> { Thread t = new Thread(r, "smc-fetch"); t.setDaemon(true); return t; });
-
+        // Sequential fetch — Zerodha rate limit is per-account, not per-thread.
+        // Multiple parallel threads cause burst requests that get throttled (3→10s/symbol).
+        // Sequential with 500ms between API calls stays under the 3 req/sec limit
+        // and completes in ~6 minutes reliably.
         List<String> symbolList = new ArrayList<>(symbols);
-        AtomicInteger fetched = new AtomicInteger(0);
         int total = symbolList.size();
+        int done  = 0;
 
-        // Submit parallel fetch tasks with rate limiting
-        List<Future<?>> futures = new ArrayList<>();
-        for (int i = 0; i < symbolList.size(); i++) {
-            final String symbol = symbolList.get(i);
-            final int idx = i;
-            futures.add(pool.submit(() -> {
-                try {
-                    // Stagger start to spread load (idx / PARALLELISM × delay)
-                    Thread.sleep((long)(idx / FETCH_PARALLELISM) * RATE_LIMIT_DELAY_MS);
-                    fetchAndCacheSymbol(symbol);
-                    int done = fetched.incrementAndGet();
-                    if (done % 50 == 0) {
-                        log.info("[SMC-CANDLE] Bootstrap progress: {}/{}", done, total);
-                    }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                } catch (Throwable e) {
-                    // KiteException extends Throwable directly — wraps fetchAndCacheSymbol Zerodha calls
-                    log.debug("[SMC-CANDLE] Fetch failed for {}: {}", symbol, e.getMessage());
+        for (String symbol : symbolList) {
+            try {
+                fetchAndCacheSymbol(symbol);
+                done++;
+                if (done % 50 == 0) {
+                    log.info("[SMC-CANDLE] Bootstrap progress: {}/{}", done, total);
                 }
-            }));
+                // Brief pause between symbols to avoid burst at Zerodha API
+                sleep(200);
+            } catch (Throwable e) {
+                log.debug("[SMC-CANDLE] Fetch failed for {}: {}", symbol, e.getMessage());
+            }
         }
 
-        pool.shutdown();
-        try {
-            pool.awaitTermination(20, TimeUnit.MINUTES);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        // Sequential execution complete — no thread pool to shut down
 
         bootstrapComplete.set(true);
         symbolsLoaded.set(dailyCandles.size());
@@ -214,30 +198,6 @@ public class SmcInstitutionalCandleService {
         }
 
         // Rate limit between daily and 15m calls
-        sleep(RATE_LIMIT_DELAY_MS);
-
-        // ── 5m candles (last 30 days for intraday confirmation) ───────────
-        Date from5m = toDate(LocalDate.now(IST).minusDays(INTRADAY_5M_DAYS));
-        try {
-            HistoricalData _result5m = kiteConnect.getHistoricalData(
-                    from5m, toDate, String.valueOf(token), "5minute", false, false);
-            List<HistoricalData> raw5m = (_result5m != null) ? _result5m.dataArrayList : null;
-
-            if (raw5m != null && !raw5m.isEmpty()) {
-                List<Candle> c5m = convertToCandles(raw5m, symbol, "5minute");
-                if (c5m.size() > MAX_CANDLES_5M) {
-                    c5m = c5m.subList(c5m.size() - MAX_CANDLES_5M, c5m.size());
-                }
-                intraday5m.put(symbol, c5m);
-                cacheInRedis(REDIS_KEY_5M + symbol, c5m, REDIS_TTL_15M_SEC);
-            }
-        } catch (Throwable e) {
-            // KiteException extends Throwable directly
-            log.trace("[SMC-CANDLE] 5m fetch error {}: {}", symbol, e.getMessage());
-            List<Candle> cached5m = loadFromRedis(REDIS_KEY_5M + symbol);
-            if (!cached5m.isEmpty()) intraday5m.put(symbol, cached5m);
-        }
-
         sleep(RATE_LIMIT_DELAY_MS);
 
         // ── 15m candles ──────────────────────────────────────────────────────
@@ -293,23 +253,164 @@ public class SmcInstitutionalCandleService {
      * Returns 5m candles for intraday setup confirmation (short-term momentum).
      * Lower timeframe — never overrides HTF direction.
      */
-    public List<Candle> getSmc5mCandles(String symbol) {
-        List<Candle> c = intraday5m.get(symbol);
-        if (c != null) return Collections.unmodifiableList(c);
-        List<Candle> cached = loadFromRedis(REDIS_KEY_5M + symbol);
-        if (!cached.isEmpty()) intraday5m.put(symbol, cached);
-        return Collections.unmodifiableList(cached);
-    }
 
     public boolean isBootstrapComplete() { return bootstrapComplete.get(); }
     public int     getSymbolsLoaded()    { return symbolsLoaded.get(); }
 
+    /**
+     * Returns the set of symbols that have candle data loaded.
+     * Used by SmcInstitutionalStrategyEngine to iterate ONLY loaded symbols
+     * instead of all 9771 NSE instruments, preventing a 9-second scan loop.
+     */
+    // ══════════════════════════════════════════════════════════════════════════
+    // LIVE 15m CANDLE UPDATE
+    // Without this, intraday15m is frozen at bootstrap. Today's candles never
+    // reach evaluateSymbol() → SMC evaluates on yesterday's structure only.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @org.springframework.context.event.EventListener
+    @org.springframework.scheduling.annotation.Async("tradingExecutor")
+    public void onCandleClose(com.trading.events.CandleCompleteEvent event) {
+        if (!bootstrapComplete.get()) return;
+        Candle c = event.getCandle();
+        if (!"15minute".equals(c.getTimeframe()) || !c.isComplete()) return;
+
+        String symbol = c.getTradingSymbol();
+        List<Candle> buf = intraday15m.get(symbol);
+        if (buf == null) return; // only update symbols in our universe
+
+        synchronized (buf) {
+            buf.add(c);
+            if (buf.size() > MAX_CANDLES_15M) buf.remove(0);
+        }
+        log.trace("[SMC-CANDLE] Live 15m appended: {} close={}", symbol, c.getClose());
+    }
+
+    public Set<String> getLoadedSymbols() {
+        // Union of all timeframes — any symbol with at least daily data
+        // Only daily + 15m are bootstrapped; 5m received live
+        Set<String> loaded = new java.util.HashSet<>(dailyCandles.keySet());
+        loaded.addAll(intraday15m.keySet());
+        return java.util.Collections.unmodifiableSet(loaded);
+    }
+
     // ── Symbol universe ──────────────────────────────────────────────────────
 
+    /**
+     * Returns the SMC symbol universe — Nifty500 subset only (~253 symbols).
+     *
+     * CRITICAL: Do NOT use instrumentCache.getEquityInstruments().keySet() here.
+     * That returns ALL 9771 NSE instruments → 18.5 minute bootstrap time →
+     * Gate 2 blocks all trades until ~10:27 AM.
+     *
+     * Using Nifty500 subset (same list as HighRRStructureService):
+     *   253 symbols × 3 API calls × 340ms ÷ 3 threads ≈ 33 seconds bootstrap.
+     *   SMC can trade from 9:32 AM on all days (including Day 1).
+     */
     private Set<String> getSmcSymbols() {
         Map<String, Instrument> inst = instrumentCache.getEquityInstruments();
         if (inst == null || inst.isEmpty()) return Collections.emptySet();
-        return inst.keySet();
+
+        // Primary: filter to NSE EQ instruments with valid tokens in Nifty500 size range
+        Set<String> filtered = inst.entrySet().stream()
+                .filter(e -> {
+                    Instrument i = e.getValue();
+                    return "NSE".equals(i.getExchange())
+                            && "EQ".equals(i.getInstrument_type())
+                            && i.getInstrument_token() > 0
+                            && i.getLot_size() == 1;
+                })
+                .map(Map.Entry::getKey)
+                .collect(java.util.stream.Collectors.toSet());
+
+        // If reasonable size (200–600 symbols) use it directly
+        if (filtered.size() >= 200 && filtered.size() <= 600) {
+            log.info("[SMC-CANDLE] Symbol universe: {} NSE EQ symbols", filtered.size());
+            return filtered;
+        }
+
+        // Fallback: use static Nifty500 list (same as HighRRStructureService)
+        return getStaticNifty500(inst);
+    }
+
+    /**
+     * Static Nifty500 constituent list — exact copy from HighRRStructureService.
+     * Used as fallback when equity filter returns unexpected count.
+     */
+    private Set<String> getStaticNifty500(Map<String, Instrument> instruments) {
+        Set<String> nifty500 = new java.util.LinkedHashSet<>(java.util.Arrays.asList(
+                // Nifty50
+                "RELIANCE","TCS","HDFCBANK","BHARTIARTL","ICICIBANK","INFOSYS","SBIN","HINDUNILVR",
+                "ITC","LT","KOTAKBANK","AXISBANK","BAJFINANCE","MARUTI","SUNPHARMA","TATAMOTORS",
+                "ULTRACEMCO","NTPC","TITAN","ONGC","ADANIPORTS","POWERGRID","HDFCLIFE","COALINDIA",
+                "WIPRO","HCLTECH","BAJAJFINSV","TECHM","ASIANPAINT","NESTLEIND","DIVISLAB","GRASIM",
+                "TATASTEEL","JSWSTEEL","INDUSINDBK","CIPLA","DRREDDY","EICHERMOT","HINDALCO","ADANIENT",
+                "SBILIFE","BPCL","BRITANNIA","APOLLOHOSP","TATACONSUM","PIDILITIND","HEROMOTOCO",
+                "BAJAJ-AUTO","SHREECEM","TRENT",
+                // Banking & Finance
+                "HDFCAMC","ICICIPRULI","ICICIGI","SBICARD","CHOLAFIN","MUTHOOTFIN","BAJAJHLDNG",
+                "IDFCFIRSTB","FEDERALBNK","BANDHANBNK","AUBANK","RBLBANK","PNB","BANKBARODA",
+                "CANBK","UNIONBANK","RECLTD","PFC","IRFC","M&MFIN","LICHSGFIN","MANAPPURAM",
+                "SUNDARMFIN","ABCAPITAL","POONAWALLA","UGROCAP","CREDITACC",
+                // IT & Technology
+                "PERSISTENT","MPHASIS","OFSS","LTIM","COFORGE","LTTS","KPITTECH","TATAELXSI",
+                "NAUKRI","INDIAMART","POLICYBZR","ANGELONE","CDSL","CAMS","MASTEK",
+                // Pharma & Healthcare
+                "LUPIN","AUROPHARMA","ZYDUSLIFE","TORNTPHARM","BIOCON","ALKEM","SYNGENE",
+                "LALPATHLAB","METROPOLIS","MAXHEALTH","FORTIS","APOLLOHOSP","RAINBOW","KIMS",
+                "GLOBALHEALT","YATHARTH","JUPITERWATT","MEDANTA",
+                // Auto & Auto Ancillaries
+                "TVSMOTOR","MOTHERSON","ASHOKLEY","BHARATFORG","ESCORTS","ENDURANCE","SONACOMS",
+                "BALKRISIND","APOLLOTYRE","CEATLTD","MRF","TIINDIA","SWARAJENG","EXIDEIND",
+                // Energy & Power
+                "ADANIGREEN","ADANIPOWER","TATAPOWER","JSWENERGY","TORNTPOWER","CESC","NHPC",
+                "SJVN","RVNL","IREDA","POWERMECH","SUZLON","RPOWER","PCBL",
+                // Oil & Gas
+                "ONGC","BPCL","IOC","HINDPETRO","GAIL","OIL","MGL","IGL","GUJGASLTD","PETRONET",
+                // Cement
+                "AMBUJACEM","RAMCOCEM","JKCEMENT","ORIENTCEM","HEIDELBERG","JKLAKSHMI",
+                // FMCG & Consumer
+                "MARICO","DABUR","COLPAL","GODREJCP","EMAMILTD","VBL","BIKAJI","PATANJALI",
+                "MCDOWELL-N","RADICO","UNITDSPR","BALRAMCHIN","TRIVENI","DWARIKESH",
+                // Real Estate
+                "GODREJPROP","DLF","PRESTIGE","OBEROIRLTY","LODHA","BRIGADE","SOBHA","SUNTECK",
+                // Infrastructure & Capital Goods
+                "HAL","BEL","SIEMENS","HAVELLS","VOLTAS","ABB","POLYCAB","DIXON","KAYNES",
+                "GRINDWELL","CUMMINSIND","TIMKEN","SCHAEFFLER","SKF","ELGIEQUIP","BHEL","THERMAX",
+                "KEC","KALPATPOWR","APLAPOLLO","RAJESHEXPO",
+                // Metals & Mining
+                "NMDC","SAIL","NATIONALUM","HINDCOPPER","VEDL","HINDZINC","MOIL","GMRAIRPORT",
+                // Chemicals
+                "PIIND","DEEPAKNTR","AARTIIND","SRF","NAVINFLUOR","COROMANDEL","CHAMBLFERT",
+                "GNFC","UPL","TATACHEM","GHCL","VINDHYATEL",
+                // Textiles & Apparel
+                "PAGEIND","ABFRL","RAYMOND","BATAINDIA","MANYAVAR","SENCO","KALYAN","DOMS",
+                // PSU & Government
+                "CONCOR","IRCTC","DELHIVERY","HAL","BEL","IRFC","RVNL","NHPC","SJVN","RECLTD",
+                // Media & Entertainment
+                "SUNTV","ZEEL","PVR","PVRINOX",
+                // Hotels & Leisure
+                "INDHOTEL","LEMONTREE","CHALET",
+                // Pipes & Building Materials
+                "ASTRAL","PRINCEPIPE","FINOLEX","SUPREMEIND","POLYMED",
+                // Logistics
+                "GATI","BLUEDART","VRL",
+                // Diversified
+                "ADANIPORTS","ADANIENT","ADANIGREEN","ADANIPOWER","ATGL","ADANITRANS",
+                // Additional Nifty500 constituents
+                "AFFLE","TANLA","HAPPYMNDS","ROUTE","CAMPUS","DEVYANI","SAPPHIRE",
+                "IDEAFORGE","CYIENT","ZENSAR","MSTCLTD","RAILTEL","IIFL","IIFLWAM",
+                "360ONE","NUVAMA","EMUDHRA","INOXWIND","SOLARINDS","HBLPOWER","GPIL",
+                "WELCORP","KALYANKJIL","JYOTHYLAB","BAYER","SKFINDIA","SUPRAJIT",
+                "CRAFTSMAN","LATENTVIEW","DELHIVERY","BRAINBEES","NIACL","GICRE","STARHEALTH",
+                "ICICIB22","HDFCBANK","BAJFINANCE","SBILIFE","MAXLIFE"
+        ));
+        Set<String> result = nifty500.stream()
+                .filter(instruments::containsKey)
+                .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
+        log.info("[SMC-CANDLE] Static Nifty500: {} of {} symbols resolved",
+                result.size(), nifty500.size());
+        return result;
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
