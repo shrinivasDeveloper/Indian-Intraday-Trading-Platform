@@ -290,7 +290,7 @@ public class SmcInstitutionalStrategyEngine {
 
         // Get 15m candles for intraday confirmation
         List<Candle> candles15m = candleService.getSmcIntraday15m(symbol);
-        if (candles15m == null || candles15m.size() < 10) return null;
+        if (candles15m == null || candles15m.size() < 2) return null; // need only last 2 candles
 
         // 5m candles: SmcCandleStore only buffers 15m data.
         // 5m momentum check is supplementary — evaluation proceeds without it.
