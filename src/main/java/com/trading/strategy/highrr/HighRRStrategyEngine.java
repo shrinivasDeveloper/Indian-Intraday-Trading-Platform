@@ -96,7 +96,7 @@ public class HighRRStrategyEngine {
     // Entry must be within this % of a known S/R level.
     // Prevents mid-air entries like ADANIGREEN ₹1,223 when resistance was ₹1,252 (2.4% away).
     // Tightened 0.5%→0.3%: entry must be within 0.3% of zone. Prevents sloppy entries.
-    private static final double SR_ENTRY_ZONE_PCT = 0.003; // 0.3%
+    private static final double SR_ENTRY_ZONE_PCT = 0.005; // 0.5% — TUNED: was 0.3%, too tight, most ticks 0.3-0.6% from zone
     // Structural SL max distance from entry (avoids oversized risk)
     // SR_SL_MAX_PCT removed — SL is now fixed at exactly 1% (FIXED_SL_PCT)
     // Min RR for a structural T1 to be accepted
@@ -106,14 +106,14 @@ public class HighRRStrategyEngine {
     // WHY: Without this, a setup with RR=2.0 but no pullback, no volume spike,
     // no S/R quality still qualifies (score = 15 pts from RR alone).
     // UTIAMC and PHOENIXLTD both would have scored below 50 — this gate blocks them.
-    // MIN_CANDIDATE_SCORE = 150 (raised from 125).
+    // MIN_CANDIDATE_SCORE = 140 (tuned from 150; 150 was raised from 125).
     // Maximum possible = 170.
     // Minimum path to 150:
     //   RR≥3(25)+trend(20)+pullback(20)+volume(20)+major_SR(20)+HTF_MAJOR(20)+clean(15)+liq(10) = 150
     //   OR: RR≥3(25)+trend(20)+conf(5)+pullback(20)+volume(20)+major_SR(20)+HTF_MAJOR(20)+clean(15) = 150
     // Every qualifying trade needs: RR≥3 + trend + pullback + volume + major_SR + HTF_MAJOR
     //   + at least 2 of: {clean wick, liquidity, confluence, T1_major}
-    private static final int    MIN_CANDIDATE_SCORE = 150;
+    private static final int    MIN_CANDIDATE_SCORE = 140; // TUNED: was 150 — strong setups scored 148, just below threshold
 
     // ── SL placement ────────────────────────────────────────────────────────
     // SL_BUFFER_PCT removed — was declared but never referenced.
@@ -311,14 +311,28 @@ public class HighRRStrategyEngine {
         double  pressureRatio    = 1.0;
         boolean bullishBreadth   = false;
         boolean bearishBreadth   = false;
+        boolean pressureDataAvailable = false;
         try {
             var snap = pressureService.getSnapshot();
             if (snap != null && snap.totalSymbols() >= 100) {
-                pressureRatio  = snap.ratio();
-                bullishBreadth = pressureRatio >= 1.15; // ≥15% more buying = broad bull
-                bearishBreadth = pressureRatio <= 0.87; // ≥15% more selling = broad bear
+                pressureRatio      = snap.ratio();
+                bullishBreadth     = pressureRatio >= 1.15; // ≥15% more buying = broad bull
+                bearishBreadth     = pressureRatio <= 0.87; // ≥15% more selling = broad bear
+                pressureDataAvailable = true;
             }
         } catch (Exception ignored) { /* pressure service unavailable */ }
+
+        // BREADTH FALLBACK: when MarketPressureService has < 100 symbols (pre-market
+        // or service unavailable), use EMA stack as breadth proxy.
+        // Perfect bull EMA stack (EMA20 > EMA50 > EMA200, not compressed) implies
+        // broad participation — conservative proxy, not equivalent to real breadth.
+        // This prevents Grade D lockout during valid trading hours.
+        if (!pressureDataAvailable) {
+            bullishBreadth = bullStack && !emaCompressed; // EMA perfectly aligned bull
+            bearishBreadth = bearStack && !emaCompressed; // EMA perfectly aligned bear
+            log.debug("[HIGHRR] Pressure service unavailable — using EMA stack as breadth proxy " +
+                    "(bull={} bear={})", bullishBreadth, bearishBreadth);
+        }
 
         // ── LAYER 4: Volatility regime ─────────────────────────────────────────
         // ATR in healthy range (0.25–0.80%) = normal trending day
@@ -366,14 +380,17 @@ public class HighRRStrategyEngine {
         // 2. No breadth at ALL (ratio between 0.88-1.14) AND direction just started
         //    = market not confirming the move yet, too risky for HighRR
         boolean noBreadth = !bullishBreadth && !bearishBreadth; // ratio 0.88-1.14 = neutral
-        if (emaCompressed && !breadthAligned && directionConsecutive < 2) {
+        // Grade D exits: only block on truly poor conditions
+        // directionConsecutive < 1 means literally zero cycles of confirmed direction
+        // (previously < 2 caused first 2 cycles after restart to always be Grade D)
+        if (emaCompressed && !breadthAligned && directionConsecutive < 1) {
             marketGrade = "D";
-            log.debug("[HIGHRR] Grade D — EMA compressed + no breadth + unstable direction. Skip.");
+            log.debug("[HIGHRR] Grade D — EMA compressed + no breadth + zero direction history. Skip.");
             return;
         }
-        if (noBreadth && directionConsecutive < 2 && !momentumConfirmed) {
+        if (noBreadth && directionConsecutive < 1 && !momentumConfirmed) {
             marketGrade = "D";
-            log.debug("[HIGHRR] Grade D — No breadth + new direction + weak ATR. Skip.");
+            log.debug("[HIGHRR] Grade D — No breadth + zero direction history + weak ATR. Skip.");
             return;
         }
 
@@ -383,8 +400,8 @@ public class HighRRStrategyEngine {
         // Grade B (45-79): good structure but marginal breadth → BNF must confirm.
         // Grade C (25-44): weak signals → only exceptional setups (score ≥ 160) fire.
         marketGrade = qualityPoints >= 80 ? "A"
-                    : qualityPoints >= 45 ? "B"
-                    : qualityPoints >= 25 ? "C" : "D";
+                : qualityPoints >= 45 ? "B"
+                : qualityPoints >= 25 ? "C" : "D";
 
         // Grade D still blocks
         if ("D".equals(marketGrade)) {
@@ -680,14 +697,14 @@ public class HighRRStrategyEngine {
             if (bodyRatio >= 0.20) {
                 if (isBuy && cClose < cOpen) {
                     log.debug("[HIGHRR] {} BUY Gate-C1 BLOCKED — bearish candle body at support "
-                            + "(close={} < open={})",
+                                    + "(close={} < open={})",
                             symbol,
                             String.format("%.2f", cClose), String.format("%.2f", cOpen));
                     return null;
                 }
                 if (!isBuy && cClose > cOpen) {
                     log.debug("[HIGHRR] {} SELL Gate-C1 BLOCKED — bullish candle body at resistance "
-                            + "(close={} > open={})",
+                                    + "(close={} > open={})",
                             symbol,
                             String.format("%.2f", cClose), String.format("%.2f", cOpen));
                     return null;
@@ -702,7 +719,7 @@ public class HighRRStrategyEngine {
                 double bodyDist = zonePx > 0 ? Math.abs(bodyMid - zonePx) / zonePx : 0;
                 if (bodyDist > 0.005) {
                     log.debug("[HIGHRR] {} {} Gate-C2 BLOCKED — body midpoint ({}) is "
-                            + "{}% from zone ({}) — wick-only touch, body not near zone",
+                                    + "{}% from zone ({}) — wick-only touch, body not near zone",
                             symbol, isBuy ? "BUY" : "SELL",
                             String.format("%.2f", bodyMid),
                             String.format("%.2f", bodyDist * 100),
@@ -716,7 +733,7 @@ public class HighRRStrategyEngine {
             // At a zone, doji = indecision. Wait for next candle to confirm.
             if (bodyRatio < 0.20 && rangeAsPct > 0.001) {
                 log.debug("[HIGHRR] {} {} Gate-C3 BLOCKED — doji/spinning top "
-                        + "(body={}% of range), no directional conviction",
+                                + "(body={}% of range), no directional conviction",
                         symbol, isBuy ? "BUY" : "SELL",
                         String.format("%.0f", bodyRatio * 100));
                 return null;
@@ -731,11 +748,11 @@ public class HighRRStrategyEngine {
             double zonePx = entryAnchorLevel.price();
             double drift  = zonePx > 0
                     ? (isBuy ? (entryDbl - zonePx) / zonePx
-                             : (zonePx - entryDbl) / zonePx)
+                    : (zonePx - entryDbl) / zonePx)
                     : 0;
             if (drift > MAX_ZONE_DRIFT_PCT) {
                 log.debug("[HIGHRR] {} {} Gate-C4 BLOCKED — price already {}% from zone "
-                        + "(max {}%, late entry / momentum chasing)",
+                                + "(max {}%, late entry / momentum chasing)",
                         symbol, isBuy ? "BUY" : "SELL",
                         String.format("%.2f", drift * 100),
                         String.format("%.1f", MAX_ZONE_DRIFT_PCT * 100));
@@ -758,7 +775,7 @@ public class HighRRStrategyEngine {
             atFallingTrendline = structure.atFallingTrendline(entryDbl, tl);
             if (atRisingTrendline) {
                 log.debug("[HIGHRR] {} TRENDLINE CONFLUENCE — price at rising trendline {} "
-                        + "AND horizontal zone {} (ascending triangle pattern)",
+                                + "AND horizontal zone {} (ascending triangle pattern)",
                         symbol,
                         String.format("%.2f", structure.trendlineSupport()),
                         entryAnchorLevel != null
@@ -766,7 +783,7 @@ public class HighRRStrategyEngine {
             }
             if (atFallingTrendline && !isBuy) {
                 log.debug("[HIGHRR] {} TRENDLINE CONFLUENCE — price at falling trendline {} "
-                        + "AND horizontal resistance {} (descending triangle SHORT)",
+                                + "AND horizontal resistance {} (descending triangle SHORT)",
                         symbol,
                         String.format("%.2f", structure.trendlineResistance()),
                         entryAnchorLevel != null
@@ -823,7 +840,7 @@ public class HighRRStrategyEngine {
                         : (corrected - entryDbl) >= atr14Dist;
                 if (correctedSafeFromNoise) {
                     log.debug("[HIGHRR] {} {} Gate-C5: SL tightened {} → {} "
-                            + "(zone={}, 0.3% cap, ATR safe)",
+                                    + "(zone={}, 0.3% cap, ATR safe)",
                             symbol, isBuy ? "BUY" : "SELL",
                             String.format("%.2f", slD),
                             String.format("%.2f", corrected),
@@ -831,7 +848,7 @@ public class HighRRStrategyEngine {
                     slD = corrected;
                 } else {
                     log.debug("[HIGHRR] {} {} Gate-C5: SL kept at {} (C5 correction would "
-                            + "breach ATR floor {}, skipping)",
+                                    + "breach ATR floor {}, skipping)",
                             symbol, isBuy ? "BUY" : "SELL",
                             String.format("%.2f", slD),
                             String.format("%.2f", atr14Dist));

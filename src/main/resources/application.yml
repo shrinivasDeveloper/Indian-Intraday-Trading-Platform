@@ -293,7 +293,7 @@ strategy:
     # Minimum composite score (0-100) for a news item to trigger trade evaluation
     # 65 = balanced (earnings beat, clear sentiment, < 30 min old)
     # 80 = high conviction only (confirmed earnings/M&A, strongly positive/negative)
-    min-score: 65
+    min-score: 50  # TUNED: was 65 — too high for non-results-season news. At 50: sector+positive+fresh+ET still scores 64 → passes
     max-signals-per-session: 2
     # GNews.io free API key — 100 requests/day, NO delay (unlike NewsAPI which delays 24h).
     # Get yours free at https://gnews.io — email only, no credit card required.
@@ -302,7 +302,7 @@ strategy:
     gnews-key: ${GNEWS_KEY:}
     # NewsAPI has been REMOVED — its free tier has a 24-hour news delay (useless for intraday).
     # Time-stop for news catalyst trades: 20 minutes (news impact fades fast)
-    time-stop-minutes: 20  # 20 min time stop for news — news impact fades quickly
+    time-stop-minutes: 0   # No time-stop — exit only on SL or target
 
   # ================================
   # SMC INSTITUTIONAL V1
@@ -325,7 +325,7 @@ strategy:
     # Risk per trade as fraction of capital (1% = 0.01).
     risk-per-trade: 0.01
     # Time-stop in minutes. Positions older than this are closed by PaperTradeManagementService.
-    time-stop-minutes: 90
+    time-stop-minutes: 0  # No time-stop — exit only on SL or T1/T2
     # Max trades per session: no SMC-specific cap — uses platform circuit-breaker
     # (circuit-breaker.max-trades-per-day: 10) which applies across all strategies.
     # Last candle close time to evaluate (HH:mm). Signals after this are not fired.
