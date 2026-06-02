@@ -61,7 +61,6 @@ public class SmcInstitutionalCandleService {
     // Redis key prefixes — isolated from HighRR (SMC:, not stock: or HIGHRR:)
     static final String REDIS_KEY_DAY     = "SMC:DAY:";
     static final String REDIS_KEY_15M     = "SMC:15M:";
-    static final String REDIS_KEY_5M      = "SMC:5M:";
     // HTF structure sub-keys (set by SmcInstitutionalStructureService)
     static final String REDIS_HTF_TREND   = "HTF:TREND:";
     static final String REDIS_HTF_SUPPORT = "HTF:SUPPORT:";
@@ -86,7 +85,6 @@ public class SmcInstitutionalCandleService {
     // ── In-memory cache for hot path reads ───────────────────────────────────
     private final Map<String, List<Candle>> dailyCandles = new ConcurrentHashMap<>();
     private final Map<String, List<Candle>> intraday15m  = new ConcurrentHashMap<>();
-    private final Map<String, List<Candle>> intraday5m   = new ConcurrentHashMap<>();
 
     private final AtomicBoolean  bootstrapComplete = new AtomicBoolean(false);
     private final AtomicInteger  symbolsLoaded     = new AtomicInteger(0);
@@ -121,8 +119,40 @@ public class SmcInstitutionalCandleService {
     @Scheduled(cron = "0 5 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyRefresh() {
         if (!smcEnabled) return;
+        if (!bootstrapComplete.get()) {
+            log.info("[SMC-CANDLE] Daily refresh skipped — bootstrap not yet complete");
+            return;
+        }
         log.info("[SMC-CANDLE] Daily refresh starting at 9:05 AM IST");
-        bootstrapFromBroker();
+        // Lightweight: only fetch 5 days of daily candles to get yesterday's close.
+        // Full bootstrap (60d daily + 45d 15m) only runs once at startup.
+        // This prevents 4-minute bootstrap re-run every morning at 9:05 AM.
+        Set<String> symbols = getSmcSymbols();
+        if (symbols.isEmpty()) return;
+        int updated = 0;
+        for (String symbol : symbols) {
+            try {
+                Instrument inst = instrumentCache.getEquityInstruments().get(symbol);
+                if (inst == null) continue;
+                long token = inst.getInstrument_token();
+                if (token <= 0) continue;
+                java.util.Date from = toDate(java.time.LocalDate.now(IST).minusDays(7));
+                java.util.Date to   = toDate(java.time.LocalDate.now(IST));
+                HistoricalData result = kiteConnect.getHistoricalData(
+                        from, to, String.valueOf(token), "day", false, false);
+                if (result != null && result.dataArrayList != null && !result.dataArrayList.isEmpty()) {
+                    List<Candle> candles = convertToCandles(result.dataArrayList, symbol, "day");
+                    if (!candles.isEmpty()) {
+                        dailyCandles.put(symbol, candles);
+                        updated++;
+                    }
+                }
+                sleep(350); // stay under Zerodha 3 req/sec
+            } catch (Throwable e) {
+                log.trace("[SMC-CANDLE] Daily refresh failed for {}: {}", symbol, e.getMessage());
+            }
+        }
+        log.info("[SMC-CANDLE] Daily refresh complete — {} symbols updated", updated);
     }
 
     // ── Core bootstrap logic ─────────────────────────────────────────────────
