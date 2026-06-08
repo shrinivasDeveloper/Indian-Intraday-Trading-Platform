@@ -311,8 +311,17 @@ public class ProprietaryMLEngine {
                 regimeY.computeIfAbsent(regime, k -> new ArrayList<>()).add(y[i]);
             }
 
-            // Build DataFrame for tree models (GBM, RF)
-            DataFrame trainDf = buildDataFrame(X, y);
+            // ── 80/20 train/validation split ──────────────────────────────
+            int   totalN   = X.length;
+            int   trainN   = (int)(totalN * 0.8);
+            double[][] Xtrain = Arrays.copyOfRange(X, 0,      trainN);
+            double[][] Xval   = Arrays.copyOfRange(X, trainN, totalN);
+            int[]      ytrain = Arrays.copyOfRange(y, 0,      trainN);
+            int[]      yval   = Arrays.copyOfRange(y, trainN, totalN);
+            log.info("[AI-ML] Split: {} train / {} validation samples", trainN, totalN - trainN);
+
+            // Build DataFrame from TRAINING data only
+            DataFrame trainDf = buildDataFrame(Xtrain, ytrain);
             StructType schema  = trainDf.schema();
 
             // Train GBM (used for feature importance + regime models)
@@ -330,7 +339,7 @@ public class ProprietaryMLEngine {
             // This is the primary inference model. GBM/RF used for feature importance only.
             LogisticRegression newLr = null;
             try {
-                newLr = LogisticRegression.fit(X, y, 0.1, 1e-5, 500);
+                newLr = LogisticRegression.fit(Xtrain, ytrain, 0.1, 1e-5, 500);
                 log.info("[AI-ML] LogisticRegression trained: {} samples", X.length);
             } catch (Exception e) {
                 log.debug("[AI-ML] LR training failed: {}", e.getMessage());
@@ -389,12 +398,31 @@ public class ProprietaryMLEngine {
                 modelLock.writeLock().unlock();
             }
 
-            long elapsed = System.currentTimeMillis() - t0;
+            // ── Validation accuracy on held-out 20% ──────────────────────
+            double valAccuracy = 0;
+            if (newLr != null && Xval.length > 0) {
+                int correct = 0;
+                for (int i = 0; i < Xval.length; i++) {
+                    int predicted = newLr.predict(Xval[i]);
+                    if (predicted == yval[i]) correct++;
+                }
+                valAccuracy = (double) correct / Xval.length;
+            }
+
+            // ── Only replace model if validation accuracy ≥ 52% ─────────────
+            // (> random chance of 50%, avoids deploying overfit/bad model)
+            long elapsed  = System.currentTimeMillis() - t0;
             int positives = Arrays.stream(y).sum();
-            log.info("[AI-ML] ✅ Models trained | samples={} pos={} neg={} " +
-                            "elapsed={}ms | GBM+{}",
-                    rows.size(), positives, rows.size()-positives, elapsed,
-                    newRf != null ? "RF" : "only");
+
+            if (newLr == null || valAccuracy < 0.52) {
+                log.warn("[AI-ML] ⚠️  New model rejected: valAccuracy={:.1f}% < 52% — keeping previous model",
+                        valAccuracy * 100);
+                return; // keep existing models untouched
+            }
+
+            log.info("[AI-ML] ✅ Models trained | samples={} train={} val={} | " +
+                            "valAccuracy={:.1f}% | elapsed={}ms",
+                    rows.size(), trainN, Xval.length, valAccuracy * 100, elapsed);
 
             persistFeatureImportance();
 

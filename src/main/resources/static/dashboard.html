@@ -170,6 +170,7 @@
     <div class="tab" onclick="switchTab('risk',this)">Risk</div>
     <div class="tab" onclick="switchTab('smc',this)">SMC 🧠</div>
     <div class="tab" onclick="switchTab('news',this)">News 📰</div>
+    <div class="tab" onclick="switchTab('ai',this)" id="tab-ai">AI Engine 🤖</div>
 </div>
 
 <!-- OVERVIEW -->
@@ -707,6 +708,7 @@
     const API = '/api/dashboard';
     let D = {};
     let SMC = {};  // SMC_INSTITUTIONAL_V1 live status
+    let AI = {};  // AI trading module status
 
     function switchTab(name, el) {
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -730,13 +732,15 @@
 
     async function load() {
         try {
-            const [r, rs] = await Promise.all([
+            const [r, rs, ra] = await Promise.all([
                 fetch(API + '/snapshot'),
-                fetch(API + '/smc/status').catch(() => null)
+                fetch(API + '/smc/status').catch(() => null),
+                fetch(API + '/ai/status').catch(() => null)
             ]);
             if (r.status === 401) { window.location.href = '/login'; return; }
             D = await r.json();
             if (rs && rs.ok) SMC = await rs.json();
+            if (ra && ra.ok) AI = await ra.json();
             render();
             q('loading').style.display = 'none';
             set('rtime', new Date().toLocaleTimeString('en-IN'));
@@ -746,7 +750,7 @@
     function render() {
         renderHdr(); renderOv(); renderOrb(); renderHighRR(); renderTrades();
         renderPortfolio(); renderStrategy(); renderChannels(); renderScanner(); renderSectors(); renderRisk();
-        renderSmc(); renderNews();
+        renderSmc(); renderNews(); renderAI();
     }
 
     // ── HEADER ───────────────────────────────────────────────────────────────────
@@ -1456,3 +1460,249 @@
 </script>
 </body>
 </html>
+<div id="tc-ai" class="tc">
+    <div id="ai-status-bar" style="margin-bottom:12px"></div>
+    <div id="ai-perf-grid" style="margin-bottom:12px"></div>
+    <div id="ai-today" style="margin-bottom:12px"></div>
+    <div id="ai-decisions"></div>
+</div>
+
+
+// ── AI ENGINE ──────────────────────────────────────────────────────────────
+function renderAI() {
+const ai = AI || {};
+
+// Update tab label
+const tabEl = document.getElementById('tab-ai');
+if (tabEl) {
+tabEl.textContent = ai.enabled
+? 'AI Engine 🤖 (' + (ai.tradesExecutedToday || 0) + '/5)'
+: 'AI Engine 🤖';
+}
+
+// ── Disabled state ────────────────────────────────────────────────────
+if (!ai.enabled) {
+html('ai-status-bar', `
+<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;
+                          padding:20px;text-align:center;">
+    <div style="font-size:28px;margin-bottom:8px">🤖</div>
+    <div style="font-size:14px;font-weight:700;margin-bottom:6px">AI Module Disabled</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+        Set <code style="background:#1a1a2e;padding:2px 6px;border-radius:3px;font-size:11px">AI_TRADING_ENABLED=true</code>
+        in Railway environment variables
+    </div>
+    <div style="font-size:11px;color:var(--muted)">
+        Existing strategies (HighRR, News, SMC) continue running normally
+    </div>
+</div>`);
+html('ai-perf-grid', '');
+html('ai-today', '');
+html('ai-decisions', '');
+return;
+}
+
+const perf      = ai.performance || {};
+const decisions = ai.recentDecisions || [];
+const regime    = ai.regime || '—';
+const ms        = ai.modelStatus || '—';
+const firedSet  = new Set(ai.firedToday || []);
+
+// Parse phase from modelStatus string
+const samples   = parseInt((ms.match(/(\d+)/) || [0, 0])[1]);
+const phase     = samples < 50  ? 'Phase 1 — Collecting Training Data'
+: samples < 100 ? 'Phase 2 — GBM Model Active'
+: samples < 200 ? 'Phase 3 — Ensemble (GBM + RF)'
+: 'Phase 4 — Full AI with Regime Models';
+const phasePct  = samples < 50  ? Math.round(samples / 50 * 25)
+: samples < 100 ? 25 + Math.round((samples-50) / 50 * 25)
+: samples < 200 ? 50 + Math.round((samples-100) / 100 * 25)
+: Math.min(100, 75 + Math.round((samples-200) / 200 * 25));
+const phaseColor = samples < 50 ? 'var(--yellow)' : samples < 100 ? 'var(--blue)' : 'var(--purple)';
+
+// ── Status bar ────────────────────────────────────────────────────────
+html('ai-status-bar', `
+<div style="background:#1a0d2e;border:1px solid rgba(188,140,255,.3);
+                      border-radius:8px;padding:12px;display:flex;gap:12px;align-items:center">
+    <div style="font-size:24px">🤖</div>
+    <div style="flex:1">
+        <div style="font-size:12px;font-weight:700;color:${phaseColor}">${phase}</div>
+        <div style="font-size:10px;color:var(--muted);margin:3px 0">${ms}</div>
+        <div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden">
+            <div style="height:100%;width:${phasePct}%;background:${phaseColor};border-radius:2px;transition:width .5s"></div>
+        </div>
+    </div>
+    <div style="text-align:right">
+        <div style="font-size:13px;font-weight:700;color:var(--purple)">${regime}</div>
+        <div style="font-size:10px;color:var(--muted)">regime</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px">
+            ${ai.tradesExecutedToday || 0}/5 trades · ${ai.activePositions || 0}/2 positions
+        </div>
+    </div>
+</div>`);
+
+// ── Performance grid ──────────────────────────────────────────────────
+const dp = parseFloat(perf.totalPnl || 0);
+html('ai-perf-grid', `
+<div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);
+                      padding:5px 0;border-bottom:1px solid var(--border);margin-bottom:7px">
+    AI Performance (All-Time Paper)
+</div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+    ${[
+    ['Win Rate',   perf.winRate || '—',                'var(--green)'],
+    ['Expectancy', (perf.expectancy || '0') + 'R',     'var(--blue)'],
+    ['Profit Factor', perf.profitFactor || '—',        'var(--purple)'],
+    ['Total P&L',  (dp >= 0 ? '+' : '') + '₹' + Math.abs(dp).toFixed(0),
+    dp >= 0 ? 'var(--green)' : 'var(--red)'],
+    ].map(([l,v,c]) => `
+    <div style="background:var(--card);border:1px solid var(--border);border-radius:6px;
+                          padding:8px;text-align:center">
+        <div style="font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">${l}</div>
+        <div style="font-family:monospace;font-size:16px;font-weight:700;color:${c};margin-top:4px">${v}</div>
+    </div>`).join('')}
+</div>
+<div style="display:flex;gap:8px;margin-top:8px;font-size:11px;color:var(--muted)">
+    <span>${perf.wins || 0} wins</span>
+    <span>${perf.losses || 0} losses</span>
+    <span>${perf.totalTrades || 0} total trades</span>
+    ${firedSet.size ? '<span>Fired today: ' + [...firedSet].join(', ') + '</span>' : ''}
+</div>`);
+
+// ── Today summary ─────────────────────────────────────────────────────
+const aiTrades = (D.activeTrades || []).filter(t => (t.strategyName || '').includes('AI'));
+let todayHtml = '';
+if (aiTrades.length) {
+todayHtml += `<div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;
+                color:var(--muted);padding:5px 0;border-bottom:1px solid var(--border);margin-bottom:7px">
+    Active AI Positions</div>`;
+const prices = D.prices || {};
+aiTrades.forEach(t => {
+const isLong = t.direction === 'LONG';
+const ltp  = parseFloat(prices[t.tradingSymbol] || t.ltp || 0);
+const ep   = parseFloat(t.entryPrice || t.fillPrice || 0);
+const pv   = ltp > 0 && ep > 0 ? (isLong ? ltp-ep : ep-ltp) * parseInt(t.quantity||1) : 0;
+todayHtml += `
+<div style="background:#1a0d2e;border:1px solid rgba(188,140,255,.3);
+                               border-left:3px solid ${isLong?'var(--green)':'var(--red)'};
+                               border-radius:6px;padding:10px;margin-bottom:6px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:14px;font-weight:700">${t.tradingSymbol}</span>
+            ${isLong
+            ? '<span class="pill pg">LONG</span>'
+            : '<span class="pill pr">SHORT</span>'}
+            <span style="font-size:9px;padding:2px 6px;border-radius:3px;
+                          background:#1a0d2e;color:var(--purple);border:1px solid rgba(188,140,255,.3)">AI</span>
+            <span style="font-size:10px;padding:1px 6px;border-radius:3px;
+                          background:${pv>=0?'rgba(63,185,80,.1)':'rgba(248,81,73,.1)'};
+                          color:${pv>=0?'var(--green)':'var(--red)'}">
+                          ${pv>=0?'+':''}₹${pv.toFixed(0)} LIVE
+                        </span>
+        </div>
+        <span style="font-size:13px;font-weight:600;color:var(--blue)">₹${ltp.toFixed(2)}</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px">
+        ${[['Entry','le',ep],['SL','rr',t.stopLoss],['T1','gr',t.target]].map(([l,c,v])=>`
+        <div style="background:var(--bg);border-radius:4px;padding:4px 6px;text-align:center">
+            <div style="font-size:9px;color:var(--muted)">${l}</div>
+            <div style="font-family:monospace;font-size:11px;font-weight:600;
+                            color:${c==='le'?'var(--blue)':c==='rr'?'var(--red)':'var(--green)'}">₹${parseFloat(v||0).toFixed(2)}</div>
+        </div>`).join('')}
+    </div>
+</div>`;
+});
+}
+html('ai-today', todayHtml);
+
+// ── Recent decisions ──────────────────────────────────────────────────
+if (!decisions.length) {
+html('ai-decisions', `
+<div style="text-align:center;padding:20px;color:var(--muted)">
+    <div style="font-size:24px;margin-bottom:8px">📡</div>
+    ${samples < 50
+    ? `<div>Collecting data — <strong style="color:var(--yellow)">${samples}/50</strong> samples needed for first model</div>
+    <div style="font-size:11px;margin-top:6px">Using numeric scoring until model is trained. AI module is running.</div>`
+    : '<div>No decisions yet today — scanning from 9:30 AM</div>'}
+</div>`);
+return;
+}
+
+let dHtml = `<div style="font-size:10px;text-transform:uppercase;letter-spacing:.5px;
+            color:var(--muted);padding:5px 0;border-bottom:1px solid var(--border);margin-bottom:7px">
+    Recent AI Decisions (${decisions.length})</div>`;
+
+decisions.forEach(d => {
+const isLong = d.direction === 'LONG';
+dHtml += `
+<div style="background:#1a0d2e;border:1px solid rgba(188,140,255,.3);
+                           border-left:3px solid ${isLong?'var(--green)':'var(--red)'};
+                           border-radius:8px;padding:11px;margin-bottom:8px">
+    <!-- Header row -->
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:14px;font-weight:700">${d.symbol}</span>
+            ${isLong ? '<span class="pill pg">LONG</span>' : '<span class="pill pr">SHORT</span>'}
+            <span style="font-size:9px;padding:2px 6px;border-radius:3px;
+                      background:#1a0d2e;color:var(--purple);border:1px solid rgba(188,140,255,.3)">AI</span>
+        </div>
+        <span style="font-family:monospace;font-size:13px;font-weight:700;color:var(--blue)">
+                    ₹${parseFloat(d.entryPrice||0).toFixed(2)}
+                  </span>
+    </div>
+
+    <!-- AI Metrics: Success Probability / Expected RR / Expected Return / Confidence -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:8px">
+        ${[
+        ['P(Success)', d.successProbability || '—',
+        parseFloat(d.successProbability||0)>=65?'var(--green)':parseFloat(d.successProbability||0)>=50?'var(--yellow)':'var(--muted)'],
+        ['Expected RR', d.expectedRR || '—', 'var(--blue)'],
+        ['E[Return]',   d.expectedReturn || '—', 'var(--green)'],
+        ['Confidence',  d.confidence || '—', 'var(--purple)'],
+        ].map(([l,v,c]) => `
+        <div style="background:rgba(0,0,0,.3);border-radius:5px;padding:7px;text-align:center;border:1px solid rgba(255,255,255,.05)">
+            <div style="font-size:9px;color:var(--muted);text-transform:uppercase">${l}</div>
+            <div style="font-family:monospace;font-size:14px;font-weight:700;color:${c};margin-top:3px">${v}</div>
+        </div>`).join('')}
+    </div>
+
+    <!-- Price levels -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:8px">
+        ${[
+        ['Entry', 'var(--blue)',   d.entryPrice],
+        ['SL',    'var(--red)',    d.stopLoss],
+        ['T1',    'var(--green)',  d.target1],
+        ['T2',    '#26a69a',       d.target2],
+        ].map(([l,c,v]) => `
+        <div style="background:var(--bg);border-radius:4px;padding:4px 6px;text-align:center">
+            <div style="font-size:9px;color:var(--muted)">${l}</div>
+            <div style="font-family:monospace;font-size:11px;font-weight:600;color:${c}">
+                ₹${parseFloat(v||0).toFixed(2)}
+            </div>
+        </div>`).join('')}
+    </div>
+
+    <!-- Reasoning -->
+    ${d.dominantFactor ? `<div style="font-size:10px;color:var(--purple);margin-bottom:5px">
+    🎯 <strong>Key factor:</strong> ${d.dominantFactor}</div>` : ''}
+    ${d.reasoning ? `<div style="font-size:11px;color:var(--muted);line-height:1.5;
+                  padding:7px;background:rgba(0,0,0,.3);border-radius:5px;border-left:2px solid var(--blue);
+                  margin-bottom:5px">${d.reasoning}</div>` : ''}
+    ${d.bullScenario ? `<div style="font-size:10px;color:var(--green);padding:5px 7px;
+                  background:rgba(63,185,80,.06);border-radius:4px;border-left:2px solid var(--green);
+                  margin-bottom:4px">🟢 <strong>Bull:</strong> ${d.bullScenario}</div>` : ''}
+    ${d.bearScenario ? `<div style="font-size:10px;color:var(--red);padding:5px 7px;
+                  background:rgba(248,81,73,.06);border-radius:4px;border-left:2px solid var(--red);
+                  margin-bottom:4px">🔴 <strong>Bear:</strong> ${d.bearScenario}</div>` : ''}
+    ${d.exitPlan ? `<div style="font-size:10px;color:var(--muted);margin-top:4px">
+    🚪 <strong>Exit plan:</strong> ${d.exitPlan}</div>` : ''}
+    <div style="font-size:10px;color:var(--muted);margin-top:5px;padding-top:5px;
+                  border-top:1px solid rgba(255,255,255,.05)">
+        Quality score: <span style="color:${parseInt(d.tradeQualityScore||0)>=70?'var(--green)':parseInt(d.tradeQualityScore||0)>=50?'var(--yellow)':'var(--muted)'}">
+                    ${d.tradeQualityScore || 0}/100
+                  </span>
+    </div>
+</div>`;
+});
+
+html('ai-decisions', dHtml);
+}

@@ -22,6 +22,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import com.trading.papertrading.model.PaperAccount;
+import jakarta.annotation.PostConstruct;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.*;
@@ -98,6 +100,7 @@ public class AiTradingModule {
     private final SmcInstitutionalCandleService   smcCandleService;
     private final SmcInstitutionalStructureService smcStructureService;
     private final NewsIngestionService            newsIngestionService;
+    private final PaperAccount                    paperAccount;
 
     @Value("${ai.trading.max-trades-per-day:5}")   private int    maxTrades;
     @Value("${ai.trading.max-concurrent:2}")        private int    maxConcurrent;
@@ -114,6 +117,12 @@ public class AiTradingModule {
     // ═════════════════════════════════════════════════════════════════════════
     // MAIN TRIGGER — fires on every 5m candle close
     // ═════════════════════════════════════════════════════════════════════════
+
+    @PostConstruct
+    public void init() {
+        tradeManager.setModuleRef(this::onPositionClosed);
+        log.info("[AI] Initialised — tradeManager wired.");
+    }
 
     @EventListener
     @Async("tradingExecutor")
@@ -305,7 +314,9 @@ public class AiTradingModule {
 
     private BigDecimal resolveCapital() {
         try {
-            return java.math.BigDecimal.valueOf(100_000);
+            BigDecimal balance = paperAccount.getCapital();
+            return (balance != null && balance.compareTo(BigDecimal.ZERO) > 0)
+                    ? balance : BigDecimal.valueOf(100_000);
         } catch (Exception e) {
             return BigDecimal.valueOf(100_000);
         }

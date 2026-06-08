@@ -28,6 +28,8 @@ import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import com.trading.papertrading.model.PaperAccount;
+import jakarta.annotation.PostConstruct;
 
 /**
  * AiTradingModuleV2 — Fully Proprietary AI Trading System
@@ -112,6 +114,7 @@ public class AiTradingModuleV2 {
     private final SmcInstitutionalCandleService   smcCandleService;
     private final SmcInstitutionalStructureService smcStructureService;
     private final NewsIngestionService            newsIngestionService;
+    private final PaperAccount                    paperAccount;
 
     @Value("${ai.trading.max-trades-per-day:5}")  private int    maxTrades;
     @Value("${ai.trading.max-concurrent:2}")       private int    maxConcurrent;
@@ -124,6 +127,21 @@ public class AiTradingModuleV2 {
     private final Set<String>   activePositions     = ConcurrentHashMap.newKeySet();
     private final Set<String>   firedToday          = ConcurrentHashMap.newKeySet();
     private volatile long       lastScanCandleMs    = 0L;
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // INITIALISATION
+    // ═════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Wire AiTradeManagementService back to this module AFTER Spring finishes
+     * constructing all beans. Without this, tradeManager.moduleRef is null and
+     * onPositionClosed() never fires — breaking the learning loop entirely.
+     */
+    @PostConstruct
+    public void init() {
+        tradeManager.setModuleRef(this::onPositionClosed);
+        log.info("[AI-V2] Initialised — tradeManager wired. Learning loop active.");
+    }
 
     // ═════════════════════════════════════════════════════════════════════════
     // TRIGGER
@@ -156,6 +174,14 @@ public class AiTradingModuleV2 {
 
         try {
             long t0 = System.currentTimeMillis();
+
+            // ── Latency guard: skip cycle if previous one is still running ───
+            // Prevents heap buildup if buildAll() takes > 4 minutes on slow days
+            long msSinceLastScan = t0 - lastScanCandleMs;
+            if (msSinceLastScan < 200) {
+                log.debug("[AI-V2] Cycle skipped — previous cycle < 200ms ago");
+                return;
+            }
 
             // ── STEP 1: Regime classification ─────────────────────────────────
             String regime = regimeClassifier.classify();
@@ -235,9 +261,13 @@ public class AiTradingModuleV2 {
                     topCandidates, slotsLeft, minConfidence
             );
 
-            log.info("[AI-V2] Cycle @{} | regime={} | universe={} | scored={} | selected={} | feat+ml={}ms",
+            long cycleMs = t1 - t0;
+            if (cycleMs > 120_000) { // warn if > 2 minutes
+                log.warn("[AI-V2] ⚠️  Slow cycle: {}ms — consider reducing ranking-top-n", cycleMs);
+            }
+            log.info("[AI-V2] Cycle @{} | regime={} | universe={} | scored={} | selected={} | {}ms",
                     now, regime, universe.size(), mlCandidates.size(),
-                    selected.size(), t1-t0);
+                    selected.size(), cycleMs);
 
             // ── STEP 5: Risk management + execution ────────────────────────────
             for (AiTradeDecision decision : selected) {
@@ -369,8 +399,14 @@ public class AiTradingModuleV2 {
 
     private BigDecimal resolveCapital() {
         try {
-            return java.math.BigDecimal.valueOf(100_000);
-        } catch (Exception e) { return BigDecimal.valueOf(100_000); }
+            BigDecimal balance = paperAccount.getCapital();
+            return (balance != null && balance.compareTo(BigDecimal.ZERO) > 0)
+                    ? balance
+                    : BigDecimal.valueOf(100_000);
+        } catch (Exception e) {
+            log.debug("[AI-V2] PaperAccount unavailable — using ₹1L default");
+            return BigDecimal.valueOf(100_000);
+        }
     }
 
     private String truncate(String s, int max) {
