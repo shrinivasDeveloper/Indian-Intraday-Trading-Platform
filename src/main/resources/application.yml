@@ -333,6 +333,30 @@ strategy:
     trade-end: "14:40"
 
 # ================================
+# AI TRADING MODULE
+# Completely separate module — zero impact on existing strategies when disabled.
+# Enable via Railway env var: AI_TRADING_ENABLED=true
+# When disabled: @ConditionalOnProperty ensures no AI beans are created at all.
+# ================================
+ai:
+  trading:
+    enabled: ${AI_TRADING_ENABLED:false}
+    # Maximum trades per day (independent of circuit-breaker.max-trades-per-day)
+    max-trades-per-day: 5
+    # Maximum simultaneously open AI positions
+    max-concurrent: 2
+    # Minimum model confidence to execute (0.0–1.0). Raise to 0.70 for live.
+    min-confidence: 0.60
+    # Minimum risk-reward ratio. Hard floor — never lower below 2.0.
+    min-rr: 2.0
+    # How many top candidates to evaluate per cycle (balance: quality vs speed)
+    ranking-top-n: 20
+    # Risk per trade as fraction of capital (1% = 0.01)
+    risk-per-trade: 0.01
+    # Show AI candidates in /scanner.html
+    scanner-enabled: true
+
+# ================================
 # WARMUP CONFIG
 # ================================
 warmup:

@@ -30,6 +30,7 @@ import com.trading.strategy.orb.OrbStrategyEngine;
 import com.trading.validation.StrategyValidationTracker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -1405,6 +1406,262 @@ public class DashboardController {
         m.put("minRr",               3.0);
         m.put("maxTradesPerDay",     2);
         return m;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // MANUAL SCANNER — exposes top candidates from all 3 active strategies
+    // Used by the scanner UI (/scanner.html) for manual trade decisions
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @GetMapping("/scanner")
+    public ResponseEntity<Map<String, Object>> scanner() {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        Map<String, java.math.BigDecimal> prices = marketDataService.getLastPricesSimple();
+
+        // ── HighRR candidates ────────────────────────────────────────────────
+        try {
+            var firedHRR  = highRRStrategyEngine.getFiredToday();
+            var activeHRR = highRRStrategyEngine.getActiveSignals();
+            out.put("highRR", Map.of(
+                    "enabled",         highRRStrategyEngine.isEnabled(),
+                    "firedToday",      firedHRR,
+                    "activeSignals",   activeHRR,
+                    "slotsRemaining",  2 - firedHRR.size(),
+                    "marketGrade",     "—",
+                    "marketDirection", "—",
+                    "qualityPoints",   0
+            ));
+        } catch (Exception e) {
+            out.put("highRR", Map.of("error", e.getMessage()));
+        }
+
+        // ── News candidates ──────────────────────────────────────────────────
+        try {
+            List<com.trading.strategy.news.NewsScore> scores = newsTradingStrategy.getLastCycleScores();
+            List<Map<String, Object>> newsItems = new java.util.ArrayList<>();
+            for (com.trading.strategy.news.NewsScore s : scores) {
+                java.math.BigDecimal ltp = prices.get(s.symbol());
+                Map<String, Object> item = new java.util.LinkedHashMap<>();
+                item.put("symbol",          s.symbol());
+                item.put("sector",          s.sectorName());
+                item.put("score",           s.totalScore());
+                item.put("categoryScore",   s.categoryScore());
+                item.put("sentimentScore",  s.sentimentScore());
+                item.put("recencyScore",    s.recencyScore());
+                item.put("sourceScore",     s.sourceScore());
+                item.put("keywordScore",    s.keywordScore());
+                item.put("direction",       s.direction() != null ? s.direction().name() : "—");
+                item.put("category",        s.primaryCategory() != null ? s.primaryCategory().name() : "—");
+                item.put("sentiment",       s.dominantSentiment() != null ? s.dominantSentiment().name() : "—");
+                item.put("headline",        s.primaryHeadline());
+                item.put("ageMinutes",      s.ageMinutes());
+                item.put("corroborated",    s.corroborated());
+                item.put("ltp",             ltp != null ? ltp : java.math.BigDecimal.ZERO);
+                item.put("fired",           newsTradingStrategy.getFiredToday().contains(s.symbol()));
+                newsItems.add(item);
+            }
+            newsItems.sort((a, b) -> Integer.compare(
+                    (int) b.getOrDefault("score", 0), (int) a.getOrDefault("score", 0)));
+            out.put("news", Map.of(
+                    "items",          newsItems,
+                    "firedToday",     newsTradingStrategy.getFiredToday(),
+                    "sessionSignals", newsTradingStrategy.getSessionSignalCount(),
+                    "activeCount",    newsTradingStrategy.getActiveItemCount()
+            ));
+        } catch (Exception e) {
+            out.put("news", Map.of("error", e.getMessage()));
+        }
+
+        // ── SMC candidates ───────────────────────────────────────────────────
+        try {
+            Map<String, Object> smcStatus = getSmcStatus();
+            out.put("smc", smcStatus);
+        } catch (Exception e) {
+            out.put("smc", Map.of("error", e.getMessage()));
+        }
+
+        // ── Market context ───────────────────────────────────────────────────
+        try {
+            var dir = marketDir.getCurrentDirection();
+            out.put("market", Map.of(
+                    "direction",   dir != null ? dir.direction().name() : "—",
+                    "niftyAtrPct", dir != null ? dir.niftyAtrPct() : 0.0,
+                    "label",       dir != null ? dir.direction().name() : "—"
+            ));
+        } catch (Exception e) {
+            out.put("market", Map.of("direction", "—"));
+        }
+
+        out.put("timestamp", java.time.Instant.now().toString());
+        return ResponseEntity.ok(out);
+    }
+
+    @GetMapping("/smc/patterns")
+    public ResponseEntity<Map<String, Object>> getSmcPatterns() {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        try {
+            // NOTE: getLastPatternScan() requires the updated SmcInstitutionalStrategyEngine.java
+            // Deploy src/main/java/com/trading/strategy/smc/SmcInstitutionalStrategyEngine.java
+            // from the ai_module output to enable live pattern scanning.
+            List<Map<String, Object>> patterns = Collections.emptyList();
+            try {
+                java.lang.reflect.Method m = smcEngine.getClass()
+                        .getMethod("getLastPatternScan");
+                @SuppressWarnings("unchecked")
+                List<Map<String, Object>> result =
+                        (List<Map<String, Object>>) m.invoke(smcEngine);
+                if (result != null) patterns = result;
+            } catch (NoSuchMethodException ignored) {
+                // getLastPatternScan not yet deployed — return empty
+            } catch (Exception e) {
+                log.debug("[DASHBOARD] getLastPatternScan error: {}", e.getMessage());
+            }
+            Map<String, java.math.BigDecimal> prices = marketDataService.getLastPricesSimple();
+
+            // Group by pattern type
+            Map<String, List<Map<String, Object>>> byPattern = new java.util.LinkedHashMap<>();
+            for (Map<String, Object> p : patterns) {
+                String pat = String.valueOf(p.get("pattern"));
+                byPattern.computeIfAbsent(pat, k -> new java.util.ArrayList<>()).add(p);
+            }
+
+            out.put("patterns",     patterns);
+            out.put("byPattern",    byPattern);
+            out.put("totalMatches", patterns.size());
+            out.put("bootstrapComplete", smcCandleService.isBootstrapComplete());
+            out.put("symbolsLoaded",     smcCandleService.getSymbolsLoaded());
+            out.put("scanTime", java.time.Instant.now().toString());
+        } catch (Exception e) {
+            out.put("error", e.getMessage());
+            out.put("patterns", Collections.emptyList());
+        }
+        return ResponseEntity.ok(out);
+    }
+
+    @GetMapping("/news/all")
+    public ResponseEntity<Map<String, Object>> getAllNewsItems() {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        try {
+            // getLastCycleScores() uses scoreAllForDashboard() — NO threshold, NO direction filter
+            // Returns every symbol mentioned in any active news article, regardless of score
+            List<com.trading.strategy.news.NewsScore> all = newsTradingStrategy.getLastCycleScores();
+            Map<String, java.math.BigDecimal> prices = marketDataService.getLastPricesSimple();
+
+            List<Map<String, Object>> items = new java.util.ArrayList<>();
+            for (com.trading.strategy.news.NewsScore s : all) {
+                java.math.BigDecimal ltp = prices.get(s.symbol());
+                Map<String, Object> item = new java.util.LinkedHashMap<>();
+                item.put("symbol",          s.symbol());
+                item.put("sector",          s.sectorName());
+                item.put("score",           s.totalScore());
+                item.put("categoryScore",   s.categoryScore());
+                item.put("sentimentScore",  s.sentimentScore());
+                item.put("recencyScore",    s.recencyScore());
+                item.put("sourceScore",     s.sourceScore());
+                item.put("keywordScore",    s.keywordScore());
+                item.put("direction",       s.direction() != null ? s.direction().name() : "UNCLEAR");
+                item.put("category",        s.primaryCategory() != null ? s.primaryCategory().name() : "—");
+                item.put("sentiment",       s.dominantSentiment() != null ? s.dominantSentiment().name() : "—");
+                item.put("headline",        s.primaryHeadline());
+                item.put("ageMinutes",      s.ageMinutes());
+                item.put("corroborated",    s.corroborated());
+                item.put("ltp",             ltp != null ? ltp : java.math.BigDecimal.ZERO);
+                item.put("fired",           newsTradingStrategy.getFiredToday().contains(s.symbol()));
+                // Status tag for scanner display
+                String status;
+                int score = s.totalScore();
+                if (newsTradingStrategy.getFiredToday().contains(s.symbol())) status = "FIRED";
+                else if ("UNCLEAR".equals(item.get("direction")))             status = "NO_DIRECTION";
+                else if (score >= 65)                                          status = "TRADEABLE";
+                else if (score >= 40)                                          status = "WATCHLIST";
+                else                                                           status = "LOW_SCORE";
+                item.put("status", status);
+                items.add(item);
+            }
+
+            // Sort: FIRED first, then TRADEABLE, then WATCHLIST, then by score desc
+            items.sort((a, b) -> {
+                String sa = String.valueOf(a.get("status")),
+                        sb = String.valueOf(b.get("status"));
+                if ("FIRED".equals(sa) && !"FIRED".equals(sb)) return -1;
+                if ("FIRED".equals(sb) && !"FIRED".equals(sa)) return 1;
+                return Integer.compare(
+                        (int) b.getOrDefault("score", 0),
+                        (int) a.getOrDefault("score", 0));
+            });
+
+            out.put("items",          items);
+            out.put("total",          items.size());
+            out.put("firedToday",     newsTradingStrategy.getFiredToday());
+            out.put("sessionSignals", newsTradingStrategy.getSessionSignalCount());
+            out.put("activeCount",    newsTradingStrategy.getActiveItemCount());
+            out.put("timestamp",      java.time.Instant.now().toString());
+        } catch (Exception e) {
+            out.put("error", e.getMessage());
+            out.put("items", Collections.emptyList());
+        }
+        return ResponseEntity.ok(out);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // AI TRADING MODULE — read-only status endpoint
+    // Returns null-safe data when AI module is disabled
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Autowired(required = false)
+    private com.trading.ai.AiTradingModuleV2 aiModule;
+
+    @GetMapping("/ai/status")
+    public ResponseEntity<Map<String, Object>> getAiStatus() {
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        if (aiModule == null) {
+            out.put("enabled", false);
+            out.put("message", "AI module disabled. Set AI_TRADING_ENABLED=true to enable.");
+            return ResponseEntity.ok(out);
+        }
+        try {
+            var perf    = aiModule.getPerformance();
+            var decided = aiModule.getRecentDecisions();
+            out.put("enabled",              true);
+            out.put("regime",               aiModule.getCurrentRegime());
+            out.put("modelStatus",          aiModule.getModelStatus());
+            out.put("tradesExecutedToday",  aiModule.getTradesExecutedToday());
+            out.put("activePositions",      aiModule.getActiveCount());
+            out.put("firedToday",           aiModule.getFiredToday());
+            out.put("performance", Map.of(
+                    "totalTrades",  perf.getTotalTrades(),
+                    "wins",         perf.getWins(),
+                    "losses",       perf.getLosses(),
+                    "winRate",      String.format("%.0f%%", perf.getWinRate()*100),
+                    "expectancy",   String.format("%.2f", perf.getExpectancy()),
+                    "profitFactor", String.format("%.2f", perf.getProfitFactor()),
+                    "totalPnl",     perf.getTotalPnl()
+            ));
+            // Last 10 decisions for scanner display
+            out.put("recentDecisions", decided.stream().limit(10).map(d -> {
+                Map<String, Object> m = new java.util.LinkedHashMap<>();
+                m.put("symbol",              d.getSymbol());
+                m.put("direction",           d.getDirection());
+                m.put("entryPrice",          d.getEntryPrice());
+                m.put("stopLoss",            d.getStopLoss());
+                m.put("target1",             d.getTarget1());
+                m.put("target2",             d.getTarget2());
+                m.put("successProbability",  String.format("%.0f%%", d.getProbabilityOfSuccess()*100));
+                m.put("expectedRR",          String.format("%.1f", d.getExpectedRR()));
+                m.put("expectedReturn",      String.format("%.1f%%", d.getExpectedReturn()));
+                m.put("confidence",          String.format("%.0f%%", d.getConfidence()*100));
+                m.put("tradeQualityScore",   d.getTradeQualityScore());
+                m.put("dominantFactor",      d.getDominantFactor());
+                m.put("reasoning",           d.getReasoningSummary());
+                m.put("bullScenario",        d.getBullScenario());
+                m.put("bearScenario",        d.getBearScenario());
+                m.put("exitPlan",            d.getExitPlan());
+                return m;
+            }).collect(java.util.stream.Collectors.toList()));
+        } catch (Exception e) {
+            out.put("error", e.getMessage());
+        }
+        return ResponseEntity.ok(out);
     }
 
 }
