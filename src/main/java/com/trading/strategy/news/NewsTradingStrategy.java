@@ -17,6 +17,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -116,6 +117,9 @@ public class NewsTradingStrategy {
     // for all 295 subscribed symbols. This is the correct source for entry price.
     // Zero overhead — pure ConcurrentHashMap read.
     private final OrbDataService           orbDataService;
+    // Shared MySQL write — AI module reads news_scored_items for reasoning.
+    // Zero coupling: this is a database write only, no AI class imported.
+    private final JdbcTemplate             jdbc;
 
     // ── Config ────────────────────────────────────────────────────────────────
     @Value("${strategy.news.enabled:true}")
@@ -159,7 +163,7 @@ public class NewsTradingStrategy {
         // A company announcing +80% profit moves 5-8% regardless of Nifty ATR.
         // The ATR gate protects against trading macro/sector news in a dead market,
         // NOT against trading company-specific events that move independently.
-        // High-conviction bypass: category is EARNINGS or M&A AND score >= 75.
+        // High-conviction bypass: category is EARNINGS or M&A AND score >= 65.
         MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
         final boolean marketFrozen = dir.niftyAtrPct() < MIN_ATR_PCT;
         // NOTE: marketFrozen is applied PER-SIGNAL in the scoring loop below,
@@ -180,8 +184,8 @@ public class NewsTradingStrategy {
         // Company-specific events (EARNINGS, M&A) move the stock independently of Nifty.
         // A merger announcement or 50% profit beat trades regardless of Nifty direction.
         // MACRO news (RBI, GDP, global events) remains gated on SIDEWAYS — those ARE market events.
-        // High-conviction threshold: score >= 80 (EARNINGS + strong sentiment + fresh)
-        final int SIDEWAYS_BYPASS_SCORE = 80;
+        // CHANGE: was 80 → now 72 (more news opportunities in SIDEWAYS markets)
+        final int SIDEWAYS_BYPASS_SCORE = 72;
         boolean isSideways = dir.direction() == MarketDirectionService.Direction.SIDEWAYS;
         // For now, continue scoring — SIDEWAYS check applied per-signal in fireSignal()
         // based on category and score. Do not block here — let scoring decide.
@@ -214,6 +218,12 @@ public class NewsTradingStrategy {
         // Trading still uses the filtered 'scores' list above (minScore=65, direction required).
         lastCycleScores = scoreEngine.scoreAllForDashboard(activeItems, tradableSymbols);
 
+        // ── Write scored items to shared MySQL table for AI reasoning engine ───
+        // AiReasoningEngine reads news_scored_items via JdbcTemplate — zero Java coupling.
+        // This write happens regardless of whether scores pass the trading threshold.
+        // AI module uses this data as Layer 3 (fundamental catalyst) in its reasoning.
+        writeNewsScoresToSharedTable(lastCycleScores);
+
         if (scores.isEmpty()) {
             log.debug("[NEWS] No news scores above threshold {} — cycle idle", minScore);
             return;
@@ -228,7 +238,8 @@ public class NewsTradingStrategy {
         //       The individual stock moves on its own news — Nifty ATR is irrelevant.
         // RULE: Macro events (RBI, GDP, GLOBAL) respect regime alignment + ATR gate.
         // RULE: SIDEWAYS market + score >= SIDEWAYS_BYPASS_SCORE → allow company-specific news.
-        final int ATR_BYPASS_MIN_SCORE = 75; // minimum score to bypass frozen ATR gate
+        // CHANGE: was 75 → now 65 (EARNINGS/M&A at score 65+ bypass ATR+regime gate)
+        final int ATR_BYPASS_MIN_SCORE = 65;
         List<NewsScore> aligned = scores.stream()
                 .filter(s -> {
                     boolean isCompanyEvent = s.primaryCategory() == NewsItem.NewsCategory.EARNINGS
@@ -240,7 +251,7 @@ public class NewsTradingStrategy {
                                 s.symbol(), s.primaryCategory(), s.totalScore());
                         return true;
                     }
-                    // Company event but score < 75 — still bypass regime, but needs normal ATR
+                    // Company event but score < 65 — still bypass regime, but needs normal ATR
                     if (isCompanyEvent) {
                         if (marketFrozen) {
                             log.debug("[NEWS] {} company event blocked — ATR frozen and score {} < {}",
@@ -432,6 +443,49 @@ public class NewsTradingStrategy {
         log.info("[NEWS] Signal #{}/{} fired for {} (session total)",
                 sessionSignalCount.get(), maxSignalsPerSession, symbol);
         return true;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SHARED MySQL WRITE — for AI Reasoning Engine (Layer 3 fundamental)
+    // Zero coupling: writes to database only. AiReasoningEngine reads via
+    // JdbcTemplate independently. No AI class imported here.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private void writeNewsScoresToSharedTable(List<NewsScore> scores) {
+        if (scores == null || scores.isEmpty()) return;
+        try {
+            for (NewsScore s : scores) {
+                if (s.symbol() == null || s.primaryCategory() == null) continue;
+                jdbc.update("""
+                    INSERT INTO news_scored_items
+                      (symbol, score, category, sentiment, age_minutes,
+                       corroborated, headline, scored_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+                    ON DUPLICATE KEY UPDATE
+                      score        = VALUES(score),
+                      category     = VALUES(category),
+                      sentiment    = VALUES(sentiment),
+                      age_minutes  = VALUES(age_minutes),
+                      corroborated = VALUES(corroborated),
+                      headline     = VALUES(headline),
+                      scored_at    = NOW()
+                    """,
+                        s.symbol(),
+                        s.totalScore(),
+                        s.primaryCategory().name(),
+                        s.dominantSentiment() != null ? s.dominantSentiment().name() : "NEUTRAL",
+                        s.ageMinutes(),
+                        s.corroborated(),
+                        truncate(s.primaryHeadline(), 500)
+                );
+            }
+            log.debug("[NEWS] Wrote {} scored items to news_scored_items for AI reasoning",
+                    scores.size());
+        } catch (Exception e) {
+            // Table may not exist yet on first deploy — silently skip
+            // AiMarketUnderstandingEngine creates the table on startup
+            log.trace("[NEWS] news_scored_items write skipped: {}", e.getMessage());
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════

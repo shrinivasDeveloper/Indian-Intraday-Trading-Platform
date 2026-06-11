@@ -1609,7 +1609,7 @@ public class DashboardController {
     // ══════════════════════════════════════════════════════════════════════════
 
     @Autowired(required = false)
-    private com.trading.ai.AiTradingModuleV2 aiModule;
+    private com.trading.ai.AiTradingSystem aiModule;
 
     @GetMapping("/ai/status")
     public ResponseEntity<Map<String, Object>> getAiStatus() {
@@ -1620,42 +1620,29 @@ public class DashboardController {
             return ResponseEntity.ok(out);
         }
         try {
-            var perf    = aiModule.getPerformance();
-            var decided = aiModule.getRecentDecisions();
-            out.put("enabled",              true);
-            out.put("regime",               aiModule.getCurrentRegime());
-            out.put("modelStatus",          aiModule.getModelStatus());
-            out.put("tradesExecutedToday",  aiModule.getTradesExecutedToday());
-            out.put("activePositions",      aiModule.getActiveCount());
-            out.put("firedToday",           aiModule.getFiredToday());
-            out.put("performance", Map.of(
-                    "totalTrades",  perf.getTotalTrades(),
-                    "wins",         perf.getWins(),
-                    "losses",       perf.getLosses(),
-                    "winRate",      String.format("%.0f%%", perf.getWinRate()*100),
-                    "expectancy",   String.format("%.2f", perf.getExpectancy()),
-                    "profitFactor", String.format("%.2f", perf.getProfitFactor()),
-                    "totalPnl",     perf.getTotalPnl()
-            ));
+            // AiTradingSystem.getStatus() returns all fields in one call
+            out.put("enabled", true);
+            out.putAll(aiModule.getStatus());
+
             // Last 10 decisions for scanner display
-            out.put("recentDecisions", decided.stream().limit(10).map(d -> {
+            out.put("recentDecisions", aiModule.getTodayDecisions().stream().limit(10).map(d -> {
                 Map<String, Object> m = new java.util.LinkedHashMap<>();
-                m.put("symbol",              d.getSymbol());
-                m.put("direction",           d.getDirection());
-                m.put("entryPrice",          d.getEntryPrice());
-                m.put("stopLoss",            d.getStopLoss());
-                m.put("target1",             d.getTarget1());
-                m.put("target2",             d.getTarget2());
-                m.put("successProbability",  String.format("%.0f%%", d.getProbabilityOfSuccess()*100));
-                m.put("expectedRR",          String.format("%.1f", d.getExpectedRR()));
-                m.put("expectedReturn",      String.format("%.1f%%", d.getExpectedReturn()));
-                m.put("confidence",          String.format("%.0f%%", d.getConfidence()*100));
-                m.put("tradeQualityScore",   d.getTradeQualityScore());
-                m.put("dominantFactor",      d.getDominantFactor());
-                m.put("reasoning",           d.getReasoningSummary());
-                m.put("bullScenario",        d.getBullScenario());
-                m.put("bearScenario",        d.getBearScenario());
-                m.put("exitPlan",            d.getExitPlan());
+                m.put("symbol",             d.getSymbol());
+                m.put("direction",          d.getDirection());
+                m.put("entryPrice",         d.getEntryPrice());
+                m.put("stopLoss",           d.getStopLoss());
+                m.put("target1",            d.getTarget1());
+                m.put("target2",            d.getTarget2());
+                m.put("successProbability", String.format("%.0f%%", d.getProbabilityOfSuccess()*100));
+                m.put("expectedRR",         String.format("%.1f", d.getExpectedRR()));
+                m.put("expectedReturn",     String.format("%.1f%%", d.getExpectedReturn()));
+                m.put("confidence",         String.format("%.0f%%", d.getConfidence()*100));
+                m.put("tradeQualityScore",  d.getTradeQualityScore());
+                m.put("dominantFactor",     d.getDominantFactor());
+                m.put("reasoning",          d.getReasoningSummary());
+                m.put("bullScenario",       d.getBullScenario());
+                m.put("bearScenario",       d.getBearScenario());
+                m.put("exitPlan",           d.getExitPlan());
                 return m;
             }).collect(java.util.stream.Collectors.toList()));
         } catch (Exception e) {
