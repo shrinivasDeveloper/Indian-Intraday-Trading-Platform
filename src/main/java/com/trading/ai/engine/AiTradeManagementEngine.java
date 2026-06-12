@@ -113,8 +113,8 @@ public class AiTradeManagementEngine {
                         : pos.entry * 0.999;
                 if ((isLong && be > sl) || (!isLong && be < sl)) {
                     pos.currentSl = be;
-                    log.info("[AI-MGMT] {} T1 HIT @ {:.2f} → SL moved to breakeven {:.2f}",
-                            symbol, ltp, be);
+                    log.info("[AI-MGMT] {} T1 HIT @ {} → SL moved to breakeven {}",
+                            symbol, String.format("%.2f", ltp), String.format("%.2f", be));
                 }
             }
         }
@@ -126,7 +126,7 @@ public class AiTradeManagementEngine {
                     : ltp * (1 + TRAIL_PCT);
             if ((isLong && trail > pos.currentSl) || (!isLong && trail < pos.currentSl)) {
                 pos.currentSl = trail;
-                log.debug("[AI-MGMT] {} Trail SL → {:.2f}", symbol, trail);
+                log.debug("[AI-MGMT] {} Trail SL → {}", symbol, String.format("%.2f", trail));
             }
         }
     }
@@ -175,7 +175,7 @@ public class AiTradeManagementEngine {
         String outcomeType = rMultiple >= 1.0 ? "WIN"
                 : rMultiple >= 0 ? "BREAKEVEN" : "LOSS";
 
-        log.info("[AI-MGMT] CLOSED: {} {} @ {:.2f} | R={:.2f} P&L=₹{:.0f} reason={}",
+        log.info("[AI-MGMT] CLOSED: {} {} @ {} | R={} P&L=₹{} reason={}",
                 symbol, trade.getDirection(), exitPrice, rMultiple, totalPnl, reason);
 
         // Build outcome for learning engine

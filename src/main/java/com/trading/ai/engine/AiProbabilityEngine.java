@@ -184,8 +184,8 @@ public class AiProbabilityEngine {
             log.info("[AI-PROB] {} samples — training first model", samplesCount);
             trainModels();
         }
-        log.debug("[AI-PROB] Outcome recorded: {} R={:.2f} label={} total={}",
-                symbol, rMultiple, label, samplesCount);
+        log.debug("[AI-PROB] Outcome recorded: {} R={} label={} total={}",
+                symbol, String.format("%.2f", rMultiple), label, samplesCount);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -259,7 +259,7 @@ public class AiProbabilityEngine {
             double valAcc = Xval.length > 0 ? (double) correct / Xval.length : 0;
 
             if (valAcc < MIN_VAL_ACC) {
-                log.warn("[AI-PROB] Model rejected: valAcc={:.1f}% < {:.0f}%",
+                log.warn("[AI-PROB] Model rejected: valAcc={}% < {}%",
                         valAcc * 100, MIN_VAL_ACC * 100);
                 return;
             }
@@ -304,7 +304,7 @@ public class AiProbabilityEngine {
             }
 
             long elapsed = System.currentTimeMillis() - t0;
-            log.info("[AI-PROB] ✅ Trained | samples={} valAcc={:.1f}% elapsed={}ms",
+            log.info("[AI-PROB] ✅ Trained | samples={} valAcc={}% elapsed={}ms",
                     rows.size(), valAcc * 100, elapsed);
             persistFeatureImportance();
 
@@ -363,19 +363,58 @@ public class AiProbabilityEngine {
     // ═══════════════════════════════════════════════════════════════════════
 
     private AiPrediction numericFallback(double[] f) {
+        // Phase 1 — no trained model yet.
+        // Compute a directional score based on key features.
+        // P represents probability this specific direction works — not generic win rate.
+
         double s = 0;
-        if (f.length > 3)  s += Math.abs(f[3])  * 25; // EMA stack
-        if (f.length > 16) s += Math.min(15, f[16] * 6); // RVOL
-        if (f.length > 54 && f[54] > 0) s += 20; // AI sweep low
-        if (f.length > 56 && f[56] > 0) s += 15; // SR flip
-        if (f.length > 29 && f[30] > 0) s += 15; // sector aligned
+
+        // EMA stack alignment — strongest signal (max 25 pts)
+        if (f.length > 3)  s += Math.abs(f[3]) * 25;
+
+        // RVOL — institutional participation (max 18 pts)
+        if (f.length > 16) s += Math.min(18, f[16] * 7);
+
+        // AI patterns — highest quality signals
+        if (f.length > 54 && f[54] > 0) s += 20; // liquidity sweep low
+        if (f.length > 55 && f[55] > 0) s += 20; // liquidity sweep high
+        if (f.length > 56 && f[56] > 0) s += 15; // S/R flip
+
+        // Sector alignment (max 12 pts)
+        if (f.length > 30 && f[30] > 0)  s += 12; // sector bullish
+        if (f.length > 31 && f[31] > 0)  s += 12; // sector bearish
+
+        // Momentum confirmation (max 8 pts)
+        if (f.length > 10 && Math.abs(f[10]) > 0.3) s += 8;
+
+        // Buy pressure alignment (max 5 pts)
+        if (f.length > 19 && f[19] > 0.6) s += 5;
+
         s = Math.min(100, s);
-        double p   = s / 100.0;
-        double rr  = computeExpectedRR(p);
-        double ret = rr * 0.8;
+
+        // In Phase 1 with no data, apply a floor of 45 for any candidate
+        // that passed feature engineering — it is at minimum a plausible setup
+        s = Math.max(45, s);
+
+        double p = s / 100.0;
+
+        // Phase 1 expected RR — use fixed 2.0 baseline (no rolling data yet)
+        // rollingAvgWinRR starts at 2.0, rollingAvgLossRR starts at 0.5
+        // But with p=0.23 this gives: 0.23×2.0 - 0.77×0.5 = 0.46 - 0.385 = 0.075 → wrong
+        // Fix: use structural RR from position sizing levels, not kelly formula
+        // Phase 1 trades are sized at min 2.0 RR by AiRiskAssessmentEngine
+        // So expected RR = p × 2.0 + (1-p) × (-1.0) = purely probabilistic estimate
+        double rr = p >= 0.5
+                ? 2.0 + (p - 0.5) * 2.0   // above 50% → RR scales up to 4.0
+                : 2.0 - (0.5 - p) * 1.0;  // below 50% → RR scales down to 1.5 minimum
+
+        rr = Math.max(1.5, rr); // never below 1.5 in Phase 1 — risk engine enforces 2.0 anyway
+
+        double ret = p * rr * 0.8; // expected return %
+
         return new AiPrediction(p, 0.5, rr, ret,
                 String.format("Numeric fallback (%d/50 samples). P=%.0f%% RR=%.1f",
-                        samplesCount, p*100, rr),
+                        samplesCount, p * 100, rr),
                 "NUMERIC_FALLBACK");
     }
 

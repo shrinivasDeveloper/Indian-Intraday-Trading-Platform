@@ -489,6 +489,22 @@ public class AiMarketDataService {
     }
     public boolean             isBootstrapComplete() { return bootstrapComplete.get(); }
     public int                 getBootstrapProgress(){ return bootstrapProgress; }
+
+    /**
+     * FIX: Resolve real instrument token for a symbol.
+     * Was hardcoded to 0L in AiTradingSystem — caused trades to be invisible
+     * to portfolio tracking and WebSocket monitoring systems.
+     */
+    public long resolveInstrumentToken(String symbol) {
+        try {
+            var inst = instrumentCache.getEquityInstruments().get(symbol.toUpperCase());
+            if (inst != null) return inst.getInstrument_token();
+            log.debug("[AI-DATA] Instrument token not found for {}", symbol);
+            return 0L;
+        } catch (Exception e) {
+            return 0L;
+        }
+    }
     public double              getLtp(String symbol) {
         BigDecimal v = marketDataService.getLastPricesSimple().get(symbol);
         return v != null ? v.doubleValue() : 0.0;

@@ -79,11 +79,13 @@ public class AiReasoningEngine {
     private static final double W_QUALITY     = 0.08; // trade quality score
 
     // ── Minimum composite score to consider trading ────────────────────────
-    private static final double MIN_COMPOSITE = 0.58;
+    // Phase 1 (no ML model): lower threshold because mlConfScore is always 0.5
+    // Phase 2+ (ML active): threshold rises via adaptThreshold() in AiContinuousImprovementEngine
+    private static final double MIN_COMPOSITE = 0.52;
 
     // ── Minimum per-layer scores (any layer below these = auto reject) ─────
-    private static final double MIN_MOVE    = 0.35; // stock must show some genuine movement
-    private static final double MIN_RR      = 0.40; // risk reward must be acceptable
+    private static final double MIN_MOVE    = 0.30; // stock must show some genuine movement
+    private static final double MIN_RR      = 0.35; // risk reward must be acceptable
 
     public AiReasoningEngine(AiMarketDataService aiData, JdbcTemplate jdbc) {
         this.aiData = aiData;
@@ -129,8 +131,10 @@ public class AiReasoningEngine {
             // ── Layer 2: Stock movement quality ───────────────────────────
             double moveScore = computeMoveScore(f, candidate);
             if (moveScore < MIN_MOVE) {
-                log.debug("[AI-REASON] {} Layer2 move={:.2f} < {:.2f} — rejected",
-                        candidate.getSymbol(), moveScore, MIN_MOVE);
+                log.debug("[AI-REASON] {} Layer2 move={} < {} — rejected",
+                        candidate.getSymbol(),
+                        String.format("%.2f", moveScore),
+                        String.format("%.2f", MIN_MOVE));
                 continue;
             }
 
@@ -144,8 +148,10 @@ public class AiReasoningEngine {
             // ── Layer 5: Risk/reward quality ──────────────────────────────
             double rrScore = computeRRScore(decision, f);
             if (rrScore < MIN_RR) {
-                log.debug("[AI-REASON] {} Layer5 rr={:.2f} < {:.2f} — rejected",
-                        candidate.getSymbol(), rrScore, MIN_RR);
+                log.debug("[AI-REASON] {} Layer5 rr={} < {} — rejected",
+                        candidate.getSymbol(),
+                        String.format("%.2f", rrScore),
+                        String.format("%.2f", MIN_RR));
                 continue;
             }
 
@@ -159,6 +165,7 @@ public class AiReasoningEngine {
             double qualityScore = Math.min(1.0, decision.getTradeQualityScore() / 100.0);
 
             // ── Composite score — all 8 layers weighted together ──────────
+            double directionPenalty = computeDirectionPenalty(candidate, snapshot);
             double composite =
                     environmentScore  * W_ENV         +
                             moveScore         * W_MOVE        +
@@ -167,7 +174,8 @@ public class AiReasoningEngine {
                             patternScore      * W_PATTERN     +
                             rrScore           * W_RR          +
                             mlConfScore       * W_ML_CONF     +
-                            qualityScore      * W_QUALITY;
+                            qualityScore      * W_QUALITY     +
+                            directionPenalty; // FIX: penalise counter-trend trades
 
             // Build reasoning narrative
             String reasoning = buildReasoning(
@@ -186,13 +194,17 @@ public class AiReasoningEngine {
                     reasoning, bullScenario, bearScenario
             ));
 
-            log.debug("[AI-REASON] {} composite={:.3f} " +
-                            "(env={:.2f} move={:.2f} fund={:.2f} time={:.2f} " +
-                            "pat={:.2f} rr={:.2f} mlconf={:.2f} quality={:.2f})",
-                    candidate.getSymbol(), composite,
-                    environmentScore, moveScore, fundamentalScore,
-                    timingScore, patternScore, rrScore,
-                    mlConfScore, qualityScore);
+            log.debug("[AI-REASON] {} composite={} (env={} move={} fund={} time={} pat={} rr={} mlconf={} quality={})",
+                    candidate.getSymbol(),
+                    String.format("%.3f", composite),
+                    String.format("%.2f", environmentScore),
+                    String.format("%.2f", moveScore),
+                    String.format("%.2f", fundamentalScore),
+                    String.format("%.2f", timingScore),
+                    String.format("%.2f", patternScore),
+                    String.format("%.2f", rrScore),
+                    String.format("%.2f", mlConfScore),
+                    String.format("%.2f", qualityScore));
         }
 
         if (results.isEmpty()) {
@@ -205,14 +217,18 @@ public class AiReasoningEngine {
         AiReasoningResult best = results.get(0);
 
         if (best.composite() < MIN_COMPOSITE) {
-            log.info("[AI-REASON] Best candidate {} composite={:.3f} < {:.3f} — no trade this cycle",
-                    best.candidate().getSymbol(), best.composite(), MIN_COMPOSITE);
+            log.info("[AI-REASON] Best candidate {} composite={} < {} — no trade this cycle",
+                    best.candidate().getSymbol(),
+                    String.format("%.3f", best.composite()),
+                    String.format("%.3f", MIN_COMPOSITE));
             return null;
         }
 
         // Log all reasoning for transparency
-        log.info("[AI-REASON] ✅ Selected: {} composite={:.3f} | {}",
-                best.candidate().getSymbol(), best.composite(), best.reasoning());
+        log.info("[AI-REASON] ✅ Selected: {} composite={} | {}",
+                best.candidate().getSymbol(),
+                String.format("%.3f", best.composite()),
+                best.reasoning());
         if (results.size() > 1) {
             log.info("[AI-REASON] Rejected {} other candidates (scores: {})",
                     results.size() - 1,
@@ -250,11 +266,17 @@ public class AiReasoningEngine {
         else if (breadth > 1.20 || breadth < 0.80) score += 0.15; // moderate
         // neutral breadth adds nothing
 
-        // VIX — sweet spot 12–20
+        // VIX quality scoring
+        // Low VIX (<12)   = calm market = BEST for institutional moves
+        // Normal (12-18)  = ideal trading conditions
+        // Elevated (18-25) = caution
+        // High (>25)      = fear/crisis = penalise
         double vix = snapshot.vix();
-        if (vix >= 12 && vix <= 20) score += 0.2;
-        else if (vix > 20 && vix <= 25) score += 0.05;
-        else if (vix > 25) score -= 0.1; // too volatile — penalise
+        if      (vix < 12)               score += 0.25; // FIX: calm is ideal, was 0
+        else if (vix >= 12 && vix <= 18) score += 0.20;
+        else if (vix > 18 && vix <= 22)  score += 0.10;
+        else if (vix > 22 && vix <= 25)  score += 0.00;
+        else                              score -= 0.15; // fear — hard penalty
 
         // Session quality from MarketUnderstandingEngine
         score += snapshot.sessionQuality() * 0.3;
@@ -262,7 +284,35 @@ public class AiReasoningEngine {
         // Trend strength
         score += Math.min(0.2, snapshot.trendStrength() / 100.0 * 0.2);
 
-        return Math.max(0.0, Math.min(1.0, score / 2.0)); // normalise to 0-1
+        // FIX: sector confirmation score
+        // How many sectors confirm Nifty direction (0=none, 1=all)
+        // 0.8+ = broad market move → strong environment
+        // 0.5  = mixed sectors     → normal
+        // 0.2- = divergence        → reduce environment quality
+        double sectorConf = snapshot.sectorConfirmationScore();
+        if      (sectorConf >= 0.7) score += 0.2;
+        else if (sectorConf >= 0.5) score += 0.1;
+        else if (sectorConf < 0.3)  score -= 0.1; // sector divergence — penalise
+
+        return Math.max(0.0, Math.min(1.0, score / 2.2)); // normalise to 0-1
+    }
+
+    /**
+     * FIX: Counter-trend direction penalty.
+     * Called from selectBest() to penalise setups that trade AGAINST market direction.
+     * LONG in a BEARISH market = -0.15 penalty on composite (significant).
+     * SHORT in a BULLISH market = -0.15 penalty on composite.
+     * In RANGING/SIDEWAYS markets = no penalty (both directions valid).
+     */
+    private double computeDirectionPenalty(AiCandidate candidate,
+                                           AiMarketUnderstandingEngine.MarketSnapshot snapshot) {
+        String direction   = candidate.getSuggestedDirection();
+        double marketDir   = snapshot.niftyDirection(); // +1 = BULLISH, -1 = BEARISH, 0 = SIDEWAYS
+
+        if (Math.abs(marketDir) < 0.3) return 0.0;                          // SIDEWAYS — no penalty
+        if (marketDir < -0.3 && "LONG".equals(direction))  return -0.15;   // BEARISH market, LONG trade
+        if (marketDir > 0.3  && "SHORT".equals(direction)) return -0.15;   // BULLISH market, SHORT trade
+        return 0.0; // direction aligned — no penalty
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -335,9 +385,10 @@ public class AiReasoningEngine {
             double freshness = 1.0 - Math.min(0.5, news.ageMinutes() / 120.0);
 
             double score = (base + categoryBonus + corroborationBonus) * freshness;
-            log.debug("[AI-REASON] {} news: score={} cat={} age={}min corr={} → fundamental={:.2f}",
+            log.debug("[AI-REASON] {} news: score={} cat={} age={}min corr={} → fundamental={}",
                     symbol, news.score(), news.category(),
-                    news.ageMinutes(), news.corroborated(), score);
+                    news.ageMinutes(), news.corroborated(),
+                    String.format("%.2f", score));
             return Math.min(1.0, score);
         }
 

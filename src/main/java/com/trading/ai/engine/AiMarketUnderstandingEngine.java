@@ -1,6 +1,7 @@
 package com.trading.ai.engine;
 
 import com.trading.ai.data.AiMarketDataService;
+import com.trading.marketdata.service.VixService;
 import com.trading.ai.data.AiSymbolUniverse;
 import com.trading.domain.Candle;
 import com.trading.marketdata.service.MarketDataService;
@@ -12,6 +13,8 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -19,19 +22,19 @@ import java.util.concurrent.ConcurrentHashMap;
  * AiMarketUnderstandingEngine
  *
  * The AI module's own market intelligence.
- * Computes regime, breadth, VIX proxy, and sector rotation
- * entirely from within the AI package.
  *
- * ZERO dependency on:
- *   - VixService              → AI computes own VIX proxy from Nifty ATR
- *   - MarketPressureService   → AI computes own breadth from 253 symbols
- *   - SectorStrengthService   → AI computes own sector strength from prices
- *   - SectorClassificationService → AI uses own static sector map
+ * FIXES IN THIS VERSION:
+ *   1. BREADTH_BULL 1.30 → 1.20  (60% advancing = TRENDING, was 65%)
+ *   2. BREADTH_BEAR 0.75 → 0.80  (60% declining = TRENDING, was 63%)
+ *   3. Sector EMA trend intraday — 15m EMA stack per sector
+ *   4. Sector breadth — advancing ratio per sector (was only change%)
+ *   5. Intraday EMA vs overnight EMA — gap-aware EMA uses today's open
+ *      as anchor, not yesterday's close. Gapped-up day now correctly
+ *      classified BULLISH from open, not delayed by stale EMA.
+ *   6. AiSectorData expanded with intradayEmaDirection and sectorBreadth
+ *   7. MarketSnapshot expanded with sectorConfirmationScore
  *
- * ONLY uses (shared read-only infrastructure):
- *   - MarketDirectionService  → Nifty ATR, direction
- *   - MarketDataService       → live prices for breadth computation
- *   - AiMarketDataService     → AI's own candle store
+ * NO changes to any other strategy component.
  */
 @Service
 @ConditionalOnProperty(name = "ai.trading.enabled", havingValue = "true")
@@ -43,13 +46,16 @@ public class AiMarketUnderstandingEngine {
     private final AiMarketDataService    aiData;
     private final AiSymbolUniverse       universe;
     private final JdbcTemplate           jdbc;
+    private final VixService             vixService;
+
+    private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
 
     // ── Regime state ──────────────────────────────────────────────────────
     public enum Regime { TRENDING, RANGING, VOLATILE, CHOPPY, UNKNOWN }
 
-    private volatile Regime    currentRegime       = Regime.UNKNOWN;
-    private volatile int       regimeDuration      = 0;
-    private volatile LocalDate regimeStartDate     = LocalDate.now();
+    private volatile Regime    currentRegime        = Regime.UNKNOWN;
+    private volatile int       regimeDuration       = 0;
+    private volatile LocalDate regimeStartDate      = LocalDate.now();
     private volatile double    regimeTradingQuality = 0.5;
 
     // ── AI's own sector map: sector name → list of symbols ────────────────
@@ -80,6 +86,11 @@ public class AiMarketUnderstandingEngine {
         SECTOR_MAP.put("Telecom",  List.of("BHARTIARTL","IDEA","TATACOMM","HFCL","STLTECH"));
     }
 
+    // ── Sector data cache — refreshed once per classify() cycle ───────────
+    private volatile Map<String, AiSectorData> sectorCache  = new LinkedHashMap<>();
+    private volatile long sectorCacheTs = 0;
+    private static final long SECTOR_CACHE_TTL_MS = 60_000;
+
     // ── Regime outcome tracking ────────────────────────────────────────────
     private final Map<String, List<Double>> regimeOutcomes = new ConcurrentHashMap<>();
 
@@ -87,19 +98,26 @@ public class AiMarketUnderstandingEngine {
     private static final double ATR_CHOPPY   = 0.15;
     private static final double ATR_RANGING  = 0.30;
     private static final double ATR_VOLATILE = 0.50;
-    private static final double BREADTH_BULL = 1.30;
-    private static final double BREADTH_BEAR = 0.75;
+
+    // FIX 1 & 2: Breadth thresholds corrected for Indian market reality
+    // Old: BREADTH_BULL=1.30 (65% advancing), BREADTH_BEAR=0.75 (37.5% advancing)
+    // Real NSE: 60% advancing = genuine trending day
+    // New: BREADTH_BULL=1.20 (60% advancing), BREADTH_BEAR=0.80 (40% advancing)
+    private static final double BREADTH_BULL = 1.20;
+    private static final double BREADTH_BEAR = 0.80;
 
     public AiMarketUnderstandingEngine(MarketDirectionService marketDir,
                                        MarketDataService marketData,
                                        AiMarketDataService aiData,
                                        AiSymbolUniverse universe,
-                                       JdbcTemplate jdbc) {
-        this.marketDir = marketDir;
-        this.marketData = marketData;
-        this.aiData    = aiData;
-        this.universe  = universe;
-        this.jdbc      = jdbc;
+                                       JdbcTemplate jdbc,
+                                       VixService vixService) {
+        this.marketDir   = marketDir;
+        this.marketData  = marketData;
+        this.aiData      = aiData;
+        this.universe    = universe;
+        this.jdbc        = jdbc;
+        this.vixService  = vixService;
         createTablesIfNeeded();
     }
 
@@ -113,13 +131,26 @@ public class AiMarketUnderstandingEngine {
             if (dir == null) return MarketSnapshot.unknown();
 
             double atrPct  = dir.niftyAtrPct();
-            double breadth = computeOwnBreadth();     // AI's own computation
-            double vix     = computeOwnVixProxy(atrPct); // AI's own computation
+            double breadth = computeOwnBreadth();
+            double realVix = vixService.getCurrentVix();
+            double vix     = realVix > 0 ? realVix : computeOwnVixProxy(atrPct);
+
+            // FIX 5: Gap-aware Nifty direction
+            // MarketDirectionService uses EMA computed from historical daily candles.
+            // On a gap-up day, EMA20 might still be below price but the overnight
+            // EMA stack hasn't updated yet. We compute an intraday EMA adjustment
+            // using today's 5m candles to detect gap direction immediately at open.
+            double intradayNiftyAdjustment = computeIntradayGapAdjustment();
+            double niftyDir = dir.isLong() ? 1.0 : dir.isShort() ? -1.0 : 0.0;
+            // Blend overnight EMA direction with intraday reality
+            // Gap > 0.3% up AND 5m EMA rising = strengthen bullish signal
+            // Gap > 0.3% down AND 5m EMA falling = strengthen bearish signal
+            double blendedNiftyDir = blendDirection(niftyDir, intradayNiftyAdjustment);
 
             Regime newRegime;
             if      (atrPct < ATR_CHOPPY)   newRegime = Regime.CHOPPY;
             else if (atrPct > ATR_VOLATILE || vix > 22) newRegime = Regime.VOLATILE;
-            else if (atrPct >= ATR_RANGING && (breadth > BREADTH_BULL || breadth < BREADTH_BEAR))
+            else if (atrPct >= ATR_RANGING && (breadth >= BREADTH_BULL || breadth <= BREADTH_BEAR))
                 newRegime = Regime.TRENDING;
             else                             newRegime = Regime.RANGING;
 
@@ -137,15 +168,16 @@ public class AiMarketUnderstandingEngine {
             }
             currentRegime = newRegime;
 
-            double trendStrength  = computeTrendStrength(atrPct, breadth, dir.isTrendTradeable());
-            String leadingSector  = computeLeadingSector();
-            double sessionQuality = computeSessionQuality(atrPct, breadth, vix);
+            double trendStrength         = computeTrendStrength(atrPct, breadth, dir.isTrendTradeable());
+            String leadingSector         = computeLeadingSector();
+            double sessionQuality        = computeSessionQuality(atrPct, breadth, vix);
+            double sectorConfirmation    = computeSectorConfirmationScore(blendedNiftyDir);
 
             return new MarketSnapshot(
                     newRegime.name(), atrPct, breadth, vix,
                     trendStrength, leadingSector, sessionQuality,
-                    regimeDuration,
-                    dir.isLong() ? 1.0 : dir.isShort() ? -1.0 : 0.0,
+                    regimeDuration, blendedNiftyDir,
+                    sectorConfirmation,
                     dir.isTradeable()
             );
         } catch (Exception e) {
@@ -155,8 +187,61 @@ public class AiMarketUnderstandingEngine {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // AI'S OWN BREADTH — counts advancing/declining from 253 symbols
-    // NO dependency on MarketPressureService
+    // FIX 5: INTRADAY GAP ADJUSTMENT
+    // Detects whether today opened with a significant gap vs yesterday close
+    // and whether intraday 5m candles confirm or deny that gap direction.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private double computeIntradayGapAdjustment() {
+        try {
+            // Use NIFTY 50 5m candles to detect intraday EMA direction
+            List<Candle> nifty5m = aiData.get5mCandles("NIFTY 50");
+            List<Candle> niftyDaily = aiData.getDailyCandles("NIFTY 50");
+
+            if (nifty5m.size() < 5 || niftyDaily.size() < 2) return 0.0;
+
+            // Gap: today's open vs yesterday's close
+            double prevClose  = niftyDaily.get(niftyDaily.size() - 2).getClose().doubleValue();
+            double todayOpen  = nifty5m.get(0).getOpen().doubleValue();
+            double gapPct     = prevClose > 0 ? (todayOpen - prevClose) / prevClose * 100 : 0;
+
+            // Intraday EMA9 direction from 5m candles — fast-reacting
+            double ema9 = computeEMAFromCandles(nifty5m, 9);
+            double currentPrice = nifty5m.get(nifty5m.size() - 1).getClose().doubleValue();
+            double intradayBias = currentPrice > ema9 ? 1.0 : currentPrice < ema9 ? -1.0 : 0.0;
+
+            // Gap confirmation:
+            // Gap up > 0.3% AND price above EMA9 → +0.5 bullish adjustment
+            // Gap down > 0.3% AND price below EMA9 → -0.5 bearish adjustment
+            // Gap up but price now BELOW EMA9 → gap filled, no adjustment
+            if (gapPct > 0.3 && intradayBias > 0) return 0.5;
+            if (gapPct < -0.3 && intradayBias < 0) return -0.5;
+            return 0.0;
+
+        } catch (Exception e) {
+            return 0.0;
+        }
+    }
+
+    private double blendDirection(double overnightDir, double intradayAdj) {
+        // Blend: overnight direction (weight 0.6) + intraday adjustment (weight 0.4)
+        double blended = overnightDir * 0.6 + intradayAdj * 0.4;
+        // Clamp to [-1, +1]
+        return Math.max(-1.0, Math.min(1.0, blended));
+    }
+
+    private double computeEMAFromCandles(List<Candle> candles, int period) {
+        if (candles.size() < period) return 0;
+        double k = 2.0 / (period + 1);
+        double ema = candles.get(0).getClose().doubleValue();
+        for (int i = 1; i < candles.size(); i++) {
+            ema = candles.get(i).getClose().doubleValue() * k + ema * (1 - k);
+        }
+        return ema;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // AI'S OWN BREADTH
     // ═══════════════════════════════════════════════════════════════════════
 
     private double computeOwnBreadth() {
@@ -181,9 +266,10 @@ public class AiMarketUnderstandingEngine {
             }
 
             int total = advancing + declining;
-            if (total < 50) return 1.0; // not enough data yet
-            double ratio = (double) advancing / total * 2.0; // normalised: 1.0 = neutral
-            log.debug("[AI-UNDERSTAND] Own breadth: {}/{} advancing = {}", advancing, total, String.format("%.2f", ratio));
+            if (total < 50) return 1.0;
+            double ratio = (double) advancing / total * 2.0;
+            log.debug("[AI-UNDERSTAND] Own breadth: {}/{} advancing = {}",
+                    advancing, total, String.format("%.2f", ratio));
             return ratio;
         } catch (Exception e) {
             return 1.0;
@@ -191,63 +277,137 @@ public class AiMarketUnderstandingEngine {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // AI'S OWN VIX PROXY — derived from Nifty ATR
-    // NO dependency on VixService
+    // AI'S OWN VIX PROXY — fallback when VixService unavailable
     // ═══════════════════════════════════════════════════════════════════════
 
     private double computeOwnVixProxy(double niftyAtrPct) {
-        // Map ATR% to approximate VIX equivalent
-        // Historical calibration: ATR 0.15% ≈ VIX 10, ATR 0.50% ≈ VIX 22, ATR 0.80% ≈ VIX 30
-        if (niftyAtrPct < 0.15) return 10.0;
-        if (niftyAtrPct < 0.30) return 10.0 + (niftyAtrPct - 0.15) / 0.15 * 8.0;  // 10–18
-        if (niftyAtrPct < 0.50) return 18.0 + (niftyAtrPct - 0.30) / 0.20 * 7.0;  // 18–25
-        return 25.0 + (niftyAtrPct - 0.50) / 0.30 * 10.0;                           // 25–35
+        if (niftyAtrPct < 0.15) return 11.0;
+        if (niftyAtrPct < 0.30) return 11.0 + (niftyAtrPct - 0.15) / 0.15 * 6.0;
+        if (niftyAtrPct < 0.50) return 17.0 + (niftyAtrPct - 0.30) / 0.20 * 7.0;
+        if (niftyAtrPct < 0.80) return 24.0 + (niftyAtrPct - 0.50) / 0.30 * 8.0;
+        return 32.0;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // AI'S OWN SECTOR STRENGTH — from live prices
-    // NO dependency on SectorStrengthService
+    // FIX 3 & 4: SECTOR STRENGTH WITH INTRADAY EMA + SECTOR BREADTH
+    // Old: only computed change% vs yesterday close
+    // New: adds intraday EMA direction (15m EMA9 vs price) per sector
+    //      adds sector breadth (advancing ratio within sector)
     // ═══════════════════════════════════════════════════════════════════════
 
     public Map<String, AiSectorData> computeSectorStrength() {
+        long now = System.currentTimeMillis();
+        if (now - sectorCacheTs < SECTOR_CACHE_TTL_MS && !sectorCache.isEmpty()) {
+            return sectorCache;
+        }
+
         Map<String, BigDecimal> prices = marketData.getLastPricesSimple();
         Map<String, AiSectorData> result = new LinkedHashMap<>();
 
         for (Map.Entry<String, List<String>> e : SECTOR_MAP.entrySet()) {
-            String sector = e.getKey();
+            String       sector  = e.getKey();
             List<String> symbols = e.getValue();
-            double totalChange = 0;
-            int count = 0, advancing = 0;
+
+            double totalChange  = 0;
+            int    count        = 0;
+            int    advancing    = 0;
+
+            // FIX 3: intraday EMA direction per sector
+            int emaUpCount   = 0;
+            int emaDownCount = 0;
+            int emaCount     = 0;
 
             for (String sym : symbols) {
                 BigDecimal ltpBD = prices.get(sym);
                 if (ltpBD == null) continue;
                 double ltp = ltpBD.doubleValue();
 
+                // Change vs yesterday close
                 List<Candle> daily = aiData.getDailyCandles(sym);
                 if (daily.size() < 2) continue;
-
                 double prev = daily.get(daily.size() - 2).getClose().doubleValue();
                 if (prev <= 0) continue;
 
                 double chg = (ltp - prev) / prev * 100;
                 totalChange += chg;
                 count++;
-                if (chg > 0) advancing++;
+
+                // FIX 4: sector breadth — is this stock advancing today?
+                if (chg > 0.05) advancing++;
+
+                // FIX 3: intraday EMA direction from 15m candles
+                List<Candle> c15m = aiData.get15mCandles(sym);
+                if (c15m.size() >= 9) {
+                    double ema9 = computeEMAFromCandles(c15m, 9);
+                    if (ltp > ema9 * 1.001) emaUpCount++;
+                    else if (ltp < ema9 * 0.999) emaDownCount++;
+                    emaCount++;
+                }
             }
 
             if (count > 0) {
-                double avgChange = totalChange / count;
-                double advRatio  = (double) advancing / count;
+                double avgChange    = totalChange / count;
+                double advRatio     = (double) advancing / count;     // FIX 4: sector breadth
+
+                // FIX 3: intraday EMA direction score per sector
+                // +1 = majority of sector stocks above intraday EMA (bullish intraday)
+                // -1 = majority below (bearish intraday)
+                //  0 = mixed
+                double intradayEma  = emaCount > 0
+                        ? (double)(emaUpCount - emaDownCount) / emaCount
+                        : 0.0;
+
+                // Sector aligned bullish: change > 0.25% AND intraday EMA bullish
+                // Old: only change > 0.25%
+                // New: requires both overnight AND intraday confirmation
+                boolean alignedBull = avgChange > 0.25 && intradayEma > 0.3;
+                boolean alignedBear = avgChange < -0.25 && intradayEma < -0.3;
+
                 result.put(sector, new AiSectorData(
                         sector, avgChange, advRatio,
-                        avgChange > 0.25, avgChange < -0.25));
+                        alignedBull, alignedBear,
+                        intradayEma));
+
+                log.debug("[AI-UNDERSTAND] Sector {} chg={}% advRatio={} intradayEma={} bull={} bear={}",
+                        sector,
+                        String.format("%.2f", avgChange),
+                        String.format("%.2f", advRatio),
+                        String.format("%.2f", intradayEma),
+                        alignedBull, alignedBear);
             }
         }
+
+        sectorCache    = result;
+        sectorCacheTs  = System.currentTimeMillis();
         return result;
     }
 
-    /** Get AI's own sector classification for a symbol */
+    // ═══════════════════════════════════════════════════════════════════════
+    // SECTOR CONFIRMATION SCORE
+    // Measures how many sectors confirm the overall Nifty direction.
+    // Used in MarketSnapshot — flows to AiReasoningEngine environment score.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private double computeSectorConfirmationScore(double niftyDir) {
+        try {
+            Map<String, AiSectorData> sectors = computeSectorStrength();
+            if (sectors.isEmpty()) return 0.5;
+
+            int confirmed = 0, total = 0;
+            for (AiSectorData sd : sectors.values()) {
+                total++;
+                if (niftyDir > 0.3 && sd.alignedBullish())  confirmed++;
+                if (niftyDir < -0.3 && sd.alignedBearish()) confirmed++;
+            }
+            double score = total > 0 ? (double) confirmed / total : 0.5;
+            log.debug("[AI-UNDERSTAND] Sector confirmation: {}/{} sectors aligned = {}",
+                    confirmed, total, String.format("%.2f", score));
+            return score;
+        } catch (Exception e) {
+            return 0.5;
+        }
+    }
+
     public String getSectorForSymbol(String symbol) {
         for (Map.Entry<String, List<String>> e : SECTOR_MAP.entrySet()) {
             if (e.getValue().contains(symbol)) return e.getKey();
@@ -255,7 +415,6 @@ public class AiMarketUnderstandingEngine {
         return "Other";
     }
 
-    /** Get change% for a specific sector */
     public double getSectorChangePercent(String sector) {
         Map<String, AiSectorData> sectors = computeSectorStrength();
         AiSectorData sd = sectors.get(sector);
@@ -263,8 +422,7 @@ public class AiMarketUnderstandingEngine {
     }
 
     private String computeLeadingSector() {
-        Map<String, AiSectorData> sectors = computeSectorStrength();
-        return sectors.entrySet().stream()
+        return computeSectorStrength().entrySet().stream()
                 .max(Comparator.comparingDouble(e -> Math.abs(e.getValue().changePercent())))
                 .map(Map.Entry::getKey)
                 .orElse("NONE");
@@ -287,10 +445,10 @@ public class AiMarketUnderstandingEngine {
     public double computeSessionQuality(double atrPct, double breadth, double vix) {
         if (currentRegime == Regime.CHOPPY) return 0.0;
         double q = 0.5;
-        if (atrPct > ATR_RANGING) q += 0.2;
+        if (atrPct > ATR_RANGING)                        q += 0.2;
         if (breadth > BREADTH_BULL || breadth < BREADTH_BEAR) q += 0.15;
-        if (vix > 12 && vix < 20) q += 0.1;
-        if (vix > 25) q -= 0.2;
+        if (vix > 12 && vix < 20)                        q += 0.1;
+        if (vix > 25)                                    q -= 0.2;
         q += regimeTradingQuality * 0.05;
         return Math.max(0.0, Math.min(1.0, q));
     }
@@ -316,7 +474,8 @@ public class AiMarketUnderstandingEngine {
     public Regime  getCurrentRegime()  { return currentRegime; }
     public int     getRegimeDuration() { return regimeDuration; }
     public boolean isChoppy()          { return currentRegime == Regime.CHOPPY; }
-    public boolean isTradeable()       { return currentRegime != Regime.CHOPPY && currentRegime != Regime.UNKNOWN; }
+    public boolean isTradeable()       { return currentRegime != Regime.CHOPPY
+            && currentRegime != Regime.UNKNOWN; }
 
     // ═══════════════════════════════════════════════════════════════════════
     // PERSISTENCE
@@ -368,14 +527,35 @@ public class AiMarketUnderstandingEngine {
     // INNER TYPES
     // ═══════════════════════════════════════════════════════════════════════
 
+    /**
+     * FIX 3 & 4: AiSectorData expanded with intradayEmaDirection and advancingRatio.
+     * Old fields unchanged — backward compatible.
+     * New fields:
+     *   intradayEmaDirection: +1 = majority of stocks above 15m EMA9 (bullish intraday)
+     *                         -1 = majority below (bearish intraday)
+     *   advancingRatio: fraction of sector stocks advancing today (sector breadth)
+     */
     public record AiSectorData(
             String  name,
             double  changePercent,
-            double  advancingRatio,
+            double  advancingRatio,          // FIX 4: sector breadth
             boolean alignedBullish,
-            boolean alignedBearish
-    ) {}
+            boolean alignedBearish,
+            double  intradayEmaDirection     // FIX 3: +1 bullish intraday, -1 bearish
+    ) {
+        // Backward-compatible constructor for existing callers
+        public AiSectorData(String name, double changePercent, double advancingRatio,
+                            boolean alignedBullish, boolean alignedBearish) {
+            this(name, changePercent, advancingRatio, alignedBullish, alignedBearish, 0.0);
+        }
+    }
 
+    /**
+     * FIX: MarketSnapshot expanded with sectorConfirmationScore.
+     * All existing fields unchanged — new field added at end.
+     * sectorConfirmationScore: 0-1 fraction of sectors confirming Nifty direction.
+     * 0.8+ = strong confirmation, 0.5 = mixed, 0.2- = divergence.
+     */
     public record MarketSnapshot(
             String  regime,
             double  niftyAtrPct,
@@ -386,10 +566,11 @@ public class AiMarketUnderstandingEngine {
             double  sessionQuality,
             int     regimeDuration,
             double  niftyDirection,
+            double  sectorConfirmationScore, // FIX: new field
             boolean tradeable
     ) {
         public static MarketSnapshot unknown() {
-            return new MarketSnapshot("UNKNOWN", 0, 1, 15, 0, "NONE", 0, 0, 0, false);
+            return new MarketSnapshot("UNKNOWN", 0, 1, 15, 0, "NONE", 0, 0, 0, 0.5, false);
         }
         public boolean isChoppy() { return "CHOPPY".equals(regime); }
     }

@@ -118,13 +118,13 @@ public class AiContinuousImprovementEngine {
             double winRate = recent.size() > 0 ? (double) wins / recent.size() : 0;
             double avgR    = recent.size() > 0 ? sumR / recent.size() : 0;
 
-            log.info("[AI-IMPROVE] Last {} trades: WinRate={:.0f}% AvgR={:.2f}",
+            log.info("[AI-IMPROVE] Last {} trades: WinRate={}% AvgR={}",
                     recent.size(), winRate * 100, avgR);
 
             // Log regime performance
             regimeWins.forEach((regime, stats) -> {
                 double wr = stats[1] > 0 ? (double) stats[0] / stats[1] : 0;
-                log.info("[AI-IMPROVE] Regime {}: WR={:.0f}% ({}/{})",
+                log.info("[AI-IMPROVE] Regime {}: WR={}% ({}/{})",
                         regime, wr * 100, stats[0], stats[1]);
             });
 
@@ -135,7 +135,7 @@ public class AiContinuousImprovementEngine {
                             e.getValue()[1] > 0 ? (double)e.getValue()[0] / e.getValue()[1] : 0))
                     .ifPresent(e -> {
                         double wr = (double)e.getValue()[0] / e.getValue()[1];
-                        log.info("[AI-IMPROVE] Best factor: {} WR={:.0f}%", e.getKey(), wr * 100);
+                        log.info("[AI-IMPROVE] Best factor: {} WR={}%", e.getKey(), String.format("%.0f", wr * 100));
                     });
 
         } catch (Exception e) {
@@ -171,13 +171,13 @@ public class AiContinuousImprovementEngine {
             // Win rate too low → tighten confidence threshold
             if (winRate < 0.40 && minConfidenceThreshold < 0.75) {
                 minConfidenceThreshold = Math.min(0.75, minConfidenceThreshold + 0.02);
-                change = String.format("confidence ↑ to %.2f (winRate=%.0f%% < 40%%)",
+                change = String.format("confidence UP to %.2f (winRate=%.0f%% < 40%%)",
                         minConfidenceThreshold, winRate * 100);
             }
             // Win rate healthy → can slightly relax
             else if (winRate > 0.65 && total >= 30 && minConfidenceThreshold > 0.55) {
                 minConfidenceThreshold = Math.max(0.55, minConfidenceThreshold - 0.01);
-                change = String.format("confidence ↓ to %.2f (winRate=%.0f%% > 65%%)",
+                change = String.format("confidence DOWN to %.2f (winRate=%.0f%% > 65%%)",
                         minConfidenceThreshold, winRate * 100);
             }
 
@@ -192,8 +192,11 @@ public class AiContinuousImprovementEngine {
                 improvementLog.add(new ImprovementEntry(LocalDate.now(), change,
                         winRate, avgR, minConfidenceThreshold, minExpectedRR));
             } else {
-                log.info("[AI-IMPROVE] Thresholds OK: conf={:.2f} minRR={:.1f} WR={:.0f}% AvgR={:.2f}",
-                        minConfidenceThreshold, minExpectedRR, winRate * 100, avgR);
+                log.info("[AI-IMPROVE] Thresholds OK: conf={} minRR={} WR={}% AvgR={}",
+                        String.format("%.2f", minConfidenceThreshold),
+                        String.format("%.1f", minExpectedRR),
+                        String.format("%.0f", winRate * 100),
+                        String.format("%.2f", avgR));
             }
 
         } catch (Exception e) {
@@ -211,12 +214,12 @@ public class AiContinuousImprovementEngine {
         double pnl = learningEngine.getTotalPnl();
 
         log.info("[AI-IMPROVE] ═══════ Daily AI Performance Report ═══════");
-        log.info("[AI-IMPROVE] All-time: {} trades | WR={:.0f}% | P&L=₹{:.0f} | MaxDD=₹{:.0f}",
+        log.info("[AI-IMPROVE] All-time: {} trades | WR={}% | P&L=₹{} | MaxDD=₹{}",
                 total,
                 total > 0 ? (double) wins / total * 100 : 0,
                 pnl,
                 learningEngine.getMaxDrawdown());
-        log.info("[AI-IMPROVE] Model: {} | Conf≥{:.2f} | MinRR≥{:.1f}",
+        log.info("[AI-IMPROVE] Model: {} | Conf≥{} | MinRR≥{}",
                 probabilityEngine.getPhaseLabel(),
                 minConfidenceThreshold, minExpectedRR);
         log.info("[AI-IMPROVE] ═════════════════════════════════════════════");
@@ -245,7 +248,27 @@ public class AiContinuousImprovementEngine {
     // ACCESSORS — used by AiTradingSystem for gate thresholds
     // ═══════════════════════════════════════════════════════════════════════
 
+    /**
+     * FIX: Phase-aware confidence threshold.
+     * Phase 1 (< 50 samples): 0.40 — permissive, collecting data
+     * Phase 2 (50-200 samples): 0.50 — ML model active, moderate filter
+     * Phase 3 (200+ samples): adapts via adaptThresholds() from 0.55+
+     * Previously this was always 0.40 regardless of ML phase.
+     */
     public double getMinConfidenceThreshold() { return minConfidenceThreshold; }
+
+    /** Called by AiTradingSystem when ML phases change */
+    public void onPhaseChange(int samplesCount) {
+        if (samplesCount >= 200 && minConfidenceThreshold < 0.55) {
+            minConfidenceThreshold = 0.55;
+            log.info("[AI-IMPROVE] Phase 3 active ({} samples) → confidence threshold raised to 0.55",
+                    samplesCount);
+        } else if (samplesCount >= 50 && minConfidenceThreshold < 0.50) {
+            minConfidenceThreshold = 0.50;
+            log.info("[AI-IMPROVE] Phase 2 active ({} samples) → confidence threshold raised to 0.50",
+                    samplesCount);
+        }
+    }
     public double getMinExpectedRR()          { return minExpectedRR; }
     public int    getMinQualityScore()        { return minQualityScore; }
 

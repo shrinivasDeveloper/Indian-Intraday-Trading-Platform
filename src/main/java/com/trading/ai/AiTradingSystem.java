@@ -233,12 +233,9 @@ public class AiTradingSystem {
         // ═══════════════════════════════════════════════════════════════════
         AiMarketUnderstandingEngine.MarketSnapshot snapshot = marketEngine.classify();
 
-        // Auto-raise confidence threshold when ML model activates
+        // FIX: notify improvement engine of phase changes so threshold auto-adjusts
         int samples = probabilityEngine.getSamplesCount();
-        if (samples >= 50 && improvementEngine.getMinConfidenceThreshold() < 0.55) {
-            // ML model now active — engine will auto-raise threshold via adaptThresholds()
-            log.info("[AI-SYSTEM] {} samples — ML model active. Confidence threshold will auto-adjust.", samples);
-        }
+        improvementEngine.onPhaseChange(samples);
 
         // Gate 6: Regime gate
         if (snapshot.isChoppy()) {
@@ -403,10 +400,14 @@ public class AiTradingSystem {
 
     private boolean executeTrade(AiTradeDecision decision) {
         try {
+            // FIX: Resolve actual instrument token from InstrumentCacheService via AiMarketDataService
+            // Was hardcoded to 0L — caused trades to be invisible to portfolio/monitoring systems
+            long instrumentToken = aiData.resolveInstrumentToken(decision.getSymbol());
+
             Trade trade = Trade.builder()
                     .tradeDate(LocalDate.now())
                     .tradingSymbol(decision.getSymbol())
-                    .instrumentToken(0L)
+                    .instrumentToken(instrumentToken)  // FIX: real token, not 0
                     .direction(TradeDirection.valueOf(decision.getDirection()))
                     .status("OPEN")
                     .entryTime(Instant.now())
@@ -421,8 +422,13 @@ public class AiTradingSystem {
                     .updatedAt(Instant.now())
                     .build();
 
-            // Register with trade management engine
+            // Register with trade management engine (in-memory position tracking)
             tradeManager.registerTrade(trade, decision);
+
+            log.info("[AI-SYSTEM] ✅ Trade registered: {} {} | token={} entry={} sl={} t1={}",
+                    decision.getSymbol(), decision.getDirection(),
+                    instrumentToken, decision.getEntryPrice(),
+                    decision.getStopLoss(), decision.getTarget1());
             return true;
 
         } catch (Exception e) {

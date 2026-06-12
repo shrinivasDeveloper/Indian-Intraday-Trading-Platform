@@ -71,9 +71,10 @@ public class AiTradeQualityScoringEngine {
         if (f.length > 30 && (f[30] > 0 || f[31] > 0)) score += 10;
 
         int finalScore = Math.min(100, score);
-        log.debug("[AI-QUALITY] {} score={} (P={:.0f}% RR={:.1f})",
+        log.debug("[AI-QUALITY] {} score={} (P={}% RR={})",
                 candidate.getSymbol(), finalScore,
-                prediction.getSuccessProbability() * 100, rrRatio);
+                String.format("%.0f", prediction.getSuccessProbability() * 100),
+                String.format("%.1f", rrRatio));
         return finalScore;
     }
 }

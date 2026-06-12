@@ -116,8 +116,10 @@ public class AiRiskAssessmentEngine {
         double riskAmt = capital * RISK_PCT;
         int qty = (int) Math.floor(riskAmt / riskPerShare);
         if (qty <= 0) {
-            log.debug("[AI-RISK] {} qty=0 (risk={:.2f} riskPerShare={:.2f}) — rejected",
-                    symbol, riskAmt, riskPerShare);
+            log.debug("[AI-RISK] {} qty=0 (risk={} riskPerShare={}) — rejected",
+                    symbol,
+                    String.format("%.2f", riskAmt),
+                    String.format("%.2f", riskPerShare));
             return null;
         }
 
@@ -160,20 +162,32 @@ public class AiRiskAssessmentEngine {
         // ── Final RR check ─────────────────────────────────────────────────
         double rrRatio = t1Dist / riskPerShare;
         if (rrRatio < MIN_RR) {
-            log.debug("[AI-RISK] {} RR={:.1f} < {:.1f} — rejected", symbol, rrRatio, MIN_RR);
+            log.debug("[AI-RISK] {} RR={} < {} — rejected",
+                    symbol,
+                    String.format("%.1f", rrRatio),
+                    String.format("%.1f", MIN_RR));
             return null;
         }
 
         // ── Confidence and quality scoring ────────────────────────────────
+        // Pass direction so contradiction check is direction-aware
         double confidence   = confidenceEngine.computeConfidence(
-                prediction.getConfidence(), candidate.getFeatureVector().getFeatures());
+                prediction.getConfidence(),
+                candidate.getFeatureVector().getFeatures(),
+                candidate.getSuggestedDirection());
         int qualityScore    = qualityEngine.scoreTradeQuality(candidate, prediction, rrRatio);
 
-        log.debug("[AI-RISK] {} {} entry={:.2f} sl={:.2f} t1={:.2f} t2={:.2f} " +
-                        "RR={:.1f} qty={} risk=₹{:.0f} conf={:.0f}% quality={}",
+        log.debug("[AI-RISK] {} {} entry={} sl={} t1={} t2={} RR={} qty={} risk=₹{} conf={}% quality={}",
                 symbol, candidate.getSuggestedDirection(),
-                entryDbl, slD, t1.doubleValue(), t2.doubleValue(),
-                rrRatio, qty, riskAmt, confidence * 100, qualityScore);
+                String.format("%.2f", entryDbl),
+                String.format("%.2f", slD),
+                String.format("%.2f", t1.doubleValue()),
+                String.format("%.2f", t2.doubleValue()),
+                String.format("%.1f", rrRatio),
+                qty,
+                String.format("%.0f", riskAmt),
+                String.format("%.0f", confidence * 100),
+                qualityScore);
 
         return AiTradeDecision.builder()
                 .symbol(symbol)

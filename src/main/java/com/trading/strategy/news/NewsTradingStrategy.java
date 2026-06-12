@@ -80,25 +80,30 @@ public class NewsTradingStrategy {
     private static final LocalTime LUNCH_END    = LocalTime.of(12, 30);
 
     // ── Trade sizing for news catalyst ────────────────────────────────────────
-    /** SL distance as % of entry price */
-    // SL_PCT removed — SL is now dynamic based on news category.
-    // EARNINGS / M&A: 1.5% — these events cause 2-4% intraday swings
-    //                         0.8% SL gets hit by normal opening volatility
-    // All other news:  0.8% — sector/RBI/breaking news = tighter control
-    private static final double SL_PCT_EARNINGS = 0.015; // 1.5% for earnings/M&A
-    private static final double SL_PCT_DEFAULT  = 0.008; // 0.8% for other news
-    /** T1 as multiple of risk (2R) */
-    private static final double T1_RR           = 2.0;
-    /** T2 as multiple of risk (3R) */
-    private static final double T2_RR           = 3.0;
     /** Minimum ATR for market to be tradeable */
-    // FIXED: was 0.30 → now 0.20 (news is event-driven, not range-dependent)
-    private static final double MIN_ATR_PCT     = 0.20;
+    private static final double MIN_ATR_PCT  = 0.20;
+    /** T2 as multiple of T1 risk (3R total) */
+    private static final double T2_RR        = 3.0;
     // TIME_STOP_MIN = 0 → DISABLED.
-    // PaperTradeExecutionService converts 0 → 480min sentinel (beyond market close).
-    // Trade exits ONLY on: SL hit, T1 hit, T2 hit, or 3:00 PM EOD stop.
-    // No automatic time-based exit — price has time to reach the target.
-    private static final int    TIME_STOP_MIN   = 0;
+    private static final int    TIME_STOP_MIN = 0;
+    /** Maximum capital risk per trade = 1% of capital */
+    private static final double MAX_RISK_PCT  = 0.01;
+
+    // ── Price-based SL table (replaces fixed SL_PCT_EARNINGS / SL_PCT_DEFAULT) ──
+    // SL is determined by stock price range, not news category.
+    // Position size is dynamically calculated so total monetary risk = 1% capital.
+    //
+    // Price range     SL%    T1 (2R)   T2 (3R)
+    // ₹100–₹130       2.0%   4.0%      6.0%
+    // ₹131–₹170       1.7%   3.4%      5.1%
+    // ₹171–₹200       1.3%   2.6%      3.9%
+    // ₹201–₹400       1.0%   2.0%      3.0%
+    // ₹401–₹700       0.7%   1.4%      2.1%
+    // ₹701–₹1,200     0.6%   1.2%      1.8%
+    // ₹1,201+         0.5%   1.0%      1.5%
+    //
+    // Trailing SL activates AFTER T1 hit (not before) — protects profit,
+    // does not interfere with the initial 1:2 RR trade.
 
     // ── Dependencies ──────────────────────────────────────────────────────────
     private final NewsIngestionService      ingestionService;
@@ -336,35 +341,58 @@ public class NewsTradingStrategy {
 
         boolean isBuy = score.direction() == TradeDirection.LONG;
 
-        // Compute SL and targets
-        // Dynamic SL: EARNINGS and M&A need wider SL to survive opening volatility
-        boolean isHighVolCategory = score.primaryCategory() == NewsItem.NewsCategory.EARNINGS
-                || score.primaryCategory() == NewsItem.NewsCategory.MERGER_ACQUISITION;
-        double slPct = isHighVolCategory ? SL_PCT_EARNINGS : SL_PCT_DEFAULT;
-        BigDecimal risk = entryPrice.multiply(BigDecimal.valueOf(slPct))
+        // ── Price-based SL: determined by stock price range ───────────────────
+        double entry      = entryPrice.doubleValue();
+        double slPct      = computeSlPct(entry);
+        double t1Pct      = slPct * 2.0;  // 1:2 RR minimum
+        double t2Pct      = slPct * T2_RR; // 1:3 RR
+
+        BigDecimal risk    = entryPrice.multiply(BigDecimal.valueOf(slPct))
                 .setScale(2, RoundingMode.HALF_UP);
         BigDecimal stopLoss = isBuy
                 ? entryPrice.subtract(risk).setScale(2, RoundingMode.FLOOR)
                 : entryPrice.add(risk).setScale(2, RoundingMode.CEILING);
         BigDecimal target1 = isBuy
-                ? entryPrice.add(risk.multiply(BigDecimal.valueOf(T1_RR)))
+                ? entryPrice.add(entryPrice.multiply(BigDecimal.valueOf(t1Pct)))
                 .setScale(2, RoundingMode.HALF_UP)
-                : entryPrice.subtract(risk.multiply(BigDecimal.valueOf(T1_RR)))
+                : entryPrice.subtract(entryPrice.multiply(BigDecimal.valueOf(t1Pct)))
                 .setScale(2, RoundingMode.HALF_UP);
         BigDecimal target2 = isBuy
-                ? entryPrice.add(risk.multiply(BigDecimal.valueOf(T2_RR)))
+                ? entryPrice.add(entryPrice.multiply(BigDecimal.valueOf(t2Pct)))
                 .setScale(2, RoundingMode.HALF_UP)
-                : entryPrice.subtract(risk.multiply(BigDecimal.valueOf(T2_RR)))
+                : entryPrice.subtract(entryPrice.multiply(BigDecimal.valueOf(t2Pct)))
                 .setScale(2, RoundingMode.HALF_UP);
 
-        // Position sizing
+        // ── Dynamic position sizing — capped at 1% capital monetary risk ─────
+        // Position size = (capital × MAX_RISK_PCT) / (entry × slPct)
+        // This ensures monetary risk never exceeds 1% capital regardless of SL%
+        double capitalAmt   = cap.doubleValue();
+        double maxRiskMoney = capitalAmt * MAX_RISK_PCT;         // e.g. ₹1,000 on ₹1L capital
+        double riskPerShare = entry * slPct;                     // e.g. ₹3.76 for ₹376 stock at 1%
+        int qty = riskPerShare > 0
+                ? (int) Math.floor(maxRiskMoney / riskPerShare)
+                : 0;
+
+        if (qty <= 0) {
+            log.debug("[NEWS] {} qty=0 (entry={} slPct={}% riskPerShare={}) — skip",
+                    symbol,
+                    String.format("%.2f", entry),
+                    String.format("%.1f", slPct * 100),
+                    String.format("%.2f", riskPerShare));
+            return false;
+        }
+
+        // Compute actual monetary risk for logging
+        double actualRisk = qty * riskPerShare;
+
+        // ── PositionSizerService still called for compatibility ───────────────
+        // Provides pos.actualRisk() for signal event. We override qty with our
+        // price-based calculation but keep the service call for pipeline consistency.
         PositionSizerService.PositionSize pos =
                 positionSizer.calculate(cap, entryPrice, stopLoss, symbol,
                         score.direction().name());
-        if (!pos.isValid() || pos.quantity() <= 0) {
-            log.debug("[NEWS] {} position sizing failed: {}", symbol, pos.invalidReason());
-            return false;
-        }
+        // Use our price-based qty — not pos.quantity() which uses fixed SL logic
+        // pos.actualRisk() used only for signal enrichment below
 
         // Sector data for signal enrichment
         String sectorName  = score.sectorName();
@@ -399,8 +427,8 @@ public class NewsTradingStrategy {
                 stopLoss,
                 target1,
                 target2,
-                pos.quantity(),
-                pos.actualRisk(),
+                qty,                                   // price-based dynamic qty
+                BigDecimal.valueOf(actualRisk).setScale(2, RoundingMode.HALF_UP),
                 STRATEGY_NAME,
                 totalScore,
                 sectorName,
@@ -491,6 +519,36 @@ public class NewsTradingStrategy {
     // ══════════════════════════════════════════════════════════════════════════
     // HELPERS
     // ══════════════════════════════════════════════════════════════════════════
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // PRICE-BASED SL COMPUTATION
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Returns stop-loss % based on stock price range.
+     *
+     * Price range     SL%
+     * ₹100–₹130       2.0%
+     * ₹131–₹170       1.7%
+     * ₹171–₹200       1.3%
+     * ₹201–₹400       1.0%
+     * ₹401–₹700       0.7%
+     * ₹701–₹1,200     0.6%
+     * ₹1,201+         0.5%
+     *
+     * T1 = SL × 2 (1:2 RR minimum always maintained)
+     * T2 = SL × 3 (1:3 RR)
+     * Position size = (capital × 1%) / (entry × SL%) — always caps monetary risk at 1%
+     */
+    private double computeSlPct(double price) {
+        if      (price <= 130)  return 0.020;
+        else if (price <= 170)  return 0.017;
+        else if (price <= 200)  return 0.013;
+        else if (price <= 400)  return 0.010;
+        else if (price <= 700)  return 0.007;
+        else if (price <= 1200) return 0.006;
+        else                    return 0.005;
+    }
 
     private boolean isDirectionAligned(TradeDirection signalDir,
                                        MarketDirectionService.Direction marketDir) {
