@@ -7,8 +7,11 @@ import com.trading.ai.model.*;
 import com.trading.domain.entity.Trade;
 import com.trading.domain.enums.TradeDirection;
 import com.trading.events.CandleCompleteEvent;
+import com.trading.events.SmartChannelPullbackSignalEvent;
 import com.trading.marketdata.service.MarketDataService;
 import com.trading.risk.service.CircuitBreakerService;
+import com.trading.risk.service.RiskManagementService;
+import org.springframework.context.ApplicationEventPublisher;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -84,10 +87,14 @@ public class AiTradingSystem {
     private final MarketDataService             marketData;
     private final CircuitBreakerService         circuitBreaker;
     private final com.trading.papertrading.model.PaperAccount paperAccountCB;
+    private final ApplicationEventPublisher     publisher;
+    private final AiPatternConfidenceEngine     confidenceEngine;
+    private final RiskManagementService         riskManagement;
 
 
     // ── State ─────────────────────────────────────────────────────────────
     private final Set<String>      firedToday     = ConcurrentHashMap.newKeySet();
+    private final Set<String>      watchlist      = ConcurrentHashMap.newKeySet();
     private final AtomicInteger    tradesToday     = new AtomicInteger(0);
     private final AtomicBoolean    cycleRunning    = new AtomicBoolean(false);
     private final List<AiTradeDecision> todayDecisions = Collections.synchronizedList(new ArrayList<>());
@@ -119,7 +126,10 @@ public class AiTradingSystem {
             AiMarketDataService           aiData,
             MarketDataService             marketData,
             CircuitBreakerService         circuitBreaker,
-            com.trading.papertrading.model.PaperAccount paperAccountCB) {
+            com.trading.papertrading.model.PaperAccount paperAccountCB,
+            ApplicationEventPublisher     publisher,
+            RiskManagementService         riskManagement,
+            AiPatternConfidenceEngine     confidenceEngine) {
 
         this.marketEngine      = marketEngine;
         this.discoveryEngine   = discoveryEngine;
@@ -133,6 +143,9 @@ public class AiTradingSystem {
         this.marketData        = marketData;
         this.circuitBreaker    = circuitBreaker;
         this.paperAccountCB    = paperAccountCB;
+        this.publisher         = publisher;
+        this.riskManagement    = riskManagement;
+        this.confidenceEngine  = confidenceEngine;
     }
 
     @PostConstruct
@@ -214,10 +227,13 @@ public class AiTradingSystem {
             return;
         }
 
-        // Gate 4: Concurrent position cap
-        if (tradeManager.getOpenCount() >= maxConcurrent) {
-            log.debug("[AI-SYSTEM] Max concurrent positions ({}/{})",
-                    tradeManager.getOpenCount(), maxConcurrent);
+        // Gate 4: Concurrent position cap — checks BOTH AI internal + platform
+        // AI internal: tradeManager tracks AI positions for learning/history
+        // Platform: riskManagement tracks ALL active positions across all strategies
+        int aiOpenCount = tradeManager.getOpenCount();
+        if (aiOpenCount >= maxConcurrent) {
+            log.debug("[AI-SYSTEM] Max concurrent AI positions ({}/{})",
+                    aiOpenCount, maxConcurrent);
             return;
         }
 
@@ -237,16 +253,21 @@ public class AiTradingSystem {
         int samples = probabilityEngine.getSamplesCount();
         improvementEngine.onPhaseChange(samples);
 
-        // Gate 6: Regime gate
-        if (snapshot.isChoppy()) {
-            log.debug("[AI-SYSTEM] Regime CHOPPY — no trading");
-            return;
-        }
-        if (!snapshot.tradeable()) {
-            log.debug("[AI-SYSTEM] Market not tradeable — skip");
-            return;
-        }
+        // Gate 6: Regime awareness — only CHOPPY blocks scanning/watchlist
+        // RANGING and TRENDING both allow scanning — execution depends on score threshold
+        // Per design: no Nifty/BankNifty/sector hard gates
         currentRegime = snapshot.regime();
+        boolean choppy   = snapshot.isChoppy();
+        boolean ranging  = "RANGING".equals(currentRegime);
+        boolean trending = "TRENDING".equals(currentRegime);
+
+        // Determine execution threshold based on regime
+        // TRENDING → 70+ score executes
+        // RANGING  → 80+ score executes (stricter — ranging moves are less reliable)
+        // CHOPPY   → NO execution, watchlist monitoring only
+        int executionThreshold = trending ? 70 : ranging ? 80 : 999; // 999 = never executes
+
+        log.debug("[AI-SYSTEM] Regime={} threshold={}", currentRegime, executionThreshold);
 
         // ═══════════════════════════════════════════════════════════════════
         // ENGINE 2: OPPORTUNITY DISCOVERY
@@ -266,54 +287,120 @@ public class AiTradingSystem {
         // ═══════════════════════════════════════════════════════════════════
         List<AiCandidate>    scoredCandidates = new ArrayList<>();
         List<AiTradeDecision> allDecisions    = new ArrayList<>();
+        List<AiPatternConfidenceEngine.ConfidenceResult> confidenceResults = new ArrayList<>();
 
         for (AiCandidate candidate : candidates) {
 
-            // Engine 3: Probability scoring — score only, never filter
-            AiPrediction prediction = probabilityEngine.predict(
-                    candidate.getFeatureVector().getFeatures(), currentRegime);
+            // ── STEP A: Pattern Confidence Score (100-point model) ───────────
+            // PRIMARY scoring mechanism — stock-specific, no market bias
+            List<com.trading.domain.Candle> dailyCandles =
+                    aiData.getDailyCandles(candidate.getSymbol());
+            List<com.trading.domain.Candle> candles5m =
+                    aiData.get5mCandles(candidate.getSymbol());
+            AiPatternConfidenceEngine.ConfidenceResult conf =
+                    confidenceEngine.score(candidate, dailyCandles, candles5m);
 
-            // Engine 6: Risk assessment — compute SL/T1/T2
-            // Only hard skip: if SL placement is mathematically impossible (null)
-            AiTradeDecision decision = riskEngine.assess(
-                    candidate, prediction, currentRegime);
-            if (decision == null) {
-                // Risk assessment failed — SL could not be placed at any valid level
-                // This is a data problem, not a quality judgment — safe to skip
-                log.debug("[AI-SYSTEM] {} risk assessment null (SL placement failed) — skip",
-                        candidate.getSymbol());
+            // Add to watchlist if any patterns detected (even below threshold)
+            if (conf.bullishPatterns() + conf.bearishPatterns() > 0) {
+                watchlist.add(candidate.getSymbol());
+            }
+
+            // Log watchlist entry
+            if (conf.totalScore() >= 50 && conf.totalScore() < executionThreshold) {
+                log.info("[AI-SYSTEM] 👀 WATCHLIST: {} score={}/100 [{}] threshold={}",
+                        candidate.getSymbol(), conf.totalScore(),
+                        conf.dominantPattern(), executionThreshold);
+            }
+
+            // CHOPPY market: scan and watchlist only — never execute
+            if (choppy) continue;
+
+            // Below execution threshold: watchlist monitoring only
+            if (!conf.meetsThreshold(executionThreshold)) {
+                log.debug("[AI-SYSTEM] {} score={}/{} — below threshold, on watchlist",
+                        candidate.getSymbol(), conf.totalScore(), executionThreshold);
                 continue;
             }
 
-            // Pass candidate + decision to reasoning engine as inputs
-            // Confidence, RR, quality are available inside decision object
-            // AiReasoningEngine will use them as weighted layer inputs
+            // ── TRENDING: market direction alignment required ──────────────
+            // Rule: TRENDING → Score ≥ 70 + Market Direction + Stock Direction in sync
+            // Only LONG trades when market is BULLISH trending.
+            // Only SHORT trades when market is BEARISH trending.
+            // RANGING has no direction requirement — both sides valid.
+            if (trending) {
+                double marketDir = snapshot.niftyDirection(); // +1=BULLISH, -1=BEARISH, 0=SIDEWAYS
+                String stockDir  = candidate.getSuggestedDirection();
+                boolean marketBull = marketDir > 0.3;
+                boolean marketBear = marketDir < -0.3;
+
+                if (marketBull && "SHORT".equals(stockDir)) {
+                    log.debug("[AI-SYSTEM] {} SHORT skipped — TRENDING market is BULLISH, no counter-trend",
+                            candidate.getSymbol());
+                    watchlist.add(candidate.getSymbol()); // keep on watchlist
+                    continue;
+                }
+                if (marketBear && "LONG".equals(stockDir)) {
+                    log.debug("[AI-SYSTEM] {} LONG skipped — TRENDING market is BEARISH, no counter-trend",
+                            candidate.getSymbol());
+                    watchlist.add(candidate.getSymbol()); // keep on watchlist
+                    continue;
+                }
+                if (!marketBull && !marketBear) {
+                    // Market direction unclear (SIDEWAYS nifty in TRENDING regime)
+                    // Allow trade — stock direction is the primary signal
+                    log.debug("[AI-SYSTEM] {} — TRENDING but Nifty SIDEWAYS, stock direction leads",
+                            candidate.getSymbol());
+                }
+            }
+
+            // ── STEP B: Risk Assessment — compute SL/T1/T2 ──────────────────
+            AiPrediction prediction = probabilityEngine.predict(
+                    candidate.getFeatureVector().getFeatures(), currentRegime);
+            AiTradeDecision decision = riskEngine.assess(
+                    candidate, prediction, currentRegime);
+            if (decision == null) {
+                log.debug("[AI-SYSTEM] {} risk assessment null — skip", candidate.getSymbol());
+                continue;
+            }
+
             scoredCandidates.add(candidate);
             allDecisions.add(decision);
+            confidenceResults.add(conf);
+        }
+
+        if (choppy) {
+            log.info("[AI-SYSTEM] CHOPPY — {} stocks on watchlist, no execution",
+                    watchlist.size());
+            return;
         }
 
         if (scoredCandidates.isEmpty()) {
-            log.debug("[AI-SYSTEM] No candidates after risk assessment | regime={}", currentRegime);
+            log.debug("[AI-SYSTEM] No candidates met {} threshold | regime={}",
+                    executionThreshold, currentRegime);
             return;
         }
 
-        log.debug("[AI-SYSTEM] {} candidates passed to reasoning engine | regime={}",
-                scoredCandidates.size(), currentRegime);
+        log.debug("[AI-SYSTEM] {} candidates met threshold={} | regime={}",
+                scoredCandidates.size(), executionThreshold, currentRegime);
 
         // ═══════════════════════════════════════════════════════════════════
-        // ENGINE 7: AI REASONING — 6-layer thinking, picks the single best
-        // Receives ALL candidates. No pre-filtering. Reasons comparatively.
-        // Confidence, RR, quality are weighted inputs — not hard gates.
+        // ENGINE 7: REASONING — picks the single best candidate
+        // Pattern confidence already filtered above.
+        // Reasoning provides additional comparative ranking and narrative.
         // ═══════════════════════════════════════════════════════════════════
         AiReasoningEngine.AiReasoningResult reasoned = reasoningEngine.selectBest(
-                scoredCandidates,
-                allDecisions,
-                snapshot);
+                scoredCandidates, allDecisions, snapshot);
 
         if (reasoned == null) {
-            log.debug("[AI-SYSTEM] Reasoning engine: no trade this cycle | regime={}", currentRegime);
+            log.debug("[AI-SYSTEM] Reasoning engine: no trade | regime={}", currentRegime);
             return;
         }
+
+        // Attach confidence score to the reasoned decision
+        int confScore = confidenceResults.stream()
+                .filter(r -> r.dominantPattern() != null)
+                .mapToInt(AiPatternConfidenceEngine.ConfidenceResult::totalScore)
+                .max().orElse(executionThreshold);
 
         // ═══════════════════════════════════════════════════════════════════
         // ENGINE 8: EXECUTION — only the reasoned best candidate
@@ -332,7 +419,7 @@ public class AiTradingSystem {
                     .probabilityOfSuccess(reasoned.decision().getProbabilityOfSuccess())
                     .expectedRR(reasoned.decision().getExpectedRR())
                     .expectedReturn(reasoned.decision().getExpectedReturn())
-                    .confidence(reasoned.composite())
+                    .confidence((double)confScore / 100.0)
                     .rrRatio(reasoned.decision().getRrRatio())
                     .tradeQualityScore(reasoned.decision().getTradeQualityScore())
                     .opportunityScore(reasoned.decision().getOpportunityScore())
@@ -399,42 +486,130 @@ public class AiTradingSystem {
     // ═══════════════════════════════════════════════════════════════════════
 
     private boolean executeTrade(AiTradeDecision decision) {
-        try {
-            // FIX: Resolve actual instrument token from InstrumentCacheService via AiMarketDataService
-            // Was hardcoded to 0L — caused trades to be invisible to portfolio/monitoring systems
-            long instrumentToken = aiData.resolveInstrumentToken(decision.getSymbol());
+        // FIX: Route through platform pipeline (SmartChannelPullbackSignalEvent)
+        // so AI trades appear in Overview, Trades, Portfolio, and circuit breaker.
+        // Previously used AiTradeManagementEngine.registerTrade() directly
+        // which was invisible to the platform.
+        //
+        // AiTradeManagementEngine is still used for:
+        //   - learning callback (on trade close)
+        //   - in-memory position tracking for gate checks
+        //
+        // Platform pipeline handles:
+        //   - Execution and fill
+        //   - SL/T1/T2 exit management
+        //   - Portfolio / Trades / Overview display
+        //   - Circuit breaker awareness
+        synchronized (this) {
+            if (tradeManager.getOpenCount() >= maxConcurrent) {
+                log.debug("[AI-SYSTEM] executeTrade: concurrent limit reached — skip {}",
+                        decision.getSymbol());
+                return false;
+            }
+            if (tradesToday.get() >= maxTradesPerDay) {
+                log.debug("[AI-SYSTEM] executeTrade: daily limit reached — skip {}",
+                        decision.getSymbol());
+                return false;
+            }
+            // Check platform-level symbol dedup
+            if (riskManagement.isSymbolAlreadyActive(decision.getSymbol())) {
+                log.debug("[AI-SYSTEM] {} already active in another strategy — skip",
+                        decision.getSymbol());
+                return false;
+            }
 
-            Trade trade = Trade.builder()
-                    .tradeDate(LocalDate.now())
-                    .tradingSymbol(decision.getSymbol())
-                    .instrumentToken(instrumentToken)  // FIX: real token, not 0
-                    .direction(TradeDirection.valueOf(decision.getDirection()))
-                    .status("OPEN")
-                    .entryTime(Instant.now())
-                    .entryPrice(decision.getEntryPrice())
-                    .quantity(decision.getPositionSize())
-                    .stopLoss(decision.getStopLoss())
-                    .target(decision.getTarget1())
-                    .strategyName("AI_TRADING_V2")
-                    .probabilityScore(BigDecimal.valueOf(
-                            (int)(decision.getProbabilityOfSuccess() * 100)))
-                    .createdAt(Instant.now())
-                    .updatedAt(Instant.now())
-                    .build();
+            try {
+                String     symbol    = decision.getSymbol();
+                String     direction = decision.getDirection();
+                BigDecimal entry     = decision.getEntryPrice();
+                BigDecimal sl        = decision.getStopLoss();
+                BigDecimal t1        = decision.getTarget1();
+                BigDecimal t2        = decision.getTarget2() != null
+                        ? decision.getTarget2() : t1;
+                int qty              = decision.getPositionSize();
 
-            // Register with trade management engine (in-memory position tracking)
-            tradeManager.registerTrade(trade, decision);
+                if (symbol == null || direction == null || entry == null
+                        || sl == null || t1 == null || qty <= 0) {
+                    log.warn("[AI-SYSTEM] Invalid decision fields for {} — skip", symbol);
+                    return false;
+                }
 
-            log.info("[AI-SYSTEM] ✅ Trade registered: {} {} | token={} entry={} sl={} t1={}",
-                    decision.getSymbol(), decision.getDirection(),
-                    instrumentToken, decision.getEntryPrice(),
-                    decision.getStopLoss(), decision.getTarget1());
-            return true;
+                long      token       = aiData.resolveInstrumentToken(symbol);
+                TradeDirection dir    = TradeDirection.valueOf(direction);
+                BigDecimal riskAmt    = decision.getRiskAmount() != null
+                        ? decision.getRiskAmount()
+                        : entry.multiply(BigDecimal.valueOf(0.01))
+                        .setScale(2, RoundingMode.HALF_UP);
 
-        } catch (Exception e) {
-            log.error("[AI-SYSTEM] Execution failed for {}: {}",
-                    decision.getSymbol(), e.getMessage());
-            return false;
+                int  qualityScore = decision.getTradeQualityScore();
+                double confidence = decision.getConfidence();
+                String sector     = decision.getSector() != null ? decision.getSector() : "Other";
+
+                // Build signal — same structure as all other strategies
+                SmartChannelPullbackSignalEvent signal = new SmartChannelPullbackSignalEvent(
+                        this,
+                        symbol,
+                        token,
+                        dir,
+                        entry,
+                        sl,
+                        t1,
+                        t2,
+                        qty,
+                        riskAmt,
+                        "AI_TRADING_V2",
+                        (int)(confidence * 100),
+                        sector,
+                        0.0,                             // sectorChange
+                        "AI_REASONING",                  // channelQuality → category
+                        "AI_SIGNAL",                     // signalType
+                        confidence,                      // pressureRatio
+                        decision.getNumericPreScore() / 100.0, // rvol proxy
+                        qualityScore >= 60,              // strongTrend
+                        "MARKET",                        // entryMode
+                        "AI_" + direction,               // signalLabel
+                        0,                               // candleCloseDelay
+                        qualityScore,                    // scoreCategory
+                        (int)(decision.getProbabilityOfSuccess() * 100), // scoreSentiment
+                        100,                             // scoreRecency (fresh signal)
+                        80,                              // scoreSource (AI engine)
+                        (int)(confidence * 100),         // scoreKeyword
+                        (int)(confidence * 100),         // totalScore
+                        0                                // timeStopMin (EOD handles exit)
+                );
+
+                // Fire through platform pipeline — appears in Overview/Trades/Portfolio
+                publisher.publishEvent(signal);
+
+                // Also register with AiTradeManagementEngine for learning tracking
+                Trade trade = Trade.builder()
+                        .tradeDate(LocalDate.now())
+                        .tradingSymbol(symbol)
+                        .instrumentToken(token)
+                        .direction(dir)
+                        .status("OPEN")
+                        .entryTime(Instant.now())
+                        .entryPrice(entry)
+                        .quantity(qty)
+                        .stopLoss(sl)
+                        .target(t1)
+                        .strategyName("AI_TRADING_V2")
+                        .probabilityScore(BigDecimal.valueOf(
+                                (int)(decision.getProbabilityOfSuccess() * 100)))
+                        .createdAt(Instant.now())
+                        .updatedAt(Instant.now())
+                        .build();
+                tradeManager.registerTrade(trade, decision);
+
+                log.info("[AI-SYSTEM] ✅ Signal fired: {} {} | token={} entry={} sl={} t1={}",
+                        symbol, direction, token, entry, sl, t1);
+                return true;
+
+            } catch (Exception e) {
+                log.error("[AI-SYSTEM] Execution failed for {}: {}",
+                        decision.getSymbol(), e.getMessage(), e);
+                return false;
+            }
         }
     }
 
@@ -447,6 +622,10 @@ public class AiTradingSystem {
         firedToday.clear();
         tradesToday.set(0);
         todayDecisions.clear();
+        // FIX: clear trade manager positions — prevents ghost positions
+        // surviving midnight and blocking the next trading session
+        tradeManager.clearPositions();
+        watchlist.clear();
         learningEngine.dailyReset();
         log.info("[AI-SYSTEM] Daily reset complete");
     }
@@ -470,6 +649,8 @@ public class AiTradingSystem {
         status.put("regime",         currentRegime);
         status.put("phase",          probabilityEngine.getPhaseLabel());
         status.put("tradesToday",    tradesToday.get());
+        status.put("watchlistCount",   watchlist.size());
+        status.put("watchlist",        new java.util.ArrayList<>(watchlist));
         status.put("maxTrades",      maxTradesPerDay);
         status.put("openPositions",  tradeManager.getOpenCount());
         status.put("maxConcurrent",  maxConcurrent);

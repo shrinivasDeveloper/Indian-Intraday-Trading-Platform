@@ -208,6 +208,34 @@ public class AiTradeManagementEngine {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // DAILY RESET — 9:10 AM every trading day
+    // FIX: Was missing entirely — caused ghost positions to survive midnight
+    // and block the next trading session.
+    // Clears all open positions at session start.
+    // Safe because EOD exit at 15:05 closes all positions the day before.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
+    public void dailyReset() {
+        int count = openPositions.size();
+        if (count > 0) {
+            log.warn("[AI-MGMT] Daily reset clearing {} stale positions (EOD exit may have failed)",
+                    count);
+            openPositions.clear();
+        }
+        log.info("[AI-MGMT] Daily reset complete — positions cleared");
+    }
+
+    /**
+     * Force-clear all positions.
+     * Called by AiTradingSystem.dailyReset() as a safety net in addition
+     * to the scheduled reset above.
+     */
+    public void clearPositions() {
+        openPositions.clear();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // ACCESSORS
     // ═══════════════════════════════════════════════════════════════════════
 

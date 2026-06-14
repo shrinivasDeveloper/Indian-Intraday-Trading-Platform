@@ -76,17 +76,21 @@ public class AiMarketDataService {
     private volatile int bootstrapProgress = 0;
 
     // ── Constants ─────────────────────────────────────────────────────────────
-    private static final int DAILY_DAYS  = 60;
+    // FIX: Extended to 1 year of daily data for proper HTF qualification
+    // Daily validation requires 252 days for EMA200, 52-week range, structure quality
+    private static final int DAILY_DAYS  = 252;
     private static final int M15_DAYS    = 30;
     private static final int M5_DAYS     = 7;
-    private static final int MAX_DAILY   = 60;
+    private static final int MAX_DAILY   = 252;
     private static final int MAX_15M     = 500;
     private static final int MAX_5M      = 300;
 
     // S/R computation parameters
     private static final int    SWING_LOOKBACK   = 3;    // candles each side for swing detection
     private static final double CLUSTER_PCT      = 0.005; // 0.5% — merge levels within this range
-    private static final int    MIN_TOUCH_COUNT  = 2;    // minimum touches for valid level
+    // FIX: was 2 — too strict with 60 days data, many stocks had empty structure maps
+    // Lowered to 1 so any single swing high/low creates a valid S/R level
+    private static final int    MIN_TOUCH_COUNT  = 1;
 
     public AiMarketDataService(MarketDataService marketDataService,
                                AiSymbolUniverse symbolUniverse,
@@ -112,7 +116,7 @@ public class AiMarketDataService {
             return;
         }
         List<String> symbols = symbolUniverse.getSymbols();
-        log.info("[AI-DATA] Bootstrap starting: {} symbols | daily={}d 15m={}d 5m={}d",
+        log.info("[AI-DATA] Bootstrap starting: {} symbols | daily={}d (1yr) 15m={}d 5m={}d",
                 symbols.size(), DAILY_DAYS, M15_DAYS, M5_DAYS);
 
         bootstrapProgress = 0;
@@ -438,14 +442,65 @@ public class AiMarketDataService {
         return false;
     }
 
-    /** Detects S/R flip — former resistance now acting as support */
-    public boolean detectSRFlip(List<Candle> candles5m, AiStructureLevels structure, double ltp) {
-        if (structure == null || candles5m.size() < 3) return false;
+    /**
+     * Detects S/R flip — STRICT version.
+     *
+     * A real S/R flip requires THREE conditions:
+     *   1. A significant level exists (resistance or support from daily data)
+     *   2. Price has CLEARLY broken through that level (daily close must have
+     *      been on the other side of it in the last 10 candles)
+     *   3. Price is now retesting it from the new side (within 0.8%)
+     *
+     * Resistance→Support (LONG): price broke above resistance level on a
+     *   prior daily close, and is now pulling back to test it from above.
+     *
+     * Support→Resistance (SHORT): price broke below support level on a
+     *   prior daily close, and is now bouncing up to test it from below.
+     *
+     * This eliminates false signals from price just happening to be near
+     * any former swing level without an actual break and retest.
+     */
+    public boolean detectSRFlip(List<Candle> dailyCandles, AiStructureLevels structure, double ltp) {
+        if (structure == null || dailyCandles == null || dailyCandles.size() < 10) return false;
+
+        int n = dailyCandles.size();
+        // Tight proximity: price within 0.8% of the level (not 2%)
+        double PROXIMITY = 0.008;
+
+        // Former resistance now acting as support (LONG setup)
         for (AiSRLevel res : structure.resistances()) {
             double level = res.price();
-            if (ltp > level * 0.998 && ltp < level * 1.005) {
-                // Price is just above a former resistance — potential SR flip
-                return true;
+            // Step 1: price is currently close above the level (retesting from above)
+            if (ltp < level * (1 + PROXIMITY) && ltp > level * (1 - PROXIMITY / 2)) {
+                // Step 2: verify a prior daily close was clearly ABOVE the level
+                // (confirms the breakout happened before this retest)
+                boolean breakoutConfirmed = false;
+                for (int i = Math.max(0, n - 15); i < n - 1; i++) {
+                    double prevClose = dailyCandles.get(i).getClose().doubleValue();
+                    if (prevClose > level * 1.005) { // clearly above = breakout
+                        breakoutConfirmed = true;
+                        break;
+                    }
+                }
+                if (breakoutConfirmed) return true;
+            }
+        }
+
+        // Former support now acting as resistance (SHORT setup)
+        for (AiSRLevel sup : structure.supports()) {
+            double level = sup.price();
+            // Price currently close below the level (retesting from below)
+            if (ltp > level * (1 - PROXIMITY) && ltp < level * (1 + PROXIMITY / 2)) {
+                // Verify a prior daily close was clearly BELOW the level
+                boolean breakdownConfirmed = false;
+                for (int i = Math.max(0, n - 15); i < n - 1; i++) {
+                    double prevClose = dailyCandles.get(i).getClose().doubleValue();
+                    if (prevClose < level * 0.995) { // clearly below = breakdown
+                        breakdownConfirmed = true;
+                        break;
+                    }
+                }
+                if (breakdownConfirmed) return true;
             }
         }
         return false;

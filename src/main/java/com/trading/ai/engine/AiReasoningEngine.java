@@ -67,25 +67,13 @@ public class AiReasoningEngine {
     private final AiMarketDataService aiData;
     private final JdbcTemplate        jdbc;
 
-    // ── Composite weights — sum to 1.0 ────────────────────────────────────
-    // ML confidence and quality are now INPUTS to reasoning, not filters
-    private static final double W_ENV         = 0.15;
-    private static final double W_MOVE        = 0.20;
-    private static final double W_FUNDAMENTAL = 0.15;
-    private static final double W_TIMING      = 0.12;
-    private static final double W_PATTERN     = 0.08;
-    private static final double W_RR          = 0.10;
-    private static final double W_ML_CONF     = 0.12; // ML probability confidence
-    private static final double W_QUALITY     = 0.08; // trade quality score
-
-    // ── Minimum composite score to consider trading ────────────────────────
-    // Phase 1 (no ML model): lower threshold because mlConfScore is always 0.5
-    // Phase 2+ (ML active): threshold rises via adaptThreshold() in AiContinuousImprovementEngine
-    private static final double MIN_COMPOSITE = 0.52;
-
-    // ── Minimum per-layer scores (any layer below these = auto reject) ─────
-    private static final double MIN_MOVE    = 0.30; // stock must show some genuine movement
-    private static final double MIN_RR      = 0.35; // risk reward must be acceptable
+    // ── Ranking weights — comparative ranking only (sum to 1.0) ─────────
+    // Pattern/RR/Env/Direction removed — handled upstream in confidence engine
+    private static final double W_MOVE        = 0.35;
+    private static final double W_TIMING      = 0.20;
+    private static final double W_FUNDAMENTAL = 0.20;
+    private static final double W_ML_CONF     = 0.15;
+    private static final double W_QUALITY     = 0.10;
 
     public AiReasoningEngine(AiMarketDataService aiData, JdbcTemplate jdbc) {
         this.aiData = aiData;
@@ -114,133 +102,56 @@ public class AiReasoningEngine {
         if (candidates.isEmpty()) return null;
 
         LocalTime now = LocalTime.now(IST);
-
-        // ── Layer 1: Market environment quality (same for all candidates) ──
-        double environmentScore = computeEnvironmentScore(snapshot);
-
-        // ── Reason about each candidate independently across layers 2-6 ───
         List<AiReasoningResult> results = new ArrayList<>();
 
         for (int i = 0; i < candidates.size(); i++) {
-            AiCandidate    candidate = candidates.get(i);
-            AiTradeDecision decision = decisions.get(i);
-            double[]       f        = candidate.getFeatureVector().getFeatures();
-
+            AiCandidate     candidate = candidates.get(i);
+            AiTradeDecision decision  = decisions.get(i);
+            double[]        f         = candidate.getFeatureVector().getFeatures();
             if (f == null || f.length < 60) continue;
 
-            // ── Layer 2: Stock movement quality ───────────────────────────
-            double moveScore = computeMoveScore(f, candidate);
-            if (moveScore < MIN_MOVE) {
-                log.debug("[AI-REASON] {} Layer2 move={} < {} — rejected",
-                        candidate.getSymbol(),
-                        String.format("%.2f", moveScore),
-                        String.format("%.2f", MIN_MOVE));
-                continue;
-            }
+            double moveScore        = computeMoveScore(f, candidate);
+            double timingScore      = computeTimingScore(now, f, candidate);
+            double fundamentalScore = computeFundamentalScore(candidate.getSymbol(), candidate.getRvol());
+            double mlConfScore      = Math.min(1.0, decision.getConfidence());
+            double qualityScore     = Math.min(1.0, decision.getTradeQualityScore() / 100.0);
 
-            // ── Layer 3: Fundamental catalyst (news from MySQL) ───────────
-            double fundamentalScore = computeFundamentalScore(
-                    candidate.getSymbol(), candidate.getRvol());
+            double rankScore = moveScore * W_MOVE + timingScore * W_TIMING
+                    + fundamentalScore * W_FUNDAMENTAL
+                    + mlConfScore * W_ML_CONF + qualityScore * W_QUALITY;
 
-            // ── Layer 4: Timing quality ───────────────────────────────────
-            double timingScore = computeTimingScore(now, f, candidate);
-
-            // ── Layer 5: Risk/reward quality ──────────────────────────────
-            double rrScore = computeRRScore(decision, f);
-            if (rrScore < MIN_RR) {
-                log.debug("[AI-REASON] {} Layer5 rr={} < {} — rejected",
-                        candidate.getSymbol(),
-                        String.format("%.2f", rrScore),
-                        String.format("%.2f", MIN_RR));
-                continue;
-            }
-
-            // ── Layer 6 input: pattern freshness ──────────────────────────
-            double patternScore = computePatternScore(f, candidate);
-
-            // ── ML confidence — input not filter ──────────────────────────
-            double mlConfScore = Math.min(1.0, decision.getConfidence());
-
-            // ── Trade quality score — input not filter ─────────────────────
-            double qualityScore = Math.min(1.0, decision.getTradeQualityScore() / 100.0);
-
-            // ── Composite score — all 8 layers weighted together ──────────
-            double directionPenalty = computeDirectionPenalty(candidate, snapshot);
-            double composite =
-                    environmentScore  * W_ENV         +
-                            moveScore         * W_MOVE        +
-                            fundamentalScore  * W_FUNDAMENTAL +
-                            timingScore       * W_TIMING      +
-                            patternScore      * W_PATTERN     +
-                            rrScore           * W_RR          +
-                            mlConfScore       * W_ML_CONF     +
-                            qualityScore      * W_QUALITY     +
-                            directionPenalty; // FIX: penalise counter-trend trades
-
-            // Build reasoning narrative
-            String reasoning = buildReasoning(
-                    candidate, snapshot, environmentScore, moveScore,
-                    fundamentalScore, timingScore, patternScore, rrScore,
-                    composite);
-
+            String reasoning    = buildReasoning(candidate, snapshot, 0, moveScore, fundamentalScore, timingScore, 0, 0, rankScore);
             String bullScenario = buildBullScenario(candidate, decision, f);
             String bearScenario = buildBearScenario(candidate, decision, f);
 
-            results.add(new AiReasoningResult(
-                    candidate, decision, composite,
-                    environmentScore, moveScore, fundamentalScore,
-                    timingScore, patternScore, rrScore,
-                    mlConfScore, qualityScore,
-                    reasoning, bullScenario, bearScenario
-            ));
+            results.add(new AiReasoningResult(candidate, decision, rankScore,
+                    0, moveScore, fundamentalScore, timingScore, 0, 0,
+                    mlConfScore, qualityScore, reasoning, bullScenario, bearScenario));
 
-            log.debug("[AI-REASON] {} composite={} (env={} move={} fund={} time={} pat={} rr={} mlconf={} quality={})",
-                    candidate.getSymbol(),
-                    String.format("%.3f", composite),
-                    String.format("%.2f", environmentScore),
-                    String.format("%.2f", moveScore),
-                    String.format("%.2f", fundamentalScore),
-                    String.format("%.2f", timingScore),
-                    String.format("%.2f", patternScore),
-                    String.format("%.2f", rrScore),
-                    String.format("%.2f", mlConfScore),
+            log.debug("[AI-REASON] {} rank={} (move={} timing={} fund={} ml={} quality={})",
+                    candidate.getSymbol(), String.format("%.3f", rankScore),
+                    String.format("%.2f", moveScore), String.format("%.2f", timingScore),
+                    String.format("%.2f", fundamentalScore), String.format("%.2f", mlConfScore),
                     String.format("%.2f", qualityScore));
         }
 
-        if (results.isEmpty()) {
-            log.debug("[AI-REASON] All candidates rejected by reasoning layers");
-            return null;
-        }
+        if (results.isEmpty()) return null;
 
-        // ── Layer 6: Comparative selection — pick the single best ─────────
         results.sort(Comparator.comparingDouble(AiReasoningResult::composite).reversed());
         AiReasoningResult best = results.get(0);
 
-        if (best.composite() < MIN_COMPOSITE) {
-            log.info("[AI-REASON] Best candidate {} composite={} < {} — no trade this cycle",
-                    best.candidate().getSymbol(),
-                    String.format("%.3f", best.composite()),
-                    String.format("%.3f", MIN_COMPOSITE));
-            return null;
-        }
-
-        // Log all reasoning for transparency
-        log.info("[AI-REASON] ✅ Selected: {} composite={} | {}",
+        log.info("[AI-REASON] ✅ Selected: {} rank={} | {}",
                 best.candidate().getSymbol(),
-                String.format("%.3f", best.composite()),
-                best.reasoning());
+                String.format("%.3f", best.composite()), best.reasoning());
+
         if (results.size() > 1) {
-            log.info("[AI-REASON] Rejected {} other candidates (scores: {})",
-                    results.size() - 1,
+            log.info("[AI-REASON] Others: {}",
                     results.subList(1, results.size()).stream()
-                            .map(r -> r.candidate().getSymbol() + "=" +
-                                    String.format("%.2f", r.composite()))
+                            .map(r -> r.candidate().getSymbol() + "=" + String.format("%.2f", r.composite()))
                             .toList());
         }
 
-        // Persist reasoning for learning
         persistReasoning(best);
-
         return best;
     }
 
@@ -353,7 +264,15 @@ public class AiReasoningEngine {
         // Volume trend — rising = conviction
         if (f[18] > 0) score += 0.2;
 
-        return Math.max(0.0, Math.min(1.0, score / 2.5)); // normalise
+        // f[21] = Relative Strength vs Nifty
+        // Stock outperforming index = genuine institutional interest, not just index drift
+        // Penalise stocks that are lagging the index — low quality setups
+        double rs = f[21];
+        if      (rs > 0.5)  score += 0.40; // strong outperformance (+1.5%+ vs Nifty)
+        else if (rs > 0.2)  score += 0.20; // mild outperformance
+        else if (rs < -0.3) score -= 0.20; // stock lagging index — avoid
+
+        return Math.max(0.0, Math.min(1.0, score / 2.9)); // normalise (increased denominator)
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -521,7 +440,16 @@ public class AiReasoningEngine {
         if ("LONG".equals(direction)  && emaStack > 0.5) score += 0.2;
         if ("SHORT".equals(direction) && emaStack < -0.5) score += 0.2;
 
-        return Math.max(0.0, Math.min(1.0, score / 1.8)); // normalise
+        // f[47] = Supply/Demand zone proximity
+        // LONG at demand zone = institutional backing below = strong SL quality
+        // LONG at supply zone = institutional selling above = weak setup
+        double sdZone = f[47];
+        if ("LONG".equals(direction)  && sdZone > 0.5)  score += 0.30; // at demand zone
+        if ("SHORT".equals(direction) && sdZone < -0.5) score += 0.30; // at supply zone
+        if ("LONG".equals(direction)  && sdZone < -0.5) score -= 0.25; // LONG at supply — risky
+        if ("SHORT".equals(direction) && sdZone > 0.5)  score -= 0.25; // SHORT at demand — risky
+
+        return Math.max(0.0, Math.min(1.0, score / 2.1)); // normalise (increased denominator)
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -555,13 +483,42 @@ public class AiReasoningEngine {
         // AI pattern confidence (f[59])
         score += f[59] * 0.3;
 
+        // ── Daily Pattern Features f[60-69] — HTF strict validation ──────
+        // f[60]=BOS  f[61]=CHOCH  f[62]=OrderBlock  f[63]=FVG  f[64]=AccumDist
+        // f[65]=Triple  f[66]=H&S  f[67]=Triangle  f[68]=Channel  f[69]=Trendline
+        // Each confirmed daily pattern that aligns with direction adds to score
+        String dir = candidate.getSuggestedDirection();
+        if (f.length > 69) {
+            int bullDaily = 0, bearDaily = 0;
+            for (int k = 60; k <= 69; k++) {
+                if (f[k] > 0.5)  bullDaily++;
+                if (f[k] < -0.5) bearDaily++;
+            }
+            if ("LONG".equals(dir)) {
+                score += Math.min(0.6, bullDaily * 0.15);  // up to +0.6 from aligned daily patterns
+                score -= Math.min(0.3, bearDaily * 0.10);  // penalty for contradicting daily patterns
+            } else {
+                score += Math.min(0.6, bearDaily * 0.15);
+                score -= Math.min(0.3, bullDaily * 0.10);
+            }
+            // BOS on daily = highest quality SMC signal
+            if ("LONG".equals(dir)  && f[60] > 0.8) score += 0.20;
+            if ("SHORT".equals(dir) && f[60] < -0.8) score += 0.20;
+            // CHOCH = trend change confirmed on daily
+            if ("LONG".equals(dir)  && f[61] > 0.8) score += 0.15;
+            if ("SHORT".equals(dir) && f[61] < -0.8) score += 0.15;
+            // Order Block = institutional level = strong SL backing
+            if ("LONG".equals(dir)  && f[62] > 0.8) score += 0.15;
+            if ("SHORT".equals(dir) && f[62] < -0.8) score += 0.15;
+        }
+
         // If no patterns at all — still possible to trade on pure momentum
         if (!sweepLow && !sweepHigh && !srFlip && !trendlineTouch) {
             // Pure momentum trade — lower but nonzero
             score = 0.35;
         }
 
-        return Math.max(0.0, Math.min(1.0, score / 2.0)); // normalise
+        return Math.max(0.0, Math.min(1.0, score / 3.5)); // normalise (expanded for new patterns)
     }
 
     // ═══════════════════════════════════════════════════════════════════════

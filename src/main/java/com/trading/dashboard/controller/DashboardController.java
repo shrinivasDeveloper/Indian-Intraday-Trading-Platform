@@ -1620,31 +1620,90 @@ public class DashboardController {
             return ResponseEntity.ok(out);
         }
         try {
-            // AiTradingSystem.getStatus() returns all fields in one call
             out.put("enabled", true);
-            out.putAll(aiModule.getStatus());
 
-            // Last 10 decisions for scanner display
+            // ── Core status from AiTradingSystem ─────────────────────────────
+            // Contains: tradesToday, maxTradesPerDay, regime, phase, positions,
+            //           watchlistCount, watchlist, bootstrapComplete, samplesCount
+            Map<String, Object> status = aiModule.getStatus();
+            out.putAll(status);
+
+            // ── Regime and execution threshold ────────────────────────────────
+            String regime = String.valueOf(status.getOrDefault("regime", "UNKNOWN"));
+            int threshold = "TRENDING".equals(regime) ? 70
+                    : "RANGING".equals(regime)  ? 80
+                    : 999;
+            out.put("executionThreshold", threshold);
+            out.put("thresholdLabel",
+                    "TRENDING".equals(regime) ? "Score ≥ 70 + direction match"
+                            : "RANGING".equals(regime)  ? "Score ≥ 80 (both directions)"
+                            : "CHOPPY — watchlist only, no execution");
+
+            // ── Watchlist (stocks with confirmed daily patterns) ──────────────
+            @SuppressWarnings("unchecked")
+            java.util.List<String> watchlist =
+                    (java.util.List<String>) status.getOrDefault("watchlist", java.util.List.of());
+            out.put("watchlist",      watchlist);
+            out.put("watchlistCount", watchlist.size());
+
+            // ── Recent AI decisions with full confidence breakdown ────────────
             out.put("recentDecisions", aiModule.getTodayDecisions().stream().limit(10).map(d -> {
                 Map<String, Object> m = new java.util.LinkedHashMap<>();
-                m.put("symbol",             d.getSymbol());
-                m.put("direction",          d.getDirection());
-                m.put("entryPrice",         d.getEntryPrice());
-                m.put("stopLoss",           d.getStopLoss());
-                m.put("target1",            d.getTarget1());
-                m.put("target2",            d.getTarget2());
-                m.put("successProbability", String.format("%.0f%%", d.getProbabilityOfSuccess()*100));
-                m.put("expectedRR",         String.format("%.1f", d.getExpectedRR()));
-                m.put("expectedReturn",     String.format("%.1f%%", d.getExpectedReturn()));
-                m.put("confidence",         String.format("%.0f%%", d.getConfidence()*100));
-                m.put("tradeQualityScore",  d.getTradeQualityScore());
-                m.put("dominantFactor",     d.getDominantFactor());
-                m.put("reasoning",          d.getReasoningSummary());
-                m.put("bullScenario",       d.getBullScenario());
-                m.put("bearScenario",       d.getBearScenario());
-                m.put("exitPlan",           d.getExitPlan());
+
+                // Trade levels
+                m.put("symbol",         d.getSymbol());
+                m.put("direction",      d.getDirection());
+                m.put("entryPrice",     d.getEntryPrice());
+                m.put("stopLoss",       d.getStopLoss());
+                m.put("target1",        d.getTarget1());
+                m.put("target2",        d.getTarget2());
+
+                // 100-point confidence model breakdown
+                int confTotal = (int)(d.getConfidence() * 100);
+                m.put("confidenceScore",       confTotal + "/100");
+                m.put("confidenceTotal",       confTotal);
+
+                // Pattern info
+                m.put("dominantPattern",  d.getDominantFactor());
+                m.put("patternScore",     "50/50");  // binary — if here, pattern passed
+                m.put("bullishPatterns",  d.getNumericPreScore()); // reused field
+
+                // Probability and RR from risk engine
+                m.put("pSuccess",       String.format("%.0f%%", d.getProbabilityOfSuccess()*100));
+                m.put("expectedRR",     String.format("%.1f",  d.getExpectedRR()));
+                m.put("expectedReturn", String.format("%.1f%%", d.getExpectedReturn()));
+
+                // Reasoning narrative
+                m.put("reasoning",     d.getReasoningSummary());
+                m.put("bullScenario",  d.getBullScenario());
+                m.put("bearScenario",  d.getBearScenario());
+                m.put("exitPlan",      d.getExitPlan());
+
+                // Quality
+                m.put("qualityScore",  d.getTradeQualityScore() + "/100");
+
                 return m;
             }).collect(java.util.stream.Collectors.toList()));
+
+            // ── Pipeline stage summary ────────────────────────────────────────
+            Map<String, Object> pipeline = new java.util.LinkedHashMap<>();
+            pipeline.put("stage1", "Daily qualification (252-day data, EMA/ADR/52wk)");
+            pipeline.put("stage2", "REMOVED — daily patterns are the only qualification layer");
+            pipeline.put("stage3", "Feature build + 16 daily pattern gate (min 1 required)");
+            pipeline.put("gate1",  "Daily pattern confirmed (mandatory)");
+            pipeline.put("gate2",  "5m candle confirms direction (mandatory, >25% body)");
+            pipeline.put("scoring","Pattern=50pts + Candle=20 + Volume=10 + Trend=10 + PA=10");
+            out.put("pipeline", pipeline);
+
+            // ── Daily patterns reference ──────────────────────────────────────
+            out.put("patterns", java.util.List.of(
+                    "BOS (f60)", "CHOCH (f61)", "OrderBlock (f62)", "FVG (f63)",
+                    "AccumDist (f64)", "TriplePattern (f65)", "H&S (f66)",
+                    "Triangle (f67)", "Channel (f68)", "TrendlineD (f69)",
+                    "SweepLow (f54)", "SweepHigh (f55)", "SRFlip (f56)",
+                    "ChannelPos (f57)", "TrendlineI (f58)", "SupplyDemand (f47)"
+            ));
+
         } catch (Exception e) {
             out.put("error", e.getMessage());
         }

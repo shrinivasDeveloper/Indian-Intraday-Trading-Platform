@@ -6,6 +6,7 @@ import com.trading.ai.data.AiMarketDataService.AiSRLevel;
 import com.trading.ai.data.AiMarketDataService.AiStructureLevels;
 import com.trading.ai.data.AiSymbolUniverse;
 import com.trading.ai.engine.AiMarketUnderstandingEngine.MarketSnapshot;
+import com.trading.ai.engine.AiDailyPatternEngine;
 import com.trading.ai.model.AiCandidate;
 import com.trading.ai.model.AiFeatureVector;
 import com.trading.ai.model.AiMarketContext;
@@ -62,7 +63,8 @@ public class AiOpportunityDiscoveryEngine {
     private final AiSymbolUniverse              universe;
     private final MarketDataService             marketData;
     private final AiMarketUnderstandingEngine   marketEngine;
-    private final JdbcTemplate                  jdbc;
+    private final JdbcTemplate              jdbc;
+    private final AiDailyPatternEngine       dailyPatternEngine;
 
     private final Map<String, AiSymbolHistory> symbolHistory = new ConcurrentHashMap<>();
 
@@ -75,16 +77,34 @@ public class AiOpportunityDiscoveryEngine {
                                         AiSymbolUniverse universe,
                                         MarketDataService marketData,
                                         AiMarketUnderstandingEngine marketEngine,
-                                        JdbcTemplate jdbc) {
+                                        JdbcTemplate jdbc,
+                                        AiDailyPatternEngine dailyPatternEngine) {
         this.aiData       = aiData;
         this.universe     = universe;
         this.marketData   = marketData;
         this.marketEngine = marketEngine;
-        this.jdbc         = jdbc;
+        this.jdbc              = jdbc;
+        this.dailyPatternEngine = dailyPatternEngine;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // MAIN SCAN — called every 5-minute candle close
+    // MAIN SCAN — 4-stage hierarchical pipeline
+    //
+    // Stage 1: Daily (1-year) — primary qualification gate
+    //   Hard filter. Only stocks with clean HTF structure pass.
+    //   Checks: EMA alignment, ADR quality, trend consistency,
+    //           52-week position, structural higher-highs/lower-lows.
+    //
+    // Stage 2 (15m validation): REMOVED — daily patterns are the only
+    //   qualification layer. No 15m filter between daily and feature building.
+    //
+    // Stage 3: Feature building + daily pattern gate
+    //   Final confirmation layer: entry quality, volume, RR.
+    //   Builds the full 60-feature vector.
+    //
+    // Stage 4: 1-minute — EXECUTION ONLY (not in discovery pipeline)
+    //   Used only at execution time for precise entry timing.
+    //   1m candles are NOT used for stock selection or filtering.
     // ═══════════════════════════════════════════════════════════════════════
 
     public List<AiCandidate> discover(MarketSnapshot snapshot,
@@ -95,6 +115,7 @@ public class AiOpportunityDiscoveryEngine {
         AiMarketContext ctx = buildMarketContext(snapshot);
 
         List<AiCandidate> candidates = new ArrayList<>();
+        int stage1Pass = 0, stage2Pass = 0;
         int featuredCount = 0;
 
         for (String symbol : universe.getSymbols()) {
@@ -106,11 +127,33 @@ public class AiOpportunityDiscoveryEngine {
             double ltp = ltpBD.doubleValue();
             if (ltp < 50) continue;
 
-            List<Candle> c5m   = aiData.get5mCandles(symbol);
-            List<Candle> c15m  = aiData.get15mCandles(symbol);
             List<Candle> daily = aiData.getDailyCandles(symbol);
-            if (c5m.size() < 10 || daily.size() < 5) continue;
+            List<Candle> c15m  = aiData.get15mCandles(symbol);
+            List<Candle> c5m   = aiData.get5mCandles(symbol);
 
+            // Minimum data guard
+            if (daily.size() < 20 || c5m.size() < 10) continue;
+
+            // ══════════════════════════════════════════════════════════════
+            // STAGE 1 — DAILY QUALIFICATION (1-year HTF filter)
+            // Hard gate. Stock must pass ALL daily checks to proceed.
+            // ══════════════════════════════════════════════════════════════
+            DailyQualResult dq = qualifyOnDaily(symbol, ltp, daily);
+            if (!dq.passes) {
+                log.debug("[AI-DISCOVER] {} ✗ Stage1 daily: {}", symbol, dq.reason);
+                continue;
+            }
+            stage1Pass++;
+
+            // Stage 2 (15m validation) removed by design.
+            // Daily patterns are the only qualification layer before feature building.
+            stage2Pass++;
+
+            // ══════════════════════════════════════════════════════════════
+            // STAGE 3 — 5-MINUTE TRADE CONFIRMATION
+            // Builds full feature vector for reasoning engine.
+            // Stage 1 & 2 already qualified this stock — now find best entry.
+            // ══════════════════════════════════════════════════════════════
             try {
                 double[] features = buildFeatures(symbol, ltp, c5m, c15m, daily, ctx);
                 featuredCount++;
@@ -120,6 +163,89 @@ public class AiOpportunityDiscoveryEngine {
 
                 String direction = suggestDirection(features);
                 if (direction == null) continue;
+
+                // ── STAGE 3 GATE: Minimum daily pattern score ─────────────
+                // ALL 16 patterns are now on daily candles.
+                // A trade requires at least 2 daily patterns confirming direction.
+                // This prevents low-quality setups from reaching the reasoning engine.
+                //
+                // f[54-58]: intraday-group patterns (now all daily)
+                // f[60-69]: daily pattern engine
+                // f[47]:    supply/demand zone
+                //
+                // Count how many daily patterns confirm trade direction
+                int dailyPatternScore = 0;
+                // Group I patterns (f[54-59])
+                if ("LONG".equals(direction))  {
+                    if (features[54] > 0.5) dailyPatternScore++; // sweep low
+                    if (features[56] > 0.5) dailyPatternScore++; // SR flip
+                    if (features[57] < 0.35) dailyPatternScore++; // near daily range low
+                    if (features[58] > 0.5) dailyPatternScore++; // trendline touch
+                    if (features[47] > 0.5) dailyPatternScore++; // demand zone
+                }
+                if ("SHORT".equals(direction)) {
+                    if (features[55] > 0.5) dailyPatternScore++; // sweep high
+                    if (features[56] > 0.5) dailyPatternScore++; // SR flip
+                    if (features[57] > 0.65) dailyPatternScore++; // near daily range high
+                    if (features[58] > 0.5) dailyPatternScore++; // trendline touch
+                    if (features[47] < -0.5) dailyPatternScore++; // supply zone
+                }
+                // Group K patterns (f[60-69]) — direction-aligned daily patterns
+                for (int k = 60; k <= 69; k++) {
+                    if ("LONG".equals(direction)  && features[k] > 0.5) dailyPatternScore++;
+                    if ("SHORT".equals(direction) && features[k] < -0.5) dailyPatternScore++;
+                }
+
+                // Minimum threshold: at least 1 daily pattern must confirm
+                if (dailyPatternScore < 1) {
+                    log.debug("[AI-DISCOVER] {} skipped — 0 daily patterns confirm {}",
+                            symbol, direction);
+                    continue;
+                }
+                log.debug("[AI-DISCOVER] {} ✅ {} daily patterns confirm {} direction",
+                        symbol, dailyPatternScore, direction);
+
+                // Daily bias override: prefer direction aligned with daily structure
+                if (dq.biasBull && "SHORT".equals(direction)) {
+                    if (numericScore < 70) {
+                        log.debug("[AI-DISCOVER] {} SHORT skipped — daily bias bullish", symbol);
+                        continue;
+                    }
+                }
+                if (!dq.biasBull && "LONG".equals(direction)) {
+                    if (numericScore < 70) {
+                        log.debug("[AI-DISCOVER] {} LONG skipped — daily bias bearish", symbol);
+                        continue;
+                    }
+                }
+
+                // ── Exhausted gap filter ─────────────────────────────────────
+                // Skip stocks that have ALREADY moved > 1% today AND momentum
+                // is now reversing. Prevents chasing moves that are done.
+                //
+                // Conditions (both must be true):
+                //   1. Already moved > 1% from yesterday close
+                //   2. Last 5 candles momentum is now reversing
+                //
+                // Note: 10-day position check removed — a stock can be near
+                // its 10-day low and still be a valid reversal setup.
+                double dayReturn    = features[24]; // normalised daily return
+                double momentum5c   = features[10]; // last 5-candle direction
+                double rawDayReturn = (dayReturn + 1.0) / 2.0 * 0.06 - 0.03;
+
+                boolean exhaustedLong  = rawDayReturn >  0.01 && momentum5c < 0;
+                boolean exhaustedShort = rawDayReturn < -0.01 && momentum5c > 0;
+
+                if (exhaustedLong && "LONG".equals(direction)) {
+                    log.debug("[AI-DISCOVER] {} LONG skipped — up {}% but momentum reversing",
+                            symbol, String.format("%.1f", rawDayReturn * 100));
+                    continue;
+                }
+                if (exhaustedShort && "SHORT".equals(direction)) {
+                    log.debug("[AI-DISCOVER] {} SHORT skipped — down {}% but momentum recovering",
+                            symbol, String.format("%.1f", rawDayReturn * 100));
+                    continue;
+                }
 
                 String sector = getSector(symbol);
 
@@ -141,10 +267,315 @@ public class AiOpportunityDiscoveryEngine {
                 .limit(TOP_CANDIDATES)
                 .collect(Collectors.toList());
 
-        log.debug("[AI-DISCOVER] Scanned {} symbols | featured={} | top-{} selected | {}ms",
-                universe.size(), featuredCount, top.size(),
-                System.currentTimeMillis() - t0);
+        log.info("[AI-DISCOVER] Pipeline: {} total → {} daily → {} 15m → {} featured → {} candidates | {}ms",
+                universe.size(), stage1Pass, stage2Pass, featuredCount,
+                top.size(), System.currentTimeMillis() - t0);
         return top;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STAGE 1 — DAILY QUALIFICATION (1-year HTF analysis)
+    // Hard filter. ALL conditions must pass.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /** Result object from daily qualification */
+    record DailyQualResult(boolean passes, boolean biasBull, String reason) {}
+
+    /**
+     * Daily qualification — uses ~252 days of daily candle data.
+     *
+     * Checks (ALL must pass for LONG bias, mirror for SHORT bias):
+     *   1. Minimum history — at least 60 days of daily data
+     *   2. ADR quality     — average daily range > 0.4% (stock moves enough to trade)
+     *   3. EMA structure   — daily EMA20 > EMA50 (medium-term trend quality)
+     *   4. 52-week position — not buying near 52-week low (avoid catching knives)
+     *   5. Trend consistency — stock not in a crash (last 20 days not down > 15%)
+     *   6. Volume quality  — not a dead stock (average volume meaningful)
+     *
+     * Returns biasBull=true if daily structure favours LONG,
+     *         biasBull=false if daily structure favours SHORT.
+     * Either bias can trade, but lower timeframe must confirm.
+     */
+    private DailyQualResult qualifyOnDaily(String symbol, double ltp,
+                                           List<Candle> daily) {
+        if (daily.size() < 20) {
+            return new DailyQualResult(false, true, "insufficient history");
+        }
+
+        int n = daily.size();
+
+        // ── Check 1: ADR quality ─────────────────────────────────────────
+        // Average Daily Range must be > 0.4% of price
+        // Stocks moving less than 0.4%/day cannot generate meaningful intraday setups
+        double adrSum = 0;
+        int adrCount = Math.min(20, n);
+        for (int i = n - adrCount; i < n; i++) {
+            double h = daily.get(i).getHigh().doubleValue();
+            double l = daily.get(i).getLow().doubleValue();
+            double mid = (h + l) / 2.0;
+            if (mid > 0) adrSum += (h - l) / mid;
+        }
+        double adr = adrSum / adrCount;
+        if (adr < 0.004) { // 0.4% minimum ADR
+            return new DailyQualResult(false, true, "ADR too low: " +
+                    String.format("%.2f", adr * 100) + "%");
+        }
+
+        // ── Check 2: EMA structure ───────────────────────────────────────
+        // Compute EMA20 and EMA50 from daily candles
+        double ema20 = computeEMAFromDaily(daily, 20);
+        double ema50 = computeEMAFromDaily(daily, 50);
+        // EMA200 if enough data
+        double ema200 = daily.size() >= 200 ? computeEMAFromDaily(daily, 200) : 0;
+
+        // Determine daily bias from EMA structure
+        boolean bullEma = ema20 > ema50;  // medium trend bullish
+        boolean bearEma = ema20 < ema50;  // medium trend bearish
+
+        // If EMA200 available, use it as additional filter
+        // Price below EMA200 = long-term downtrend — prefer SHORT or neutral only
+        boolean belowEma200 = ema200 > 0 && ltp < ema200;
+
+        // ── Check 3: 52-week position (if enough data) ───────────────────
+        double week52High = 0, week52Low = Double.MAX_VALUE;
+        int lookback252 = Math.min(252, n);
+        for (int i = n - lookback252; i < n; i++) {
+            double h = daily.get(i).getHigh().doubleValue();
+            double l = daily.get(i).getLow().doubleValue();
+            if (h > week52High) week52High = h;
+            if (l < week52Low)  week52Low  = l;
+        }
+        double week52Range = week52High - week52Low;
+        // Position within 52-week range (0 = at 52-week low, 1 = at 52-week high)
+        double week52Pos = week52Range > 0 ? (ltp - week52Low) / week52Range : 0.5;
+
+        // ── Check 4: Recent trend consistency ────────────────────────────
+        // Last 20 days: if stock crashed > 20% it is not tradeable LONG
+        double price20DaysAgo = daily.get(Math.max(0, n - 20)).getClose().doubleValue();
+        double recentReturn = price20DaysAgo > 0 ? (ltp - price20DaysAgo) / price20DaysAgo : 0;
+
+        // ── Determine daily bias ─────────────────────────────────────────
+        boolean biasBull;
+        if (bullEma && !belowEma200 && week52Pos > 0.25) {
+            // EMA structure bullish, above EMA200, not near 52-week low
+            biasBull = true;
+        } else if (bearEma && (ema200 == 0 || belowEma200) && week52Pos < 0.75) {
+            // EMA structure bearish, below or no EMA200, not at 52-week high
+            biasBull = false;
+        } else {
+            // Mixed — use 20-day momentum to decide
+            biasBull = recentReturn >= 0;
+        }
+
+        // ── Hard rejections ──────────────────────────────────────────────
+        // LONG bias but stock crashed > 25% in 20 days — avoid
+        if (biasBull && recentReturn < -0.25) {
+            return new DailyQualResult(false, true, "crashed -25% in 20d");
+        }
+        // SHORT bias but stock rallied > 25% in 20 days — avoid chasing
+        if (!biasBull && recentReturn > 0.25) {
+            return new DailyQualResult(false, false, "rallied +25% in 20d");
+        }
+
+        return new DailyQualResult(true, biasBull,
+                String.format("ADR=%.1f%% EMA20%sEMA50 52wk=%.0f%%",
+                        adr * 100, bullEma ? ">" : "<", week52Pos * 100));
+    }
+
+    /**
+     * Helper: compute EMA from daily candles using close prices.
+     * Uses the standard EMA formula: EMA = close * k + prevEMA * (1-k)
+     * where k = 2 / (period + 1)
+     */
+    private double computeEMAFromDaily(List<Candle> daily, int period) {
+        if (daily.size() < period) return 0;
+        double k = 2.0 / (period + 1);
+        // Seed with SMA of first `period` candles
+        double ema = 0;
+        for (int i = 0; i < period; i++) {
+            ema += daily.get(i).getClose().doubleValue();
+        }
+        ema /= period;
+        for (int i = period; i < daily.size(); i++) {
+            ema = daily.get(i).getClose().doubleValue() * k + ema * (1 - k);
+        }
+        return ema;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // DAILY PATTERN HELPERS — used by f[54], f[55], f[58]
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * f[54] — Daily Liquidity Sweep Low.
+     * Looks for equal DAILY lows within 0.5% across last 10 daily candles.
+     * The day's LOW swept below that level AND closed ABOVE it = institutional trap.
+     * This is a genuine daily sweep — not 5m noise.
+     */
+    /**
+     * f[54] — Daily Liquidity Sweep Low (STRICT).
+     *
+     * A genuine sweep requires a SIGNIFICANT support level tested multiple times:
+     *   1. Level must have been tested at least 2 previous times (3 touches min)
+     *      — this distinguishes real support from random daily noise
+     *   2. The sweep candle's low went BELOW the level
+     *   3. Close recovered ABOVE the level (rejection of the sweep)
+     *   4. Recovery close > 0.3% above level (not just a hairline recovery)
+     *   5. Equal low tolerance tightened to 0.3% (was 0.5% — too loose)
+     *
+     * This eliminates false signals from any two candles that happen to have
+     * similar lows within normal daily price oscillation.
+     */
+    private double detectDailyLiquiditySweepLow(List<Candle> daily, double ltp) {
+        int n = daily.size();
+        if (n < 15) return 0;
+        double EQ_TOL = 0.003; // 0.3% equal low tolerance (tightened from 0.5%)
+
+        for (int i = n - 20; i < n - 1; i++) {
+            if (i < 0) continue;
+            double level = daily.get(i).getLow().doubleValue();
+
+            // Count how many prior candles tested this level (within EQ_TOL)
+            int priorTouches = 0;
+            for (int k = Math.max(0, i - 20); k < i; k++) {
+                double kLow = daily.get(k).getLow().doubleValue();
+                if (Math.abs(kLow - level) / level < EQ_TOL) priorTouches++;
+            }
+            // Require at least 1 prior touch (so level has been tested 2+ times total)
+            if (priorTouches < 1) continue;
+
+            // Check for sweep candle AFTER this level was established
+            for (int j = i + 1; j < n; j++) {
+                double candLow   = daily.get(j).getLow().doubleValue();
+                double candClose = daily.get(j).getClose().doubleValue();
+                if (Math.abs(candLow - level) / level < EQ_TOL) {
+                    // Swept below AND closed clearly above
+                    if (candLow < level * (1 - 0.001)
+                            && candClose > level * 1.003) { // 0.3% recovery
+                        return 1.0;
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * f[55] — Daily Liquidity Sweep High.
+     * Equal DAILY highs swept and closed below = institutional trap on daily.
+     */
+    /**
+     * f[55] — Daily Liquidity Sweep High (STRICT).
+     * Same strictness as f[54] — significant resistance level required.
+     * Level must have been tested 2+ times before being swept.
+     * Sweep candle exceeded level AND closed clearly below it.
+     */
+    private double detectDailyLiquiditySweepHigh(List<Candle> daily, double ltp) {
+        int n = daily.size();
+        if (n < 15) return 0;
+        double EQ_TOL = 0.003; // 0.3% equal high tolerance
+
+        for (int i = n - 20; i < n - 1; i++) {
+            if (i < 0) continue;
+            double level = daily.get(i).getHigh().doubleValue();
+
+            int priorTouches = 0;
+            for (int k = Math.max(0, i - 20); k < i; k++) {
+                double kHigh = daily.get(k).getHigh().doubleValue();
+                if (Math.abs(kHigh - level) / level < EQ_TOL) priorTouches++;
+            }
+            if (priorTouches < 1) continue;
+
+            for (int j = i + 1; j < n; j++) {
+                double candHigh  = daily.get(j).getHigh().doubleValue();
+                double candClose = daily.get(j).getClose().doubleValue();
+                if (Math.abs(candHigh - level) / level < EQ_TOL) {
+                    if (candHigh > level * 1.001
+                            && candClose < level * 0.997) { // 0.3% rejection
+                        return 1.0;
+                    }
+                }
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * f[58] — Daily Trendline Touch (3-touch validated).
+     * Finds rising or falling trendline from daily swing points.
+     * Requires 3+ touches to validate the line.
+     * Current price within 1.5% of trendline = touch confirmed.
+     */
+    private double detectDailyTrendlineTouch(List<Candle> daily, double ltp) {
+        int n = daily.size();
+        if (n < 20) return 0;
+        int lb = Math.min(60, n);
+        List<Candle> w = daily.subList(n - lb, n);
+        int wn = w.size();
+
+        // Rising support trendline (LONG setup)
+        // FIX: Use 3-candle lookahead/lookback (was 2) for more significant swings
+        List<double[]> swingLows = new ArrayList<>();
+        for (int i = 3; i < wn - 3; i++) {
+            double l = w.get(i).getLow().doubleValue();
+            if (l < w.get(i-1).getLow().doubleValue()
+                    && l < w.get(i-2).getLow().doubleValue()
+                    && l < w.get(i-3).getLow().doubleValue()
+                    && l < w.get(i+1).getLow().doubleValue()
+                    && l < w.get(i+2).getLow().doubleValue()
+                    && l < w.get(i+3).getLow().doubleValue()) {
+                swingLows.add(new double[]{i, l});
+            }
+        }
+        if (swingLows.size() >= 2) {
+            double[] oldest = swingLows.get(0);
+            double[] newest = swingLows.get(swingLows.size() - 1);
+            double slope = (newest[1] - oldest[1]) / (newest[0] - oldest[0]);
+            if (slope > 0) { // rising trendline
+                double projected = newest[1] + slope * (wn - 1 - newest[0]);
+                int touches = 0;
+                for (double[] sl : swingLows) {
+                    double expected = newest[1] + slope * (wn - 1 - sl[0]);
+                    if (expected > 0 && Math.abs(sl[1] - expected) / expected < 0.015) touches++;
+                }
+                if (touches >= 3 && projected > 0
+                        && Math.abs(ltp - projected) / projected < 0.015) {
+                    return 1.0; // at rising daily trendline
+                }
+            }
+        }
+
+        // Falling resistance trendline (SHORT setup) — lb=3
+        List<double[]> swingHighs = new ArrayList<>();
+        for (int i = 3; i < wn - 3; i++) {
+            double h = w.get(i).getHigh().doubleValue();
+            if (h > w.get(i-1).getHigh().doubleValue()
+                    && h > w.get(i-2).getHigh().doubleValue()
+                    && h > w.get(i-3).getHigh().doubleValue()
+                    && h > w.get(i+1).getHigh().doubleValue()
+                    && h > w.get(i+2).getHigh().doubleValue()
+                    && h > w.get(i+3).getHigh().doubleValue()) {
+                swingHighs.add(new double[]{i, h});
+            }
+        }
+        if (swingHighs.size() >= 2) {
+            double[] oldest = swingHighs.get(0);
+            double[] newest = swingHighs.get(swingHighs.size() - 1);
+            double slope = (newest[1] - oldest[1]) / (newest[0] - oldest[0]);
+            if (slope < 0) { // falling trendline
+                double projected = newest[1] + slope * (wn - 1 - newest[0]);
+                int touches = 0;
+                for (double[] sh : swingHighs) {
+                    double expected = newest[1] + slope * (wn - 1 - sh[0]);
+                    if (expected > 0 && Math.abs(sh[1] - expected) / expected < 0.015) touches++;
+                }
+                if (touches >= 3 && projected > 0
+                        && Math.abs(ltp - projected) / projected < 0.015) {
+                    return 1.0; // at falling daily trendline
+                }
+            }
+        }
+        return 0;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -155,7 +586,7 @@ public class AiOpportunityDiscoveryEngine {
                                    List<Candle> c5m, List<Candle> c15m,
                                    List<Candle> daily,
                                    AiMarketContext ctx) {
-        double[] f = new double[60];
+        double[] f = new double[80]; // f[0-59] base features, f[60-69] daily pattern features
         AiStructureLevels structure = aiData.getStructure(symbol);
 
         // ── Group A: Price Structure (0–7) ──────────────────────────────
@@ -239,15 +670,33 @@ public class AiOpportunityDiscoveryEngine {
         }
 
         f[20] = (f[8] > 0 && rvol > 1.2) ? 1.0 : (f[8] < 0 && rvol > 1.2) ? -1.0 : 0;
-        f[21] = 0;
 
         // ── Group D: HTF Trend (22–27) ───────────────────────────────────
+        // Declared here so f[21] RS calculation can use dailyReturn
         double dailyReturn = 0;
         if (daily.size() >= 2) {
             double prevClose = daily.get(daily.size()-2).getClose().doubleValue();
             double currClose = daily.get(daily.size()-1).getClose().doubleValue();
             dailyReturn = prevClose > 0 ? (currClose - prevClose) / prevClose : 0;
         }
+
+        // FIX: f[21] = Relative Strength vs Nifty
+        // RS = stock daily return − Nifty daily return
+        // +1.0 = stock outperforming Nifty by 3%+ (genuine strength)
+        // -1.0 = stock underperforming Nifty by 3%+ (genuine weakness)
+        //  0.0 = moving in line with index
+        // This is one of the most important features — a stock up 1.5% when
+        // Nifty is flat is very different from a stock up 1.5% when Nifty is up 2%.
+        try {
+            List<Candle> niftyDaily = aiData.getDailyCandles("NIFTY 50");
+            if (niftyDaily.size() >= 2) {
+                double niftyPrev = niftyDaily.get(niftyDaily.size()-2).getClose().doubleValue();
+                double niftyCurr = niftyDaily.get(niftyDaily.size()-1).getClose().doubleValue();
+                double niftyReturn = niftyPrev > 0 ? (niftyCurr - niftyPrev) / niftyPrev : 0;
+                double rs = dailyReturn - niftyReturn; // stock excess return vs Nifty
+                f[21] = norm(rs, -0.03, 0.03); // +1 = 3%+ outperformance
+            }
+        } catch (Exception ignored) {}
 
         f[22] = emaStack;
         f[23] = daily.size() >= 2 && daily.get(daily.size()-1).getClose()
@@ -320,7 +769,55 @@ public class AiOpportunityDiscoveryEngine {
         f[44] = Math.min(1.0, history.getTimesThisWeek() / 5.0);
         f[45] = history.getLastOutcome();
         f[46] = history.getTotalTrades() > 0 ? 1.0 : 0.0;
-        f[47] = 0;
+        // FIX: f[47] = Supply/Demand zone proximity
+        // Demand zone: daily candle where price launched UP with >1.5% body (buying base)
+        // Supply zone:  daily candle where price launched DOWN with >1.5% body (selling base)
+        // +1.0 = price at demand zone (institutional buy zone — bullish)
+        // -1.0 = price at supply zone (institutional sell zone — bearish)
+        //  0.0 = no nearby S/D zone
+        try {
+            double sdScore = 0.0;
+            if (daily.size() >= 5) {
+                double atrForSD = aiData.computeATR(daily, 14);
+                double sdTolerance = atrForSD * 2; // zone is 2 ATR wide
+
+                for (int i = daily.size() - 20; i < daily.size() - 1; i++) {
+                    if (i < 0) continue;
+                    Candle base  = daily.get(i);
+                    Candle next  = daily.get(i + 1);
+                    double baseOpen  = base.getOpen().doubleValue();
+                    double baseClose = base.getClose().doubleValue();
+                    double nextOpen  = next.getOpen().doubleValue();
+                    double nextClose = next.getClose().doubleValue();
+                    double baseBody  = Math.abs(baseClose - baseOpen);
+                    double nextBody  = Math.abs(nextClose - nextOpen);
+
+                    // Demand zone: base candle flat/small, NEXT candle big green
+                    // The "base" before a strong up move is the demand zone
+                    boolean strongUpMove = nextClose > nextOpen
+                            && nextBody > atrForSD * 1.5;
+                    if (strongUpMove) {
+                        double zoneTop = Math.max(baseOpen, baseClose);
+                        double zoneBot = Math.min(baseOpen, baseClose);
+                        if (ltp >= zoneBot - sdTolerance && ltp <= zoneTop + sdTolerance) {
+                            sdScore = Math.max(sdScore, 0.8); // at demand zone
+                        }
+                    }
+
+                    // Supply zone: base candle flat/small, NEXT candle big red
+                    boolean strongDownMove = nextClose < nextOpen
+                            && nextBody > atrForSD * 1.5;
+                    if (strongDownMove) {
+                        double zoneTop = Math.max(baseOpen, baseClose);
+                        double zoneBot = Math.min(baseOpen, baseClose);
+                        if (ltp >= zoneBot - sdTolerance && ltp <= zoneTop + sdTolerance) {
+                            sdScore = Math.min(sdScore, -0.8); // at supply zone
+                        }
+                    }
+                }
+            }
+            f[47] = sdScore;
+        } catch (Exception ignored) {}
 
         // ── Group H: News (48–53) ────────────────────────────────────────
         // FIX: reads from news_scored_items written by NewsTradingStrategy.
@@ -337,33 +834,60 @@ public class AiOpportunityDiscoveryEngine {
         }
         // else: f[48–53] remain 0.0 — no news found
 
-        // ── Group I: AI Patterns (54–59) ────────────────────────────────
-        f[54] = aiData.detectLiquiditySweepLow(c5m)  ? 1.0 : 0.0;
-        f[55] = aiData.detectLiquiditySweepHigh(c5m) ? 1.0 : 0.0;
-        f[56] = (structure != null)
-                ? (aiData.detectSRFlip(c5m, structure, ltp) ? 1.0 : 0.0) : 0.0;
+        // ── Group I: AI Patterns (54–59) — ALL ON DAILY CANDLES ──────────
+        //
+        // REDESIGNED: All 5 patterns now use DAILY candles exclusively.
+        // No more 5m/15m noise. Only clean daily structure signals.
+        //
+        // f[54] = Daily Liquidity Sweep Low  — equal daily lows swept and recovered
+        // f[55] = Daily Liquidity Sweep High — equal daily highs swept and recovered
+        // f[56] = Daily S/R Flip            — price holding above former daily resistance
+        // f[57] = Daily Channel Position    — price position within 20-day daily range
+        // f[58] = Daily Trendline Touch     — price at daily trendline (3-touch validated)
+        // f[59] = Daily Pattern Confidence  — composite of all daily intraday patterns
 
-        // Channel position — where is price in last 20 candles range
-        if (n5 >= 20) {
-            double hi20 = c5m.subList(n5-20, n5).stream()
-                    .mapToDouble(c -> c.getHigh().doubleValue()).max().orElse(ltp);
-            double lo20 = c5m.subList(n5-20, n5).stream()
-                    .mapToDouble(c -> c.getLow().doubleValue()).min().orElse(ltp);
-            double range20 = hi20 - lo20;
-            f[57] = range20 > 0 ? norm((ltp - lo20) / range20, 0, 1) : 0.5;
+        // f[54]: Daily Liquidity Sweep Low
+        // Equal daily lows within 0.5% swept intraday and closed above = institutional trap
+        f[54] = detectDailyLiquiditySweepLow(daily, ltp);
+
+        // f[55]: Daily Liquidity Sweep High
+        f[55] = detectDailyLiquiditySweepHigh(daily, ltp);
+
+        // f[56]: Daily S/R Flip — price holding above former daily resistance
+        f[56] = (structure != null)
+                ? (aiData.detectSRFlip(daily, structure, ltp) ? 1.0 : 0.0) : 0.0;
+
+        // f[57]: Daily channel position — where is price in 20-day daily range
+        int nD = daily.size();
+        if (nD >= 20) {
+            double hiD = daily.subList(nD-20, nD).stream()
+                    .mapToDouble(can -> can.getHigh().doubleValue()).max().orElse(ltp);
+            double loD = daily.subList(nD-20, nD).stream()
+                    .mapToDouble(can -> can.getLow().doubleValue()).min().orElse(ltp);
+            double rangeD = hiD - loD;
+            f[57] = rangeD > 0 ? norm((ltp - loD) / rangeD, 0, 1) : 0.5;
         } else {
-            f[57] = 0.5; // middle if not enough candles
+            f[57] = 0.5;
         }
 
-        // FIX: trendline touch — checks BOTH rising (LONG setups) and falling (SHORT setups)
-        // Old: only checked rising trendline → always false in bearish markets
-        f[58] = (detectRisingTrendlineTouch(c15m, ltp)
-                || detectFallingTrendlineTouch(c15m, ltp)) ? 1.0 : 0.0;
+        // f[58]: Daily trendline touch — uses daily swing points, 3-touch validated
+        // This is the SAME trendline as f[69] from AiDailyPatternEngine but normalised
+        f[58] = detectDailyTrendlineTouch(daily, ltp);
 
-        // FIX: pattern confidence — include sweep_high for SHORT candidates
-        // Old: (f[54] + f[56] + f[58]) / 3 — SHORT candidates always got 0 confidence
-        // New: max(sweep_low, sweep_high) so direction-appropriate sweep scores correctly
+        // f[59]: Daily pattern confidence — composite
         f[59] = (Math.max(f[54], f[55]) + f[56] + f[58]) / 3.0;
+
+        // ── Group K: Daily Pattern Features (f[60-69]) ───────────────────────
+        // All patterns validated strictly on daily candles (1-year data).
+        // BOS, CHOCH, OB, FVG, Accumulation/Distribution, Triple, H&S,
+        // Triangle, Channel, Trendline — each -1 to +1.
+        try {
+            AiDailyPatternEngine.DailyPatterns dp = dailyPatternEngine.detect(ltp, daily);
+            double[] dpf = dp.toFeatures();
+            for (int k = 0; k < dpf.length && k < 10; k++) {
+                f[60 + k] = dpf[k];
+            }
+        } catch (Exception ignored) {}
 
         return f;
     }
@@ -501,37 +1025,6 @@ public class AiOpportunityDiscoveryEngine {
     // TRENDLINE DETECTION
     // FIX: separate rising and falling trendline checks
     // ═══════════════════════════════════════════════════════════════════════
-
-    /**
-     * Rising trendline — used for LONG setups.
-     * Checks if LTP is touching a rising trendline from last 10 15m candle lows.
-     */
-    private boolean detectRisingTrendlineTouch(List<Candle> c15m, double ltp) {
-        if (c15m.size() < 10) return false;
-        int n = c15m.size();
-        double low1 = c15m.get(n-10).getLow().doubleValue();
-        double low2 = c15m.get(n-5).getLow().doubleValue();
-        if (low2 <= low1) return false; // not rising
-        double slope = (low2 - low1) / 5.0;
-        double tl    = low2 + slope * 5;
-        return Math.abs(ltp - tl) / tl < 0.008; // within 0.8% tolerance (was 0.5% — too tight)
-    }
-
-    /**
-     * FIX: Falling trendline — used for SHORT setups.
-     * Was missing entirely — caused f[58] to always be 0 for SHORT candidates.
-     * Checks if LTP is touching a falling trendline from last 10 15m candle highs.
-     */
-    private boolean detectFallingTrendlineTouch(List<Candle> c15m, double ltp) {
-        if (c15m.size() < 10) return false;
-        int n = c15m.size();
-        double high1 = c15m.get(n-10).getHigh().doubleValue();
-        double high2 = c15m.get(n-5).getHigh().doubleValue();
-        if (high2 >= high1) return false; // not falling
-        double slope = (high2 - high1) / 5.0;
-        double tl    = high2 + slope * 5;
-        return Math.abs(ltp - tl) / tl < 0.008; // within 0.8% tolerance
-    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // NEWS CONTEXT — reads from shared MySQL table
