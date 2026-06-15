@@ -1640,9 +1640,12 @@ public class DashboardController {
                             : "CHOPPY — watchlist only, no execution");
 
             // ── Watchlist (stocks with confirmed daily patterns) ──────────────
+            // ── Watchlist already included via out.putAll(status) above ──────────
+            // watchlist is now List<Map<symbol,pattern>> — no cast needed
+            // Just ensure watchlistCount is correct
             @SuppressWarnings("unchecked")
-            java.util.List<String> watchlist =
-                    (java.util.List<String>) status.getOrDefault("watchlist", java.util.List.of());
+            java.util.List<?> watchlist =
+                    (java.util.List<?>) status.getOrDefault("watchlist", java.util.List.of());
             out.put("watchlist",      watchlist);
             out.put("watchlistCount", watchlist.size());
 

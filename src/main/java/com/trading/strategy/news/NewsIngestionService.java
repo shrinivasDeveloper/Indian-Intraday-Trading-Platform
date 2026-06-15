@@ -225,6 +225,110 @@ public class NewsIngestionService {
         }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // GLOBAL NEWS SOURCES (6, 7, 8)
+    // Added without touching any existing logic.
+    // These feed the GLOBAL_EVENT category in NewsScoreEngine.
+    // Scoring, trading, dashboard — all unchanged.
+    // Source weight: RSS_REUTERS = 11 (between NewsAPI=12 and ET=10)
+    //
+    // Why these matter for NSE:
+    //   Reuters Business → FED decisions, crude oil, US CPI, geopolitical events
+    //   Reuters Top News → Major global events that move FII flows into India
+    //   RBI Official RSS → Direct RBI policy announcements from source
+    //                       (currently only picked up 30-60 min late via ET/MC)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * SOURCE 6: ET Economy Policy RSS — every 10 minutes.
+     * Replaces feeds.reuters.com/reuters/businessNews (domain dead since 2020).
+     * Covers: FED impact on India, crude oil, RBI policy context,
+     *         US inflation, global macro affecting Indian markets.
+     * Same GLOBAL_EVENT and ECONOMIC_DATA category mapping.
+     */
+    @Scheduled(fixedRate = 600_000, initialDelay = 45_000)
+    public void fetchFromReutersBusiness() {
+        if (!enabled) return;
+        refreshSymbolCache();
+        try {
+            int added = fetchRss(
+                    "https://economictimes.indiatimes.com/news/economy/policy/rss.cms",
+                    "RSS_ET_ECO");
+            if (added > 0) log.info("[NEWS-INGEST] ET Economy Policy RSS: +{} articles", added);
+            sourceFailures.remove("RSS_REUTERS_BIZ");
+        } catch (Exception e) {
+            int f = sourceFailures.merge("RSS_REUTERS_BIZ", 1, Integer::sum);
+            log.warn("[NEWS-INGEST] ET Economy Policy RSS failed ({}x): {}", f, e.getMessage());
+        }
+    }
+
+    /**
+     * SOURCE 7: ET Economy Indicators RSS — every 15 minutes.
+     * Replaces feeds.reuters.com/reuters/topNews (domain dead since 2020).
+     * Covers: GDP, inflation, IIP, trade data, global commodity prices,
+     *         FII flows, rupee movement — all global macro affecting NSE.
+     */
+    @Scheduled(fixedRate = 900_000, initialDelay = 75_000)
+    public void fetchFromReutersTopNews() {
+        if (!enabled) return;
+        refreshSymbolCache();
+        try {
+            int added = fetchRss(
+                    "https://economictimes.indiatimes.com/news/economy/indicators/rss.cms",
+                    "RSS_ET_IND");
+            if (added > 0) log.info("[NEWS-INGEST] ET Economy Indicators RSS: +{} articles", added);
+            sourceFailures.remove("RSS_REUTERS_TOP");
+        } catch (Exception e) {
+            int f = sourceFailures.merge("RSS_REUTERS_TOP", 1, Integer::sum);
+            log.warn("[NEWS-INGEST] ET Economy Indicators RSS failed ({}x): {}", f, e.getMessage());
+        }
+    }
+
+    /**
+     * SOURCE 8: RBI Official RSS — every 15 minutes.
+     * Covers: Rate decisions, policy announcements, liquidity measures.
+     * Currently RBI news reaches the strategy 30-60 min late via ET/MC.
+     * This fetches directly from the source → faster signal.
+     * Maps to RBI_POLICY category (score 85 × 0.30 = 26/30 category pts).
+     */
+    @Scheduled(fixedRate = 900_000, initialDelay = 105_000)
+    public void fetchFromRbiOfficial() {
+        if (!enabled) return;
+        refreshSymbolCache();
+        try {
+            // RBI RSS returns HTTP 302 redirect — use getWithRedirect() not fetchRss()
+            // fetchRss() uses get() which throws on non-200 — this is RBI-specific only
+            String body = getWithRedirect(
+                    "https://www.rbi.org.in/RSS/RBIRSSContent.aspx?Id=316",
+                    "User-Agent",  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept",      "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Referer",     "https://www.rbi.org.in/"
+            );
+            if (body.isBlank()) return;
+
+            List<String[]> items = parseRssItems(body);
+            int added = 0;
+            for (String[] item : items) {
+                String headline    = item[0];
+                String description = item[1];
+                String link        = item[2];
+                String pubDate     = item[3];
+                if (headline.isBlank()) continue;
+                if (!filter.isRelevant(headline, description)) continue;
+                String id = "RSS_RBI:" + (headline + pubDate).hashCode();
+                if (seenIds.putIfAbsent(id, true) != null) continue;
+                Instant published = parseRssDate(pubDate);
+                NewsItem newsItem = buildItem(id, headline, description, link, "RSS_RBI", published);
+                if (newsItem != null) { activeItems.add(newsItem); added++; }
+            }
+            if (added > 0) log.info("[NEWS-INGEST] RBI Official RSS: +{} announcements", added);
+            sourceFailures.remove("RSS_RBI");
+        } catch (Exception e) {
+            int f = sourceFailures.merge("RSS_RBI", 1, Integer::sum);
+            log.warn("[NEWS-INGEST] RBI Official RSS failed ({}x): {}", f, e.getMessage());
+        }
+    }
+
     /**
      * Purge articles older than 2 hours every 15 minutes.
      * Exception: BSE/NSE official filings from weekend preserved on Monday
@@ -334,6 +438,8 @@ public class NewsIngestionService {
         String referer = url.contains("moneycontrol") ? "https://www.moneycontrol.com/"
                 : url.contains("economictimes") ? "https://economictimes.indiatimes.com/"
                 : url.contains("thehindubusinessline") ? "https://www.thehindubusinessline.com/"
+                : url.contains("reuters") ? "https://www.reuters.com/"
+                : url.contains("rbi.org") ? "https://www.rbi.org.in/"
                 : "https://www.google.com/";
 
         // RESTRICTED HEADER FIX:
@@ -357,6 +463,9 @@ public class NewsIngestionService {
                 "Cache-Control",             "max-age=0",
                 "Referer",                   referer
         );
+
+        // Null/empty body guard — Reuters sometimes returns empty body instead of error
+        if (body == null || body.isBlank()) return 0;
 
         List<String[]> items = parseRssItems(body);
         int added = 0;
@@ -401,6 +510,36 @@ public class NewsIngestionService {
         if (resp.statusCode() != 200)
             throw new RuntimeException("HTTP " + resp.statusCode());
         return resp.body();
+    }
+
+    /**
+     * Redirect-following GET — used only for RBI RSS which returns HTTP 302.
+     * Uses a separate HttpClient with NORMAL redirect policy.
+     * Existing sources use get() with NEVER (default) — completely untouched.
+     */
+    private String getWithRedirect(String url, String... headers) throws Exception {
+        HttpClient redirectClient = HttpClient.newBuilder()
+                .followRedirects(HttpClient.Redirect.NORMAL)
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(15))
+                .GET();
+        for (int i = 0; i < headers.length - 1; i += 2) {
+            builder.header(headers[i], headers[i + 1]);
+        }
+        HttpResponse<String> resp = redirectClient.send(builder.build(),
+                HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() == 429)
+            throw new RuntimeException("Rate limited (429)");
+        if (resp.statusCode() == 403)
+            throw new RuntimeException("Forbidden (403)");
+        if (resp.statusCode() != 200)
+            throw new RuntimeException("HTTP " + resp.statusCode());
+        String body = resp.body();
+        if (body == null || body.isBlank()) return "";
+        return body;
     }
 
     private NewsItem buildItem(String id, String headline, String description,

@@ -303,6 +303,15 @@ public class NewsKeywordFilter {
                         combined.contains("share") || combined.contains("market") ||
                         combined.contains("equity") || combined.contains("rupee") ||
                         combined.contains("rbi") || combined.contains("sebi") ||
+                        // Global keywords that directly move Indian markets
+                        // Added for Reuters/RBI sources — FED, crude oil, dollar
+                        // always impact NSE through FII flows and commodity prices
+                        combined.contains("federal reserve") || combined.contains("fed rate") ||
+                        combined.contains("crude oil") || combined.contains("brent crude") ||
+                        combined.contains("usd inr") || combined.contains("usd/inr") ||
+                        combined.contains("dollar index") || combined.contains("dollar surges") ||
+                        combined.contains("dollar falls") || combined.contains("dollar weakens") ||
+                        combined.contains("us inflation") || combined.contains("us jobs") ||
                         isEarningsRelated(combined) || isMacroRelated(combined);
 
         return hasFinanceKeyword;

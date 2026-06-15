@@ -88,7 +88,7 @@ public class AiReasoningEngine {
 
     /**
      * Reason about ALL candidates together and return the single best one.
-     * Returns null if no candidate meets the composite threshold.
+     * Returns null only if candidates list is empty.
      *
      * @param candidates  candidates that passed risk assessment
      * @param decisions   their corresponding risk decisions (SL/T1/T2 computed)
@@ -139,6 +139,9 @@ public class AiReasoningEngine {
 
         results.sort(Comparator.comparingDouble(AiReasoningResult::composite).reversed());
         AiReasoningResult best = results.get(0);
+
+        // No minimum threshold — all candidates were already qualified upstream
+        // by the confidence engine (score >= 70 or >= 80). Best always proceeds.
 
         log.info("[AI-REASON] ✅ Selected: {} rank={} | {}",
                 best.candidate().getSymbol(),
@@ -356,34 +359,38 @@ public class AiReasoningEngine {
                                       AiCandidate candidate) {
         double score = 0;
 
-        // Session window quality
-        int hour   = now.getHour();
-        int minute = now.getMinute();
-        int totalMin = hour * 60 + minute;
+        // ── Session window quality — NSE intraday trading windows ─────────
+        // Matches exactly the trading window quality tiers:
+        //   9:30 – 11:00 ← PRIME      highest momentum, patterns fresh
+        //   11:00 – 12:30 ← GOOD      trend established, volume active
+        //   12:30 – 13:30 ← MODERATE  lunch zone, spreads widen
+        //   13:30 – 14:40 ← ACCEPTABLE late session, closing momentum
+        //   14:40+ ← BLOCKED           window closed in Gate 2
 
-        // Best windows for NSE intraday
-        if      (totalMin >= 570 && totalMin < 630)  score += 1.0; // 9:30-10:30 best
-        else if (totalMin >= 630 && totalMin < 690)  score += 0.85; // 10:30-11:30 good
-        else if (totalMin >= 690 && totalMin < 750)  score += 0.40; // 11:30-12:30 lunch
-        else if (totalMin >= 750 && totalMin < 810)  score += 0.75; // 12:30-13:30 afternoon
-        else if (totalMin >= 810)                    score += 0.20; // after 13:30 avoid
+        int totalMin = now.getHour() * 60 + now.getMinute();
 
-        // Pattern age — how many candles since signal fired
+        if      (totalMin >= 570 && totalMin < 660)  score += 1.00; // 9:30-11:00  PRIME
+        else if (totalMin >= 660 && totalMin < 750)  score += 0.85; // 11:00-12:30 GOOD
+        else if (totalMin >= 750 && totalMin < 810)  score += 0.50; // 12:30-13:30 MODERATE
+        else if (totalMin >= 810 && totalMin < 880)  score += 0.25; // 13:30-14:40 ACCEPTABLE
+        else                                         score += 0.00; // outside window
+
+        // ── Pattern age — how many candles since pattern formed ───────────
+        // Fresh patterns score higher — stale patterns risk entry after move
         int patternAge = computePatternAgeCandles(candidate);
         if      (patternAge <= 1) score += 0.5;  // fresh — best
         else if (patternAge <= 2) score += 0.3;  // acceptable
         else if (patternAge <= 4) score += 0.1;  // getting stale
-        else                     score += 0.0;   // stale — bad timing
+        else                     score += 0.0;   // stale — avoid
 
-        // RSI timing — avoid extremes
-        double rsi = f[13]; // normalised RSI
-        // f[13] is normalised, so 0.5 = RSI 50, 0.7 = RSI 70 roughly
+        // ── RSI timing — avoid entering at extremes ───────────────────────
+        double rsi = f[13]; // normalised RSI (0=oversold, 1=overbought)
         if (rsi > 0.8 && "LONG".equals(candidate.getSuggestedDirection()))
-            score -= 0.3; // overbought for longs
+            score -= 0.3; // overbought — longs risky
         if (rsi < 0.2 && "SHORT".equals(candidate.getSuggestedDirection()))
-            score -= 0.3; // oversold for shorts
+            score -= 0.3; // oversold — shorts risky
 
-        return Math.max(0.0, Math.min(1.0, score / 1.5)); // normalise
+        return Math.max(0.0, Math.min(1.0, score / 1.5)); // normalise to 0-1
     }
 
     private int computePatternAgeCandles(AiCandidate candidate) {

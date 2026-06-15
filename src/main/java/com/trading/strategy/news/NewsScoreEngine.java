@@ -46,11 +46,14 @@ public class NewsScoreEngine {
 
     // Source credibility weights
     private static final Map<String, Integer> SOURCE_WEIGHTS = Map.of(
-            "BSE",      15,   // official corporate filings — highest credibility
-            "NEWSAPI",  12,   // curated news aggregator
-            "RSS_ET",   10,   // Economic Times — reputable
-            "RSS_MC",    9,   // Moneycontrol — reputable
-            "UNKNOWN",   5
+            "BSE",         15,   // official corporate filings — highest credibility
+            "NEWSAPI",     12,   // curated news aggregator
+            "RSS_REUTERS", 11,   // Reuters — global source, high credibility
+            "RSS_ET",      10,   // Economic Times — reputable
+            "RSS_RBI",     10,   // RBI official — policy source
+            "RSS_MC",       9,   // Moneycontrol — reputable
+            "RSS_HBL",      8,   // Hindu Business Line
+            "UNKNOWN",      5
     );
 
     /**

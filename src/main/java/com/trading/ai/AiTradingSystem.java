@@ -94,20 +94,33 @@ public class AiTradingSystem {
 
     // ── State ─────────────────────────────────────────────────────────────
     private final Set<String>      firedToday     = ConcurrentHashMap.newKeySet();
-    private final Set<String>      watchlist      = ConcurrentHashMap.newKeySet();
+    // symbol → dominant pattern name (e.g. "BANDHANBNK" → "Liq. Sweep")
+    private final Map<String, String> watchlist   = new ConcurrentHashMap<>();
     private final AtomicInteger    tradesToday     = new AtomicInteger(0);
     private final AtomicBoolean    cycleRunning    = new AtomicBoolean(false);
     private final List<AiTradeDecision> todayDecisions = Collections.synchronizedList(new ArrayList<>());
     private volatile String        currentRegime   = "UNKNOWN";
     private volatile long          lastCycleMs     = 0;
-    private volatile String        lastCycleSlot   = "";  // e.g. "09:30" — prevent duplicate cycles per slot
+    private volatile String        lastCycleSlot   = "";
+
+    // ── Window trade tracking — max 2 trades per time window ──────────────
+    // Keys: "PRIME", "GOOD", "MODERATE", "ACCEPTABLE"
+    private final Map<String, AtomicInteger> tradesPerWindow = new ConcurrentHashMap<>(
+            java.util.Map.of(
+                    "PRIME",      new AtomicInteger(0),
+                    "GOOD",       new AtomicInteger(0),
+                    "MODERATE",   new AtomicInteger(0),
+                    "ACCEPTABLE", new AtomicInteger(0)
+            )
+    );
+    private static final int MAX_TRADES_PER_WINDOW = 2;
 
     // ── Configuration ─────────────────────────────────────────────────────
     @Value("${ai.trading.max-trades-per-day:5}")
     private int maxTradesPerDay;
 
-    @Value("${ai.trading.max-concurrent:2}")
-    private int maxConcurrent;
+    @Value("${ai.trading.max-concurrent:4}")
+    private int maxConcurrent;  // max 4 open positions — when any closes, next fires immediately
 
     // ── Trade window ──────────────────────────────────────────────────────
     private static final LocalTime WINDOW_OPEN  = LocalTime.of(9,  30);
@@ -227,6 +240,20 @@ public class AiTradingSystem {
             return;
         }
 
+        // Gate 3.5: Window trade cap — max 2 trades per time window
+        // Each window (PRIME/GOOD/MODERATE/ACCEPTABLE) allows max 2 trades.
+        // Prevents clustering all 5 trades into one window.
+        // When window changes, counter resets and 2 more trades allowed.
+        String currentWindow = getTradeWindow(now);
+        if (currentWindow != null) {
+            AtomicInteger windowCount = tradesPerWindow.get(currentWindow);
+            if (windowCount != null && windowCount.get() >= MAX_TRADES_PER_WINDOW) {
+                log.debug("[AI-SYSTEM] Window cap reached — {}: {}/{} trades. Waiting for next window.",
+                        currentWindow, windowCount.get(), MAX_TRADES_PER_WINDOW);
+                return;
+            }
+        }
+
         // Gate 4: Concurrent position cap — checks BOTH AI internal + platform
         // AI internal: tradeManager tracks AI positions for learning/history
         // Platform: riskManagement tracks ALL active positions across all strategies
@@ -302,7 +329,9 @@ public class AiTradingSystem {
 
             // Add to watchlist if any patterns detected (even below threshold)
             if (conf.bullishPatterns() + conf.bearishPatterns() > 0) {
-                watchlist.add(candidate.getSymbol());
+                // Store pattern name with symbol for watchlist display
+                String dp = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
+                watchlist.put(candidate.getSymbol(), dp);
             }
 
             // Log watchlist entry
@@ -336,13 +365,13 @@ public class AiTradingSystem {
                 if (marketBull && "SHORT".equals(stockDir)) {
                     log.debug("[AI-SYSTEM] {} SHORT skipped — TRENDING market is BULLISH, no counter-trend",
                             candidate.getSymbol());
-                    watchlist.add(candidate.getSymbol()); // keep on watchlist
+                    watchlist.put(candidate.getSymbol(), conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern");
                     continue;
                 }
                 if (marketBear && "LONG".equals(stockDir)) {
                     log.debug("[AI-SYSTEM] {} LONG skipped — TRENDING market is BEARISH, no counter-trend",
                             candidate.getSymbol());
-                    watchlist.add(candidate.getSymbol()); // keep on watchlist
+                    watchlist.put(candidate.getSymbol(), conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern");
                     continue;
                 }
                 if (!marketBull && !marketBear) {
@@ -443,6 +472,13 @@ public class AiTradingSystem {
                 tradesToday.incrementAndGet();
                 firedToday.add(enriched.getSymbol());
                 todayDecisions.add(enriched);
+                // Increment window counter
+                String w = getTradeWindow(LocalTime.now(ZoneId.of("Asia/Kolkata")));
+                if (w != null && tradesPerWindow.containsKey(w)) {
+                    tradesPerWindow.get(w).incrementAndGet();
+                    log.info("[AI-SYSTEM] Window {} trades: {}/{}", w,
+                            tradesPerWindow.get(w).get(), MAX_TRADES_PER_WINDOW);
+                }
 
                 log.info("[AI-SYSTEM] ✅ TRADE #{} | {} {} | composite={} " +
                                 "env={} move={} fund={} time={} pattern={} rr={} " +
@@ -617,10 +653,30 @@ public class AiTradingSystem {
     // DAILY RESET — midnight
     // ═══════════════════════════════════════════════════════════════════════
 
+    /**
+     * Returns the current trade window name based on IST time.
+     * Returns null if outside trading hours.
+     *
+     *  9:30 – 11:00 → PRIME      (highest momentum, patterns fresh)
+     * 11:00 – 12:30 → GOOD       (trend established, volume active)
+     * 12:30 – 13:30 → MODERATE   (lunch zone, spreads widen)
+     * 13:30 – 14:40 → ACCEPTABLE (late session, closing momentum)
+     * Outside these  → null      (window blocked)
+     */
+    private String getTradeWindow(LocalTime t) {
+        int m = t.getHour() * 60 + t.getMinute();
+        if (m >= 570 && m < 660) return "PRIME";       // 9:30-11:00
+        if (m >= 660 && m < 750) return "GOOD";        // 11:00-12:30
+        if (m >= 750 && m < 810) return "MODERATE";    // 12:30-13:30
+        if (m >= 810 && m < 880) return "ACCEPTABLE";  // 13:30-14:40
+        return null; // outside window — Gate 2 already blocks this
+    }
+
     @Scheduled(cron = "0 0 0 * * *", zone = "Asia/Kolkata")
     public void dailyReset() {
         firedToday.clear();
         tradesToday.set(0);
+        tradesPerWindow.values().forEach(c -> c.set(0)); // reset all window counters
         todayDecisions.clear();
         // FIX: clear trade manager positions — prevents ghost positions
         // surviving midnight and blocking the next trading session
@@ -650,7 +706,10 @@ public class AiTradingSystem {
         status.put("phase",          probabilityEngine.getPhaseLabel());
         status.put("tradesToday",    tradesToday.get());
         status.put("watchlistCount",   watchlist.size());
-        status.put("watchlist",        new java.util.ArrayList<>(watchlist));
+        // Return as list of {symbol, pattern} objects for dashboard display
+        status.put("watchlist", watchlist.entrySet().stream()
+                .map(e -> java.util.Map.of("symbol", e.getKey(), "pattern", e.getValue()))
+                .collect(java.util.stream.Collectors.toList()));
         status.put("maxTrades",      maxTradesPerDay);
         status.put("openPositions",  tradeManager.getOpenCount());
         status.put("maxConcurrent",  maxConcurrent);

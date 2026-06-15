@@ -452,7 +452,12 @@ public class AiOpportunityDiscoveryEngine {
                     // Swept below AND closed clearly above
                     if (candLow < level * (1 - 0.001)
                             && candClose > level * 1.003) { // 0.3% recovery
-                        return 1.0;
+                        // PROXIMITY: ltp must still be within 1.0% of sweep level
+                        // If stock ran 2%+ above level → entry opportunity gone
+                        if (ltp <= level * 1.010) {
+                            return 1.0; // sweep confirmed AND price still near level
+                        }
+                        return 0; // sweep valid but price already ran too far
                     }
                 }
             }
@@ -492,7 +497,12 @@ public class AiOpportunityDiscoveryEngine {
                 if (Math.abs(candHigh - level) / level < EQ_TOL) {
                     if (candHigh > level * 1.001
                             && candClose < level * 0.997) { // 0.3% rejection
-                        return 1.0;
+                        // PROXIMITY: ltp must still be within 1.0% of sweep level
+                        // If stock dropped 2%+ below level → short opportunity gone
+                        if (ltp >= level * 0.990) {
+                            return 1.0; // sweep high confirmed AND price near level
+                        }
+                        return 0; // sweep valid but price already dropped too far
                     }
                 }
             }

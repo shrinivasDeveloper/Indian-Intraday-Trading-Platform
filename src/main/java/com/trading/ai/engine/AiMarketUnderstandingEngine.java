@@ -150,8 +150,25 @@ public class AiMarketUnderstandingEngine {
             Regime newRegime;
             if      (atrPct < ATR_CHOPPY)   newRegime = Regime.CHOPPY;
             else if (atrPct > ATR_VOLATILE || vix > 22) newRegime = Regime.VOLATILE;
-            else if (atrPct >= ATR_RANGING && (breadth >= BREADTH_BULL || breadth <= BREADTH_BEAR))
-                newRegime = Regime.TRENDING;
+            else if (atrPct >= ATR_RANGING && (breadth >= BREADTH_BULL || breadth <= BREADTH_BEAR)) {
+                // ── GAP-DAY INTRADAY CONFIRMATION (KEY FIX) ──────────────────
+                // On a gap-up/down day, ATR is inflated by the gap itself —
+                // not by genuine intraday trend. Breadth is also high because
+                // all stocks simply gapped with the index, not because buyers
+                // are actively pushing price AFTER the open.
+                //
+                // Problem: Gap+flat = TRENDING (WRONG) → fires LONG at gap top
+                // Fix:     Gap+flat = RANGING  (RIGHT) → score 80 required,
+                //          no direction lock, doesn't force LONG-only
+                //
+                // Rule: Only call TRENDING on a gap day if intraday price
+                // is actively confirming the gap direction (EMA9 slope > 0).
+                // If gap exists but price is flat/reversing → downgrade to RANGING.
+                //
+                // Non-gap days: intradayGapConfirmed = true (no penalty)
+                boolean intradayGapConfirmed = isIntradayConfirmingGap(intradayNiftyAdjustment);
+                newRegime = intradayGapConfirmed ? Regime.TRENDING : Regime.RANGING;
+            }
             else                             newRegime = Regime.RANGING;
 
             if (!newRegime.equals(currentRegime)) {
@@ -194,28 +211,54 @@ public class AiMarketUnderstandingEngine {
 
     private double computeIntradayGapAdjustment() {
         try {
-            // Use NIFTY 50 5m candles to detect intraday EMA direction
-            List<Candle> nifty5m = aiData.get5mCandles("NIFTY 50");
+            List<Candle> nifty5m    = aiData.get5mCandles("NIFTY 50");
             List<Candle> niftyDaily = aiData.getDailyCandles("NIFTY 50");
 
-            if (nifty5m.size() < 5 || niftyDaily.size() < 2) return 0.0;
+            if (nifty5m.size() < 6 || niftyDaily.size() < 2) return 0.0;
 
-            // Gap: today's open vs yesterday's close
-            double prevClose  = niftyDaily.get(niftyDaily.size() - 2).getClose().doubleValue();
-            double todayOpen  = nifty5m.get(0).getOpen().doubleValue();
-            double gapPct     = prevClose > 0 ? (todayOpen - prevClose) / prevClose * 100 : 0;
+            int n = nifty5m.size();
 
-            // Intraday EMA9 direction from 5m candles — fast-reacting
-            double ema9 = computeEMAFromCandles(nifty5m, 9);
-            double currentPrice = nifty5m.get(nifty5m.size() - 1).getClose().doubleValue();
-            double intradayBias = currentPrice > ema9 ? 1.0 : currentPrice < ema9 ? -1.0 : 0.0;
+            // ── 1. Gap: today open vs yesterday close ─────────────────────
+            double prevClose = niftyDaily.get(niftyDaily.size() - 2).getClose().doubleValue();
+            double todayOpen = nifty5m.get(0).getOpen().doubleValue();
+            double gapPct    = prevClose > 0 ? (todayOpen - prevClose) / prevClose * 100 : 0;
 
-            // Gap confirmation:
-            // Gap up > 0.3% AND price above EMA9 → +0.5 bullish adjustment
-            // Gap down > 0.3% AND price below EMA9 → -0.5 bearish adjustment
-            // Gap up but price now BELOW EMA9 → gap filled, no adjustment
-            if (gapPct > 0.3 && intradayBias > 0) return 0.5;
-            if (gapPct < -0.3 && intradayBias < 0) return -0.5;
+            // ── 2. Intraday EMA9 (fast EMA from 5m candles) ──────────────
+            double ema9         = computeEMAFromCandles(nifty5m, 9);
+            double currentPrice = nifty5m.get(n - 1).getClose().doubleValue();
+            double intradayBias = currentPrice > ema9 * 1.0005 ? 1.0    // clearly above EMA9
+                    : currentPrice < ema9 * 0.9995 ? -1.0   // clearly below EMA9
+                    : 0.0;                                   // too close — neutral
+
+            // ── 3. Intraday slope — last 6 candles (30 minutes) ──────────
+            // Checks whether price is actually MOVING in a direction
+            // or just sitting flat after the gap.
+            // slope > +0.02% per candle = active uptrend (≈5 pts per candle on Nifty)
+            // slope < -0.02% per candle = active downtrend
+            double firstClose = nifty5m.get(n - 6).getClose().doubleValue();
+            double slopePct   = firstClose > 0 ? (currentPrice - firstClose) / firstClose * 100 / 6 : 0;
+            boolean slopeUp   = slopePct >  0.02;   // price actively rising last 30 min
+            boolean slopeDown = slopePct < -0.02;   // price actively falling last 30 min
+
+            // ── DAILY CONTEXT: is daily trend supporting? ─────────────────
+            // Checks EMA20 vs EMA50 on daily candles for multi-day context.
+            // Gap-up into a daily downtrend should NOT be called TRENDING UP.
+            double dailyEma20 = computeEMAFromDaily(niftyDaily, 20);
+            double dailyEma50 = computeEMAFromDaily(niftyDaily, 50);
+            boolean dailyBull = dailyEma20 > dailyEma50 * 1.001; // EMA20 clearly above EMA50
+            boolean dailyBear = dailyEma20 < dailyEma50 * 0.999; // EMA20 clearly below EMA50
+
+            // ── COMBINED CONFIRMATION ─────────────────────────────────────
+            // For BULLISH confirmation all 3 must agree:
+            //   a) Gap was upward AND price still above EMA9
+            //   b) Last 30 min price slope is positive (actively moving up)
+            //   c) Daily EMA stack is bullish (not gap-up into downtrend)
+            if (gapPct > 0.3 && intradayBias > 0 && slopeUp && dailyBull)  return 0.5;
+
+            // For BEARISH confirmation:
+            if (gapPct < -0.3 && intradayBias < 0 && slopeDown && dailyBear) return -0.5;
+
+            // Gap exists but intraday slope or daily context not confirming
             return 0.0;
 
         } catch (Exception e) {
@@ -223,11 +266,74 @@ public class AiMarketUnderstandingEngine {
         }
     }
 
+    /** EMA from daily candles (uses close prices) */
+    private double computeEMAFromDaily(List<Candle> daily, int period) {
+        if (daily.size() < period) return 0;
+        double k   = 2.0 / (period + 1);
+        double ema = daily.get(daily.size() - period).getClose().doubleValue();
+        for (int i = daily.size() - period + 1; i < daily.size(); i++) {
+            ema = daily.get(i).getClose().doubleValue() * k + ema * (1 - k);
+        }
+        return ema;
+    }
+
     private double blendDirection(double overnightDir, double intradayAdj) {
         // Blend: overnight direction (weight 0.6) + intraday adjustment (weight 0.4)
         double blended = overnightDir * 0.6 + intradayAdj * 0.4;
         // Clamp to [-1, +1]
         return Math.max(-1.0, Math.min(1.0, blended));
+    }
+
+    /**
+     * Checks if intraday price action CONFIRMS the gap direction.
+     *
+     * Returns TRUE (allow TRENDING) when:
+     *   a) No significant gap today — pure intraday trend, no gap inflation
+     *   b) Gap up AND price is holding above EMA9 (buyers present after open)
+     *   c) Gap down AND price is holding below EMA9 (sellers present after open)
+     *
+     * Returns FALSE (downgrade to RANGING) when:
+     *   Gap exists BUT price has reversed or gone flat after the open.
+     *   This is the gap-up-then-stall pattern that caused false LONG entries.
+     *
+     * The intradayNiftyAdjustment from computeIntradayGapAdjustment() is:
+     *   +0.5 = gap up AND price above EMA9 (confirmed gap)
+     *   -0.5 = gap down AND price below EMA9 (confirmed gap)
+     *    0.0 = gap exists but price not confirming (or no significant gap)
+     *
+     * For TRENDING to be valid on a gap day, we need confirmation (+0.5 or -0.5).
+     * If adjustment = 0.0 on a gap day → price flat/reversing → RANGING.
+     */
+    private boolean isIntradayConfirmingGap(double intradayAdjustment) {
+        try {
+            List<Candle> nifty5m    = aiData.get5mCandles("NIFTY 50");
+            List<Candle> niftyDaily = aiData.getDailyCandles("NIFTY 50");
+
+            if (nifty5m.size() < 3 || niftyDaily.size() < 2) return true; // no data → don't penalise
+
+            double prevClose = niftyDaily.get(niftyDaily.size() - 2).getClose().doubleValue();
+            double todayOpen = nifty5m.get(0).getOpen().doubleValue();
+            double gapPct    = prevClose > 0 ? Math.abs(todayOpen - prevClose) / prevClose * 100 : 0;
+
+            // No significant gap → pure intraday trend → allow TRENDING
+            // Threshold: 0.4% gap (NIFTY ~24,000 → 96 points = meaningful gap)
+            if (gapPct < 0.4) return true;
+
+            // Significant gap exists → require intraday confirmation
+            // intradayAdjustment = +0.5 or -0.5 means price is confirming gap direction
+            // intradayAdjustment = 0.0 means gap-up but price flat/reversing → NOT trending
+            boolean confirmed = Math.abs(intradayAdjustment) >= 0.4;
+
+            if (!confirmed) {
+                log.info("[AI-UNDERSTAND] Gap day ({}%) but intraday not confirming (adj={}) → RANGING not TRENDING",
+                        String.format("%.2f", gapPct),
+                        String.format("%.1f", intradayAdjustment));
+            }
+            return confirmed;
+
+        } catch (Exception e) {
+            return true; // safe default — don't penalise on error
+        }
     }
 
     private double computeEMAFromCandles(List<Candle> candles, int period) {

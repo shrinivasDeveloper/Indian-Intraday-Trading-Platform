@@ -144,17 +144,26 @@ public class AiDailyPatternEngine {
         int n = w.size();
         double avgVol = averageVolume(w, 20);
 
+        // Proximity tolerance: price must still be within 1.5% of BOS level.
+        // BOS fires when daily close broke the swing high.
+        // By 11AM, if stock ran 4% above BOS level → opportunity gone → skip.
+        final double BOS_PROXIMITY = 0.015; // 1.5%
+
         // Bullish BOS: recent close breaks above a prior swing high
         for (int i = n - 3; i < n; i++) {
             if (i < 0) continue;
             double close = w.get(i).getClose().doubleValue();
             double vol   = w.get(i).getVolume();
-            // Find the most recent swing high BEFORE candle i
             for (SwingPoint sh : highs) {
                 if (sh.index >= i) continue;
-                if (sh.index < i - 15) break; // only look back 15 candles
+                if (sh.index < i - 15) break;
                 if (close > sh.price * (1 + SWING_PCT) && vol > avgVol * 1.2) {
-                    return 1.0; // confirmed bullish BOS
+                    // PROXIMITY: ltp must be within 1.5% above the BOS swing level
+                    // If stock already ran 3%+ above BOS level → skip
+                    if (ltp <= sh.price * (1 + BOS_PROXIMITY)) {
+                        return 1.0; // confirmed bullish BOS, price still near level
+                    }
+                    return 0; // BOS confirmed but price moved too far — opportunity gone
                 }
             }
         }
@@ -168,7 +177,11 @@ public class AiDailyPatternEngine {
                 if (sl.index >= i) continue;
                 if (sl.index < i - 15) break;
                 if (close < sl.price * (1 - SWING_PCT) && vol > avgVol * 1.2) {
-                    return -1.0; // confirmed bearish BOS
+                    // PROXIMITY: ltp must be within 1.5% below the BOS swing level
+                    if (ltp >= sl.price * (1 - BOS_PROXIMITY)) {
+                        return -1.0; // confirmed bearish BOS, price still near level
+                    }
+                    return 0; // BOS confirmed but price dropped too far — gone
                 }
             }
         }
@@ -198,23 +211,24 @@ public class AiDailyPatternEngine {
         // Check bull CHOCH: was in downtrend (older highs higher), now latest is higher
         if (highs.size() >= 4) {
             boolean downtrend = true;
-            // In newest-first order, downtrend = each older element is HIGHER
-            // Check highs[1] > highs[2] > highs[3] (the historical lower-highs structure)
             for (int i = 2; i < Math.min(4, highs.size()); i++) {
                 if (highs.get(i).price <= highs.get(i - 1).price) {
                     downtrend = false;
                     break;
                 }
             }
-            // CHOCH: latest high (highs[0]) breaks above second-latest (highs[1])
             if (downtrend && highs.get(0).price > highs.get(1).price * (1 + SWING_PCT)) {
-                return 1.0; // bull CHOCH — downtrend structure broken
+                // PROXIMITY: ltp must be within 1.5% above the CHOCH level (highs[1])
+                // If stock already ran 3%+ above the broken high → opportunity gone
+                double chochLevel = highs.get(1).price;
+                if (ltp <= chochLevel * 1.015) {
+                    return 1.0; // bull CHOCH confirmed, price still near level
+                }
+                return 0; // CHOCH confirmed but price ran too far
             }
         }
 
         // Check bear CHOCH: was in uptrend (older lows lower), now latest is lower
-        // In newest-first order, uptrend = each older element is LOWER
-        // lows[1] < lows[2] < lows[3] = uptrend structure (older lows lower)
         if (lows.size() >= 4) {
             boolean uptrend = true;
             for (int i = 2; i < Math.min(4, lows.size()); i++) {
@@ -223,9 +237,13 @@ public class AiDailyPatternEngine {
                     break;
                 }
             }
-            // CHOCH: latest low (lows[0]) breaks below second-latest (lows[1])
             if (uptrend && lows.get(0).price < lows.get(1).price * (1 - SWING_PCT)) {
-                return -1.0; // bear CHOCH — uptrend structure broken
+                // PROXIMITY: ltp must be within 1.5% below the CHOCH level (lows[1])
+                double chochLevel = lows.get(1).price;
+                if (ltp >= chochLevel * 0.985) {
+                    return -1.0; // bear CHOCH confirmed, price still near level
+                }
+                return 0; // CHOCH confirmed but price dropped too far
             }
         }
         return 0;
@@ -540,7 +558,12 @@ public class AiDailyPatternEngine {
                         w.subList(h.index, rs.index + 1).stream()
                                 .mapToDouble(c -> c.getLow().doubleValue()).min().orElse(ltp));
                 if (ltp < neckline * 0.995) {
-                    return -1.0; // confirmed H&S breakdown
+                    // PROXIMITY: price must be within 2% below neckline
+                    // If price already dropped 4%+ below neckline → short opportunity gone
+                    if (ltp >= neckline * 0.980) {
+                        return -1.0; // confirmed H&S breakdown, still tradeable
+                    }
+                    return 0; // too far below neckline — chasing the short
                 }
             }
         }
@@ -563,7 +586,12 @@ public class AiDailyPatternEngine {
                         w.subList(h.index, rs.index + 1).stream()
                                 .mapToDouble(c -> c.getHigh().doubleValue()).max().orElse(ltp));
                 if (ltp > neckline * 1.005) {
-                    return 1.0; // confirmed inv H&S breakout
+                    // PROXIMITY: price must be within 2% above neckline
+                    // If price already ran 4%+ above neckline → long opportunity gone
+                    if (ltp <= neckline * 1.020) {
+                        return 1.0; // confirmed inv H&S breakout, still tradeable
+                    }
+                    return 0; // too far above neckline — chasing the long
                 }
             }
         }

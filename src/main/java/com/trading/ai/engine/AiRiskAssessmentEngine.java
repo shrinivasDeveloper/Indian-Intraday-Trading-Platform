@@ -20,30 +20,35 @@ import java.math.RoundingMode;
  *
  * Position sizing, stop-loss placement, and target calculation.
  * Entirely owned by the AI module.
- * Uses AI's own S/R levels from AiMarketDataService — not HighRR's.
  *
- * RULES:
- *   - Risk 1% of capital per trade
- *   - SL: just beyond nearest AI S/R level + ATR noise floor
- *   - T1: nearest S/R level at minimum 2R
- *   - T2: T1 distance × 1.6 beyond entry
- *   - Max SL: 1.5% from entry
+ * SL METHOD: Same price-based tiered SL as NEWS_CATALYST_V1 (proven working).
+ *   ≤ ₹130  → 2.0% SL   ≤ ₹170  → 1.7% SL   ≤ ₹200  → 1.3% SL
+ *   ≤ ₹400  → 1.0% SL   ≤ ₹700  → 0.7% SL   ≤ ₹1200 → 0.6% SL
+ *   > ₹1200 → 0.5% SL
+ *
+ * This ensures:
+ *   - Cheap stocks (₹50-130) get wider SL — they're more volatile in %
+ *   - Expensive stocks (₹1200+) get tighter SL — less % movement needed
+ *   - Consistent with news strategy — same risk model across AI trades
+ *   - No dependency on S/R structure data being available
+ *
+ * T1 = SL distance × 2.0  (2:1 RR minimum)
+ * T2 = SL distance × 3.2  (T1dist × 1.6 = 3.2R)
+ * Risk per trade = 1% of capital
  */
 @Service
 @ConditionalOnProperty(name = "ai.trading.enabled", havingValue = "true")
 @Slf4j
 public class AiRiskAssessmentEngine {
 
-    private static final double RISK_PCT       = 0.01;  // 1% capital risk per trade
-    private static final double MIN_RR         = 2.0;   // minimum target RR
-    private static final double MAX_SL_PCT     = 0.015; // max 1.5% SL from entry
-    private static final double SL_BUFFER_PCT  = 0.0015;// 0.15% buffer beyond zone
-    private static final double T2_MULTIPLIER  = 1.6;   // T2 = T1-dist × 1.6
+    private static final double RISK_PCT      = 0.01;  // 1% capital risk per trade
+    private static final double MIN_RR        = 2.0;   // T1 minimum RR
+    private static final double T2_MULTIPLIER = 1.6;   // T2 = T1-dist × 1.6 = 3.2R
 
     private final AiMarketDataService aiData;
     private final PaperAccount        paperAccount;
-    private final AiConfidenceScoringEngine    confidenceEngine;
-    private final AiTradeQualityScoringEngine  qualityEngine;
+    private final AiConfidenceScoringEngine   confidenceEngine;
+    private final AiTradeQualityScoringEngine qualityEngine;
 
     @Value("${trading.capital:100000}")
     private double defaultCapital;
@@ -59,135 +64,89 @@ public class AiRiskAssessmentEngine {
     }
 
     /**
+     * Price-based tiered SL — identical to NEWS_CATALYST_V1.
+     * Cheaper stocks need wider SL% due to higher tick volatility.
+     */
+    private double computeSlPct(double price) {
+        if      (price <= 130)  return 0.020;  // 2.0%
+        else if (price <= 170)  return 0.017;  // 1.7%
+        else if (price <= 200)  return 0.013;  // 1.3%
+        else if (price <= 400)  return 0.010;  // 1.0%
+        else if (price <= 700)  return 0.007;  // 0.7%
+        else if (price <= 1200) return 0.006;  // 0.6%
+        else                    return 0.005;  // 0.5%
+    }
+
+    /**
      * Apply full risk assessment to a candidate.
      * Returns AiTradeDecision with all price levels and position size set.
-     * Returns null if risk assessment fails (e.g. RR < 2.0, SL too wide).
+     * Returns null if RR < 2.0 or quantity is zero.
      */
     public AiTradeDecision assess(AiCandidate candidate, AiPrediction prediction,
                                   String regime) {
-        String symbol    = candidate.getSymbol();
-        double ltp       = candidate.getLtp();
-        boolean isLong   = "LONG".equals(candidate.getSuggestedDirection());
-        double capital   = resolveCapital();
+        String  symbol  = candidate.getSymbol();
+        double  ltp     = candidate.getLtp();
+        boolean isLong  = "LONG".equals(candidate.getSuggestedDirection());
+        double  capital = resolveCapital();
 
-        // ── Entry price (0.05% buffer for market order slippage) ─────────
-        double entryD = isLong ? ltp * 1.0005 : ltp * 0.9995;
-        BigDecimal entry = bd(entryD, 2);
-        double entryDbl  = entry.doubleValue();
+        // ── Entry: 0.05% buffer for market order slippage ────────────────
+        double     entryDbl = isLong ? ltp * 1.0005 : ltp * 0.9995;
+        BigDecimal entry    = bd(entryDbl, 2);
+        entryDbl = entry.doubleValue();
 
-        // ── Stop-loss: AI's own S/R + ATR floor ──────────────────────────
-        AiStructureLevels structure = aiData.getStructure(symbol);
-        double atrDist = structure != null ? structure.atr14() : entryDbl * 0.008;
+        // ── SL: price-based tiered (same as news strategy) ───────────────
+        double slPct        = computeSlPct(entryDbl);
+        double slDist       = entryDbl * slPct;
+        double slD          = isLong ? entryDbl - slDist : entryDbl + slDist;
+        BigDecimal sl       = bd(slD, isLong ? RoundingMode.FLOOR : RoundingMode.CEILING);
+        double riskPerShare = Math.abs(entryDbl - sl.doubleValue());
 
-        double slD;
-        if (structure != null) {
-            if (isLong) {
-                AiSRLevel supp = aiData.nearestSupportBelow(symbol, entryDbl);
-                slD = supp != null
-                        ? supp.price() * (1 - SL_BUFFER_PCT)
-                        : entryDbl - atrDist;
-            } else {
-                AiSRLevel res = aiData.nearestResistanceAbove(symbol, entryDbl);
-                slD = res != null
-                        ? res.price() * (1 + SL_BUFFER_PCT)
-                        : entryDbl + atrDist;
-            }
-        } else {
-            slD = isLong ? entryDbl - atrDist : entryDbl + atrDist;
-        }
-
-        // Apply ATR noise floor
-        double atrFloor = isLong ? entryDbl - atrDist : entryDbl + atrDist;
-        slD = isLong ? Math.min(slD, atrFloor) : Math.max(slD, atrFloor);
-
-        // Apply max SL cap
-        double maxSlDist = entryDbl * MAX_SL_PCT;
-        if (isLong  && (entryDbl - slD) > maxSlDist) slD = entryDbl - maxSlDist;
-        if (!isLong && (slD - entryDbl) > maxSlDist) slD = entryDbl + maxSlDist;
-
-        BigDecimal sl      = bd(slD, isLong ? RoundingMode.FLOOR : RoundingMode.CEILING);
-        double riskPerShare = Math.abs(entry.subtract(sl).doubleValue());
         if (riskPerShare <= 0) {
-            log.debug("[AI-RISK] {} zero risk — rejected", symbol);
+            log.debug("[AI-RISK] {} zero riskPerShare — rejected", symbol);
             return null;
         }
 
         // ── Position sizing: 1% capital risk ─────────────────────────────
         double riskAmt = capital * RISK_PCT;
-        int qty = (int) Math.floor(riskAmt / riskPerShare);
+        int    qty     = (int) Math.floor(riskAmt / riskPerShare);
         if (qty <= 0) {
-            log.debug("[AI-RISK] {} qty=0 (risk={} riskPerShare={}) — rejected",
+            log.debug("[AI-RISK] {} qty=0 (riskAmt={} riskPerShare={}) — rejected",
                     symbol,
                     String.format("%.2f", riskAmt),
                     String.format("%.2f", riskPerShare));
             return null;
         }
 
-        // ── Targets ───────────────────────────────────────────────────────
-        BigDecimal t1, t2;
-        if (structure != null) {
-            // T1: nearest AI S/R level at ≥ 2R
-            AiSRLevel t1Level = isLong
-                    ? aiData.nearestResistanceAbove(symbol, entryDbl)
-                    : aiData.nearestSupportBelow(symbol, entryDbl);
+        // ── T1: 2:1 RR (same as news strategy) ───────────────────────────
+        double     t1Dist = riskPerShare * MIN_RR;
+        BigDecimal t1     = isLong
+                ? bd(entryDbl + t1Dist, 2)
+                : bd(entryDbl - t1Dist, 2);
 
-            if (t1Level != null) {
-                double t1Dist = Math.abs(t1Level.price() - entryDbl);
-                double t1RR   = t1Dist / riskPerShare;
-                if (t1RR >= MIN_RR) {
-                    t1 = bd(t1Level.price(), 2);
-                } else {
-                    // Fallback arithmetic T1
-                    t1 = isLong
-                            ? bd(entryDbl + riskPerShare * MIN_RR, 2)
-                            : bd(entryDbl - riskPerShare * MIN_RR, 2);
-                }
-            } else {
-                t1 = isLong
-                        ? bd(entryDbl + riskPerShare * MIN_RR, 2)
-                        : bd(entryDbl - riskPerShare * MIN_RR, 2);
-            }
-        } else {
-            t1 = isLong
-                    ? bd(entryDbl + riskPerShare * MIN_RR, 2)
-                    : bd(entryDbl - riskPerShare * MIN_RR, 2);
-        }
-
-        // T2: T1-distance × 1.6 beyond entry
-        double t1Dist = Math.abs(t1.doubleValue() - entryDbl);
-        t2 = isLong
+        // ── T2: T1-distance × 1.6 (3.2R) ─────────────────────────────────
+        BigDecimal t2 = isLong
                 ? bd(entryDbl + t1Dist * T2_MULTIPLIER, 2)
                 : bd(entryDbl - t1Dist * T2_MULTIPLIER, 2);
 
-        // ── Final RR check ─────────────────────────────────────────────────
-        double rrRatio = t1Dist / riskPerShare;
-        if (rrRatio < MIN_RR) {
-            log.debug("[AI-RISK] {} RR={} < {} — rejected",
-                    symbol,
-                    String.format("%.1f", rrRatio),
-                    String.format("%.1f", MIN_RR));
-            return null;
-        }
+        double rrRatio = t1Dist / riskPerShare; // always MIN_RR (2.0)
 
         // ── Confidence and quality scoring ────────────────────────────────
-        // Pass direction so contradiction check is direction-aware
-        double confidence   = confidenceEngine.computeConfidence(
+        double confidence = confidenceEngine.computeConfidence(
                 prediction.getConfidence(),
                 candidate.getFeatureVector().getFeatures(),
                 candidate.getSuggestedDirection());
-        int qualityScore    = qualityEngine.scoreTradeQuality(candidate, prediction, rrRatio);
+        int qualityScore = qualityEngine.scoreTradeQuality(candidate, prediction, rrRatio);
 
-        log.debug("[AI-RISK] {} {} entry={} sl={} t1={} t2={} RR={} qty={} risk=₹{} conf={}% quality={}",
+        log.debug("[AI-RISK] {} {} entry={} sl={}({}%) t1={} t2={} RR={} qty={} risk=₹{}",
                 symbol, candidate.getSuggestedDirection(),
                 String.format("%.2f", entryDbl),
-                String.format("%.2f", slD),
+                String.format("%.2f", sl.doubleValue()),
+                String.format("%.1f", slPct * 100),
                 String.format("%.2f", t1.doubleValue()),
                 String.format("%.2f", t2.doubleValue()),
                 String.format("%.1f", rrRatio),
                 qty,
-                String.format("%.0f", riskAmt),
-                String.format("%.0f", confidence * 100),
-                qualityScore);
+                String.format("%.0f", riskAmt));
 
         return AiTradeDecision.builder()
                 .symbol(symbol)

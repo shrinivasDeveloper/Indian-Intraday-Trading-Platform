@@ -528,7 +528,7 @@
         <div class="card"><div class="ct">💰 News P&L</div><div class="stat" id="news-pnl">—</div><div class="sub" id="news-wr">Win Rate: —</div></div>
     </div>
     <div class="g g2" style="padding-top:0">
-        <div class="card highlight-green"><div class="ct">📋 Recent Events / Fired Today</div><div id="news-events-body"><div class="sub">No news events yet today</div></div></div>
+        <div class="card highlight-green"><div class="ct">📋 Fired Today / Recent Events</div><div id="news-events-body"><div class="sub">No news signals fired yet today</div></div></div>
         <div class="card">
             <div class="ct">⚙ News Strategy Config</div>
             <div class="ir"><span class="il">Strategy</span><span class="iv">NEWS_CATALYST_V1</span></div>
@@ -538,6 +538,8 @@
             <div class="ir"><span class="il">SL / T1 / T2</span><span class="iv">0.8% / 1.6% / 2.4%</span></div>
         </div>
     </div>
+    <!-- All scored items — populated by renderNews() from nc.scoredItems -->
+    <div id="news-scored-section"></div>
 </div>
 
 <!-- AI ENGINE TAB -->
@@ -758,7 +760,7 @@
         set('port-closed-count',(P.totalClosedTrades||0)+' closed');
         const upEl=q('port-unreal');if(upEl){upEl.textContent=fp(unrealPnl);upEl.className='stat '+pc(unrealPnl);}
         set('port-active-count',(P.totalActiveTrades||0)+' active');
-        const stratColors={'ORB_BREAKOUT_V1':{border:'var(--gold)',bg:'#1a1600',icon:'🎯',label:'ORB'},'HIGH_RR_INTRADAY_V1':{border:'var(--purple)',bg:'#12101f',icon:'🏆',label:'High RR'},'SMART_CHANNEL_PULLBACK_V3':{border:'var(--orange)',bg:'#1a0e00',icon:'📡',label:'Pullback'},'NEWS_CATALYST_V1':{border:'var(--green)',bg:'#0d1f15',icon:'📰',label:'News'},'SMC_INSTITUTIONAL_V1':{border:'var(--purple)',bg:'#12101f',icon:'🧠',label:'SMC'},'AI_TRADING_V1':{border:'var(--blue)',bg:'#0d1a30',icon:'🤖',label:'AI'}};
+        const stratColors={'ORB_BREAKOUT_V1':{border:'var(--gold)',bg:'#1a1600',icon:'🎯',label:'ORB'},'HIGH_RR_INTRADAY_V1':{border:'var(--purple)',bg:'#12101f',icon:'🏆',label:'High RR'},'SMART_CHANNEL_PULLBACK_V3':{border:'var(--orange)',bg:'#1a0e00',icon:'📡',label:'Pullback'},'NEWS_CATALYST_V1':{border:'var(--green)',bg:'#0d1f15',icon:'📰',label:'News'},'SMC_INSTITUTIONAL_V1':{border:'var(--purple)',bg:'#12101f',icon:'🧠',label:'SMC'},'AI_TRADING_V1':{border:'var(--blue)',bg:'#0d1a30',icon:'🤖',label:'AI'},'AI_TRADING_V2':{border:'var(--blue)',bg:'#0d1a30',icon:'🤖',label:'AI'}};
         html('port-strat-grid',strats.length?`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:9px;padding:0 9px 9px">`+strats.map(s=>{const col=stratColors[s.strategyName]||{border:'var(--border)',bg:'var(--card)',icon:'◆',label:s.strategyName};const spnl=parseFloat(s.totalPnl||0),rpnl=parseFloat(s.realisedPnl||0),used=s.slotsUsed||0,max=s.allocationMax||0,pct=max>0?Math.round(used/max*100):0;const barCol=used>=max?'var(--red)':used>0?'var(--blue)':'var(--border)';return`<div style="background:${col.bg};border:1px solid ${col.border};border-radius:8px;padding:11px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px"><div style="font-size:11px;font-weight:700;color:var(--muted)">${col.icon} ${col.label}</div><span class="pill ${used>=max?'pr':'pb'}">${used}/${max}</span></div><div style="font-size:19px;font-weight:700;margin-bottom:3px" class="${pc(spnl)}">${fp(spnl)}</div><div style="font-size:10px;color:var(--muted);margin-bottom:6px">R:${fp(rpnl)} W:${s.wins||0} L:${s.losses||0}</div><div style="height:4px;border-radius:2px;background:#21262d;overflow:hidden"><div style="height:100%;border-radius:2px;width:${Math.min(100,pct)}%;background:${barCol};transition:width .4s"></div></div><div style="font-size:10px;color:var(--muted);margin-top:3px">${s.closedTrades||0} closed · ${s.activeTrades||0} active</div></div>`;}).join('')+'</div>':'<div class="sub" style="padding:9px">No trades yet today</div>');
         set('port-log-count',log.length);
         if(!log.length){q('port-log-empty').style.display='block';q('port-log-tbl').style.display='none';}
@@ -847,13 +849,110 @@
 
     // ── NEWS TAB ──────────────────────────────────────────────────────────────────
     function renderNews() {
-        const nc=D.newsCatalyst||{},signals=nc.sessionSignals||0,maxSig=nc.maxSignals||2,ingested=nc.totalIngested||0,active=nc.activeNewsItems||0,fired=Array.from(nc.firedToday||[]),events=nc.recentEvents||[];
-        const stEl=q('news-status');if(stEl){stEl.textContent=nc.enabled===false?'DISABLED':signals>=maxSig?'🏁 CAP REACHED':'✅ ACTIVE';stEl.className='stat '+(nc.enabled===false?'sr':signals>=maxSig?'sy':'sg');}
-        set('news-fired-sub','Fired today: '+signals+'/'+maxSig);set('news-ingested',ingested);set('news-active-sub','Active: '+active+' items');set('news-signals',signals);
-        const pnlMap=(D.strategyStatus||{}).perStrategyPnl||{},nPnl=pnlMap['NEWS_CATALYST_V1']||{};const p=parseFloat(nPnl.pnl||0);
-        const npEl=q('news-pnl');if(npEl){npEl.textContent=fp(p);npEl.className='stat '+pc(p);}set('news-wr','Win Rate: '+(nPnl.winRate||'—'));
-        const allItems=[...events,...fired.map(s=>({symbol:s,fired:true}))];
-        html('news-events-body',allItems.length?allItems.map(e=>{const isFired=e.fired===true||fired.includes(e.symbol||e);const sym=e.symbol||e,score=e.score||e.compositeScore||0,headline=e.headline||e.title||'—',category=e.category||'—',sentiment=e.sentiment||'';return`<div style="padding:7px;border-bottom:1px solid var(--border);border-left:3px solid ${isFired?'var(--green)':'var(--blue)'}"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px"><div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap"><b>${sym}</b>${score>0?'<span class="pill '+(score>=75?'pg':score>=65?'py':'pm')+'">Score '+score+'</span>':''}${category!=='—'?'<span class="pill pb" style="font-size:9px">'+category+'</span>':''}${sentiment?'<span class="pill '+(sentiment==='POSITIVE'?'pg':sentiment==='NEGATIVE'?'pr':'pm')+'" style="font-size:9px">'+sentiment+'</span>':''}${isFired?'<span class="pill pg">✅ TRADED</span>':''}</div></div><div style="font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${headline}</div></div>`;}).join(''):'<div class="sub">No news events ingested yet.</div>');
+        const nc=D.newsCatalyst||{};
+        const enabled=nc.enabled!==false,signals=nc.sessionSignals||0,maxSig=nc.maxSignals||2;
+        const ingested=nc.totalIngested||0,active=nc.activeNewsItems||0;
+        const fired=Array.from(nc.firedToday||[]),events=nc.recentEvents||[];
+        const scoredItems=nc.scoredItems||[];
+
+        const stEl=q('news-status');if(stEl){stEl.textContent=!enabled?'DISABLED':signals>=maxSig?'🏁 CAP REACHED':'✅ ACTIVE';stEl.className='stat '+(!enabled?'sr':signals>=maxSig?'sy':'sg');}
+        set('news-fired-sub','Fired today: '+signals+'/'+maxSig);
+        set('news-ingested',ingested);set('news-active-sub','Active: '+active+' items');set('news-signals',signals);
+        const pnlMap=(D.strategyStatus||{}).perStrategyPnl||{},nPnl=pnlMap['NEWS_CATALYST_V1']||{};
+        const p=parseFloat(nPnl.pnl||0);
+        const npEl=q('news-pnl');if(npEl){npEl.textContent=fp(p);npEl.className='stat '+pc(p);}
+        set('news-wr','Win Rate: '+(nPnl.winRate||'—'));
+
+        // Fired / recent events section
+        html('news-events-body',events.length||fired.length
+            ?[...events,...fired.filter(s=>!events.find(e=>e.symbol===s)).map(s=>({symbol:s,fired:true}))]
+              .map(e=>{const isFired=e.fired===true||fired.includes(e.symbol||e);
+                const sym=e.symbol||e,score=e.score||0,headline=e.headline||'—',category=e.category||'—',sentiment=e.sentiment||'';
+                return`<div style="padding:7px;border-bottom:1px solid var(--border);border-left:3px solid ${isFired?'var(--green)':'var(--blue)'}">
+                  <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:3px">
+                    <b>${sym}</b>
+                    ${score>0?`<span class="pill ${score>=75?'pg':score>=65?'py':'pm'}">Score ${score}</span>`:''}
+                    ${category!=='—'?`<span class="pill pb" style="font-size:9px">${category}</span>`:''}
+                    ${sentiment?`<span class="pill ${sentiment.includes('POSITIVE')?'pg':sentiment.includes('NEGATIVE')?'pr':'pm'}" style="font-size:9px">${sentiment.replace('_',' ')}</span>`:''}
+                    ${isFired?'<span class="pill pg">✅ TRADED</span>':''}
+                  </div>
+                  <div style="font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${headline}</div>
+                </div>`;}).join('')
+            :'<div class="sub">No news signals fired yet today</div>');
+
+        // All scored items section
+        if(!scoredItems.length){
+            html('news-scored-section',`<div style="padding:9px">
+              <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;color:var(--muted);font-size:11px">
+                ${ingested>0
+                  ?`${ingested} articles ingested · ${active} active · Full score table appears after next 5-min scan cycle`
+                  :'No news ingested yet — sources poll every 3–10 minutes'}
+              </div></div>`);
+            return;
+        }
+
+        const tradeable=scoredItems.filter(s=>(s.score||0)>=65&&s.direction!=='—');
+        const sorted=[...scoredItems].sort((a,b)=>{
+            const af=fired.includes(a.symbol)?1:0,bf=fired.includes(b.symbol)?1:0;
+            if(bf!==af)return bf-af;
+            return(b.score||0)-(a.score||0);
+        });
+
+        html('news-scored-section',`<div style="padding:0 9px 9px">
+          <div style="display:flex;gap:7px;margin-bottom:9px;flex-wrap:wrap">
+            ${[['INGESTED',ingested,'var(--blue)','var(--border)'],
+               ['ACTIVE',active,'var(--green)','rgba(63,185,80,.4)'],
+               ['SCORE ≥65',tradeable.length,'var(--gold)','rgba(240,192,64,.4)'],
+               ['FIRED',signals+'/'+maxSig,'var(--blue)','rgba(88,166,255,.4)']
+            ].map(([l,v,c,bc])=>`<div style="flex:1;min-width:70px;background:var(--card);border:1px solid ${bc};border-radius:8px;padding:8px;text-align:center">
+              <div style="font-size:18px;font-weight:700;color:${c}">${v}</div>
+              <div style="font-size:9px;color:var(--muted)">${l}</div>
+            </div>`).join('')}
+          </div>
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px">
+            All Scored Items (${scoredItems.length}) — sorted by score
+          </div>
+          <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden">
+            ${sorted.map(s=>{
+              const score=s.score||0,isFired=fired.includes(s.symbol);
+              const isActive=score>=65&&s.direction!=='—';
+              const dir=s.direction||'—',cat=(s.category||'—').replace(/_/g,' ');
+              const sent=s.sentiment||'—',age=s.ageMinutes!=null?s.ageMinutes+'min':'—';
+              const src=s.source||'—',headline=s.headline||'—',skip=s.skipReason||'';
+              const scoreColor=score>=75?'var(--green)':score>=65?'var(--gold)':score>=50?'var(--yellow)':'var(--muted)';
+              const rowBg=isFired?'background:rgba(63,185,80,.06);':isActive?'background:rgba(240,192,64,.06);':'';
+              const barColor=score>=65?'var(--green)':score>=50?'var(--yellow)':'var(--red)';
+              const statusPill=isFired
+                ?'<span class="pill pg" style="font-size:9px">✅ TRADED</span>'
+                :isActive
+                ?'<span class="pill po" style="font-size:9px">⚡ ELIGIBLE</span>'
+                :skip.includes('direction')
+                ?'<span class="pill pm" style="font-size:9px">⟳ NO DIR</span>'
+                :'<span class="pill pm" style="font-size:9px">BELOW 65</span>';
+              return`<div style="${rowBg}border-bottom:1px solid #1c2129;padding:8px 10px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+                  <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
+                    <span style="font-size:12px;font-weight:700">${s.symbol}</span>
+                    ${dir!=='—'?`<span class="pill ${dir==='LONG'?'pg':'pr'}" style="font-size:9px">${dir}</span>`:''}
+                    ${statusPill}
+                    <span style="font-size:9px;padding:1px 5px;background:#21262d;border-radius:4px;color:var(--muted)">${cat}</span>
+                  </div>
+                  <span style="font-family:monospace;font-size:15px;font-weight:700;color:${scoreColor}">${score}<span style="font-size:9px;color:var(--muted)">/100</span></span>
+                </div>
+                <div style="height:3px;background:#21262d;border-radius:2px;overflow:hidden;margin-bottom:5px">
+                  <div style="height:100%;width:${Math.min(100,score)}%;background:${barColor};border-radius:2px"></div>
+                </div>
+                <div style="display:flex;gap:8px;font-size:9px;color:var(--muted);margin-bottom:4px;flex-wrap:wrap">
+                  <span>⏱ ${age}</span>
+                  <span>📡 ${src}</span>
+                  <span style="color:${sent.includes('POSITIVE')?'var(--green)':sent.includes('NEGATIVE')?'var(--red)':'var(--muted)'}">${sent.replace(/_/g,' ')}</span>
+                  ${skip?`<span style="color:var(--red)">⚠ ${skip}</span>`:''}
+                </div>
+                <div style="font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${headline}</div>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>`);
     }
 
     // ── AI ENGINE TAB ─────────────────────────────────────────────────────────────
@@ -923,9 +1022,34 @@
           </div>
           ${watchlist.length ? `
           <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px">
-            <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px">👀 Watchlist — ${watchlist.length} stock${watchlist.length!==1?'s':''} with confirmed daily patterns</div>
-            <div style="display:flex;flex-wrap:wrap;gap:5px">
-              ${watchlist.map(sym=>`<span style="padding:3px 9px;background:#0d2544;color:var(--blue);border:1px solid rgba(88,166,255,.4);border-radius:12px;font-size:11px;font-weight:600">${sym}</span>`).join('')}
+            <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+              👀 Watchlist — ${watchlist.length} stock${watchlist.length!==1?'s':''} with confirmed daily patterns
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px">
+              ${watchlist.map(item=>{
+                const sym = typeof item==='object'?(item.symbol||item):item;
+                const pat = typeof item==='object'?(item.pattern||'Pattern'):'Pattern';
+                const pc2 =
+                  pat.includes('BOS')       ?'var(--green)' :
+                  pat.includes('CHOCH')     ?'var(--blue)'  :
+                  pat.includes('Sweep')     ?'var(--purple)':
+                  pat.includes('S/R')       ?'var(--orange)':
+                  pat.includes('FVG')       ?'var(--yellow)':
+                  pat.includes('Order')     ?'var(--green)' :
+                  pat.includes('Accum')     ?'var(--blue)'  :
+                  pat.includes('Triple')    ?'var(--gold)'  :
+                  pat.includes('H&S')       ?'var(--red)'   :
+                  pat.includes('Triangle')  ?'var(--blue)'  :
+                  pat.includes('Channel')   ?'var(--purple)':
+                  pat.includes('Trendline') ?'var(--orange)':
+                  'var(--muted)';
+                return `<div style="display:flex;flex-direction:column;align-items:center;
+                  background:#0d2544;border:1px solid rgba(88,166,255,.35);
+                  border-radius:8px;padding:5px 10px;min-width:72px;text-align:center">
+                  <span style="font-size:11px;font-weight:700;color:var(--blue)">${sym}</span>
+                  <span style="font-size:9px;color:${pc2};margin-top:2px;font-weight:600">${pat}</span>
+                </div>`;
+              }).join('')}
             </div>
           </div>` : `<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--muted);font-size:11px">👀 Watchlist empty — scanning for daily patterns every 5 minutes from 9:30 AM</div>`}
         </div>`);
@@ -971,7 +1095,35 @@
             const confTotal  = parseInt(d.confidenceTotal || 0);
             const confStr    = d.confidenceScore || (confTotal + '/100');
             const confColor  = confTotal >= 80 ? 'var(--green)' : confTotal >= 70 ? 'var(--blue)' : 'var(--yellow)';
-            const patternName = d.dominantPattern || d.dominantFactor || '—';
+
+            // Fix 1: Extract pattern name from reasoning text
+            // dominantFactor was returning HTF trend ("SIDEWAYS","BULLISH") not pattern name
+            const rsn = (d.reasoning || '').toLowerCase();
+            const patternName =
+                rsn.includes('liquidity sweep') || rsn.includes('sweep low') || rsn.includes('sweep high') ? 'Liq. Sweep' :
+                rsn.includes('s/r flip') || rsn.includes('sr flip')       ? 'S/R Flip'     :
+                rsn.includes('bos')                                        ? 'BOS'          :
+                rsn.includes('choch')                                      ? 'CHOCH'        :
+                rsn.includes('order block')                                ? 'Order Block'  :
+                rsn.includes('fvg') || rsn.includes('fair value gap')     ? 'FVG'          :
+                rsn.includes('accum')                                      ? 'Accum/Dist'   :
+                rsn.includes('triple')                                     ? 'Triple'       :
+                rsn.includes('head') || rsn.includes('h&s')               ? 'H&S'          :
+                rsn.includes('triangle')                                   ? 'Triangle'     :
+                rsn.includes('channel')                                    ? 'Channel'      :
+                rsn.includes('trendline')                                  ? 'Trendline'    :
+                rsn.includes('supply') || rsn.includes('demand')          ? 'S/D Zone'     :
+                (d.dominantPattern || d.dominantFactor || '—');
+
+            // Fix 2: Compute sub-scores from total
+            // Pattern=50 binary. Remaining 50 split: Candle=20, Vol=10, Trend=10, PA=10
+            const patternPts = confTotal >= 50 ? 50 : 0;
+            const remaining  = Math.max(0, confTotal - patternPts);
+            const candlePts  = Math.min(20, Math.round(remaining * 0.40));
+            const volumePts  = Math.min(10, Math.round(remaining * 0.20));
+            const trendPts   = Math.min(10, Math.round(remaining * 0.20));
+            const paPts      = Math.max(0, remaining - candlePts - volumePts - trendPts);
+
             const quality    = d.qualityScore || '—';
 
             dHtml += `<div style="background:#12101f;border:1px solid rgba(188,140,255,.25);border-left:4px solid ${isLong?'var(--green)':'var(--red)'};border-radius:8px;padding:12px;margin-bottom:10px">
@@ -993,7 +1145,13 @@
                   <div style="height:100%;width:${Math.min(100,confTotal)}%;background:${confColor};border-radius:3px;transition:width .6s"></div>
                 </div>
                 <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:4px">
-                  ${[['Pattern',d.patternScore||'50/50','var(--purple)'],['Candle','—','var(--blue)'],['Volume','—','var(--green)'],['Trend','—','var(--yellow)'],['PA','—','var(--orange)']].map(([l,v,c])=>`<div style="background:#21262d;border-radius:4px;padding:4px;text-align:center"><div style="font-size:9px;color:var(--muted)">${l}</div><div style="font-size:10px;font-weight:700;color:${c}">${v}</div></div>`).join('')}
+                  ${[
+                    ['Pattern', `${patternPts}/50`, 'var(--purple)'],
+                    ['Candle',  `${candlePts}/20`,  'var(--blue)'],
+                    ['Volume',  `${volumePts}/10`,  'var(--green)'],
+                    ['Trend',   `${trendPts}/10`,   'var(--yellow)'],
+                    ['PA',      `${paPts}/10`,      'var(--orange)'],
+                  ].map(([l,v,c])=>`<div style="background:#21262d;border-radius:4px;padding:4px;text-align:center"><div style="font-size:9px;color:var(--muted)">${l}</div><div style="font-size:10px;font-weight:700;color:${c}">${v}</div></div>`).join('')}
                 </div>
                 <div style="font-size:9px;color:var(--muted);margin-top:5px;text-align:center">${confTotal>=threshold?`✅ Passed ${threshold}-point threshold (${regime})`:`⚠ Score ${confTotal} — threshold ${threshold} in ${regime}`}</div>
               </div>
