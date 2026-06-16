@@ -127,14 +127,57 @@ public class NewsKeywordFilter {
 
     // Common false-positive words that look like symbols but aren't
     private static final Set<String> NON_SYMBOLS = Set.of(
+            // Exchange / Regulatory
             "THE", "AND", "FOR", "NSE", "BSE", "RBI", "SEBI", "IRDAI", "GST",
+            "NCLT", "NCLAT", "SAT", "NSDL", "CDSL", "MCX", "NCDEX",
+            // Corporate events — these match NSE symbols like CLEAN, BONUS
+            "DIVIDEND", "BONUS", "RIGHTS", "BUYBACK", "MERGER", "ACQUISITION",
+            "SCHEME", "DEMERGER", "SPLIT", "RECORD", "CLOSURE", "NOTICE",
+            "HEARING", "ORDER", "APPEAL", "PETITION", "WRIT", "SUIT",
+            "CLEAN", "PURE", "LONG", "SHORT", "OPEN", "CLOSE", "HIGH", "LOW",
+            "ANNUAL", "GENERAL", "MEETING", "BOARD", "DIRECTOR", "COMMITTEE",
+            "AUDIT", "ACCOUNTS", "BALANCE", "SHEET", "REPORT", "RESULTS",
+            "QUARTER", "HALF", "YEAR", "DATE", "TIME", "LIMIT", "PERIOD",
+            // Corporate actions
             "CEO", "CFO", "MD", "AGM", "EGM", "IPO", "FPO", "QIP", "OFS",
-            "EBITDA", "PAT", "PBT", "EPS", "PE", "PB", "ROE", "ROA",
+            "MOU", "MOA", "LOI", "LOA", "NDA", "MCA", "ROC",
+            // Financial metrics
+            "EBITDA", "PAT", "PBT", "EPS", "PE", "PB", "ROE", "ROA", "NAV",
+            "NII", "NIM", "GNPA", "NNPA", "CAR", "TIER",
+            // Periods
             "Q1", "Q2", "Q3", "Q4", "FY", "FY24", "FY25", "FY26", "H1", "H2",
-            "YOY", "QOQ", "MOM", "USD", "INR", "EUR", "GBP", "JPY",
-            "GDP", "CPI", "IIP", "PMI", "FII", "DII", "FPI", "NPA",
-            "NBFC", "MFI", "RERA", "PLI", "MSP", "MSCI",
-            "US", "UK", "EU", "IT", "AI", "ML"
+            "YOY", "QOQ", "MOM", "YTD", "MTD",
+            // Currencies / Macro
+            "USD", "INR", "EUR", "GBP", "JPY", "CNY", "SGD", "AED",
+            "GDP", "CPI", "WPI", "IIP", "PMI", "FII", "DII", "FPI", "NPA",
+            // Sector / Entity types
+            "NBFC", "MFI", "RERA", "PLI", "MSP", "MSCI", "NIFTY", "SENSEX",
+            "BANK", "FUND", "TRUST", "GROUP", "CORP", "LTD", "PVT", "LLP",
+            "INDIA", "GLOBAL", "WORLD", "MARKET", "SECTOR", "INDUSTRY",
+            // Technology / Generic
+            "US", "UK", "EU", "IT", "AI", "ML", "IOT", "EV", "CNG", "LNG",
+            "MW", "GW", "KW", "KV", "OPEC", "WTO", "IMF", "ADB", "AIIB",
+            // News words that look like tickers
+            "NEWS", "PRESS", "RELEASE", "MEDIA", "ALERT", "UPDATE", "INFO",
+            "DATA", "RATE", "PRICE", "COST", "FEE", "TAX", "DUTY", "LEVY",
+            "LOSS", "GAIN", "PROFIT", "REVENUE", "INCOME", "EXPENSE",
+            "GROWTH", "RISE", "FALL", "DROP", "SURGE", "JUMP", "SLIP",
+            "NEW", "OLD", "BIG", "TOP", "KEY", "MAIN", "CORE", "UNIT",
+            "WIN", "BUY", "SELL", "HOLD", "ADD", "EXIT", "ENTRY", "STOP",
+            // NSE symbols that are also common English/financial words
+            // These are valid NSE tickers BUT appear too often in generic text
+            // Strategy 1 (direct ticker scan) still catches them in headlines
+            // Strategy 3 (company name map) handles them via full name
+            "ACC",   // "acc to sources", "acc to reports" — too common
+            "CUB",   // "cub" as in bear cub — rare but risky
+            "FACT",  // "fact of the matter", "in fact" — very common
+            "IOB",   // "iob" rarely appears standalone in news text
+            "NLC",   // generic abbreviation risk
+            "PEL",   // rarely standalone in news
+            "SAIL",  // "set sail", "sail through" — common in news
+            "UBL"    // rarely standalone
+            // NOTE: ITC, DLF, MRF, SRF, PFC, MTAR kept — they appear
+            // as exact tickers in BSE headlines and are worth matching
     );
 
 
@@ -283,6 +326,79 @@ public class NewsKeywordFilter {
         m.put("power finance",          "PFC");
         m.put("pfc",                    "PFC");
         m.put("ireda",                  "IREDA");
+        // ── Missing mappings — identified by systematic audit ─────────────────
+        // Automobiles
+        m.put("ashok leyland",          "ASHOKLEY");
+        m.put("ashokleyland",           "ASHOKLEY");
+        m.put("tvs motor",              "TVSMOTOR");
+        m.put("tvs motors",             "TVSMOTOR");
+        m.put("motherson sumi",         "MOTHERSON");
+        m.put("samvardhana motherson",  "MOTHERSON");
+        m.put("balkrishna industries",  "BALKRISIND");
+        m.put("bkt tyres",              "BALKRISIND");
+        // Consumer durables / electricals
+        m.put("voltas",                 "VOLTAS");
+        m.put("crompton greaves",       "CROMPTON");
+        m.put("crompton consumer",      "CROMPTON");
+        m.put("polycab",                "POLYCAB");
+        m.put("cg power",               "CGPOWER");
+        m.put("whirlpool india",        "WHIRLPOOL");
+        // Industrial / engineering
+        m.put("siemens india",          "SIEMENS");
+        m.put("cummins india",          "CUMMINSIND");
+        m.put("thermax",                "THERMAX");
+        m.put("bharat electronics",     "BEL");
+        m.put("bel",                    "BEL");
+        // Metals / mining
+        m.put("hindustan zinc",         "HINDZINC");
+        m.put("hinduzinc",              "HINDZINC");
+        m.put("national aluminium",     "NATIONALUM");
+        m.put("nalco",                  "NATIONALUM");
+        m.put("jindal steel",           "JINDALSTEL");
+        m.put("jspl",                   "JINDALSTEL");
+        m.put("jindal stainless",       "JSL");
+        // Chemicals
+        m.put("gujarat fluorochemicals","FLUOROCHEM");
+        m.put("gfl",                    "FLUOROCHEM");
+        // Finance / NBFC
+        m.put("muthoot finance",        "MUTHOOTFIN");
+        m.put("manappuram finance",     "MANAPPURAM");
+        m.put("cholamandalam",          "CHOLAFIN");
+        m.put("chola finance",          "CHOLAFIN");
+        m.put("shriram finance",        "SHRIRAMFIN");
+        m.put("sundaram finance",       "SUNDARMFIN");
+        m.put("lic housing finance",    "LICHSGFIN");
+        m.put("lic housing",            "LICHSGFIN");
+        m.put("poonawalla fincorp",     "POONAWALLA");
+        m.put("canara bank",            "CANBK");
+        m.put("union bank of india",    "UNIONBANK");
+        m.put("union bank",             "UNIONBANK");
+        // Real estate
+        m.put("oberoi realty",          "OBEROIRLTY");
+        m.put("godrej properties",      "GODREJPROP");
+        m.put("sobha",                  "SOBHA");
+        m.put("brigade enterprises",    "BRIGADE");
+        // Consumer
+        m.put("page industries",        "PAGEIND");
+        m.put("jockey",                 "PAGEIND");
+        m.put("united breweries",       "UBL");
+        m.put("kingfisher",             "UBL");
+        // Renewables / energy
+        m.put("inox wind",              "INOXWIND");
+        m.put("inoxwind",               "INOXWIND");
+        m.put("suzlon energy",          "SUZLON");
+        m.put("cesc",                   "CESC");
+        m.put("torrent power",          "TORNTPOWER");
+        m.put("jsw energy",             "JSWENERGY");
+        m.put("adani green",            "ADANIGREEN");
+        m.put("adani power",            "ADANIPOWER");
+        m.put("adani enterprises",      "ADANIENT");
+        m.put("adani ports",            "ADANIPORTS");
+        // Infra
+        m.put("ircon international",    "IRCON");
+        m.put("rail vikas nigam",       "RVNL");
+        m.put("hg infra",               "HGINFRA");
+        m.put("pnc infratech",          "PNCINFRA");
         COMPANY_NAME_MAP = Collections.unmodifiableMap(m);
     }
 

@@ -25,6 +25,7 @@ import com.trading.strategy.highrr.HighRRTradeManager;
 import com.trading.strategy.orb.OrbDataService;
 import com.trading.strategy.news.NewsScore;
 import com.trading.strategy.news.NewsTradingStrategy;
+import com.trading.strategy.news.NewsIngestionService;
 import com.trading.strategy.smc.BestTradeStrategy;
 import com.trading.strategy.orb.OrbStrategyEngine;
 import com.trading.validation.StrategyValidationTracker;
@@ -105,6 +106,7 @@ public class DashboardController {
 
     // ── FIX 2: ORB strategy services ──────────────────────────────────────
     private final NewsTradingStrategy          newsTradingStrategy; // NEWS_CATALYST_V1
+    private final NewsIngestionService         newsIngestionService; // raw ingested articles
     private final BestTradeStrategy             bestTradeStrategy;   // BEST_TRADE_V1
     private final OrbDataService               orbDataService;
     private final OrbStrategyEngine            orbStrategyEngine;
@@ -1341,6 +1343,77 @@ public class DashboardController {
                 scoredList.add(si);
             }
             out.put("scoredItems", scoredList);
+
+            // ── ingestedItems: ALL raw articles regardless of symbol match ──────
+            // scoredItems only contains symbol-matched scores.
+            // General market news (BSE filings, Moneycontrol) that don't mention
+            // a specific NSE stock never appear in scoredItems.
+            // ingestedItems shows EVERYTHING that was ingested — for full visibility.
+            List<Map<String, Object>> ingestedList = new ArrayList<>();
+            for (com.trading.strategy.news.NewsItem item :
+                    newsIngestionService.getActiveItems()) {
+                Map<String, Object> ai = new LinkedHashMap<>();
+                ai.put("headline",   item.headline() != null
+                        ? (item.headline().length() > 120
+                        ? item.headline().substring(0, 120) + "…"
+                        : item.headline())
+                        : "—");
+                ai.put("category",   item.category() != null ? item.category().name() : "—");
+                ai.put("sentiment",  item.sentiment() != null ? item.sentiment().name() : "—");
+                ai.put("source",     item.source() != null ? item.source() : "—");
+                ai.put("ageMinutes", java.time.Duration.between(
+                        item.publishedAt(),
+                        java.time.Instant.now()).toMinutes());
+                // Rough article score: category(30) + sentiment(25) + recency(20)
+                int catScore  = item.category() != null
+                        ? Math.round(item.category().basePriority / 100f * 30) : 0;
+                int sentScore = item.sentiment() != null
+                        ? Math.round(item.sentiment().score / 100f * 25) : 0;
+                long ageMin   = java.time.Duration.between(
+                        item.publishedAt(),
+                        java.time.Instant.now()).toMinutes();
+                int recScore  = (int) Math.round(20 * Math.exp(-ageMin / 30.0));
+                ai.put("articleScore", catScore + sentScore + recScore);
+                ingestedList.add(ai);
+            }
+            // Sort by articleScore descending
+            ingestedList.sort((a, b) ->
+                    Integer.compare((int) b.getOrDefault("articleScore", 0),
+                            (int) a.getOrDefault("articleScore", 0)));
+            out.put("ingestedItems", ingestedList);
+
+            // ── globalNewsItems: macro/global articles always shown ────────────
+            // Filtered to GLOBAL_EVENT, RBI_POLICY, ECONOMIC_DATA categories
+            // from ET Economy / RBI sources — shown regardless of symbol match
+            // These never appear in scoredItems (no NSE stock name in headline)
+            // but are important macro context for the trader
+            List<Map<String, Object>> globalList = new ArrayList<>();
+            for (com.trading.strategy.news.NewsItem item :
+                    newsIngestionService.getActiveItems()) {
+                String category = item.category() != null ? item.category().name() : "";
+                if (!category.equals("GLOBAL_EVENT")
+                        && !category.equals("RBI_POLICY")
+                        && !category.equals("ECONOMIC_DATA")) continue;
+
+                Map<String, Object> gi = new LinkedHashMap<>();
+                gi.put("headline",  item.headline() != null
+                        ? (item.headline().length() > 100
+                        ? item.headline().substring(0, 100) + "…"
+                        : item.headline())
+                        : "—");
+                gi.put("category",  category.replace("_", " "));
+                gi.put("sentiment", item.sentiment() != null ? item.sentiment().name() : "NEUTRAL");
+                gi.put("source",    item.source() != null ? item.source() : "—");
+                gi.put("ageMinutes", java.time.Duration.between(
+                        item.publishedAt(),
+                        java.time.Instant.now()).toMinutes());
+                globalList.add(gi);
+            }
+            // Sort by age ascending (freshest first)
+            globalList.sort((a, b) ->
+                    Long.compare((long) a.getOrDefault("ageMinutes", 0L),
+                            (long) b.getOrDefault("ageMinutes", 0L)));
+            out.put("globalNewsItems", globalList);
         } catch (Exception e) {
             log.warn("[DASHBOARD] buildNewsCatalystSummary failed: {}", e.getMessage());
             out.put("error", e.getMessage());

@@ -355,6 +355,9 @@ ai:
     risk-per-trade: 0.01
     # Show AI candidates in /scanner.html
     scanner-enabled: true
+  btst:
+    enabled: true      # false = completely disabled (default)
+    risk-pct: 0.01     # 1% capital per BTST trade
 
 # ================================
 # WARMUP CONFIG

@@ -93,40 +93,60 @@ public class AiTradeManagementEngine {
 
         // ── SL hit check ─────────────────────────────────────────────────
         if ((isLong && ltp <= sl) || (!isLong && ltp >= sl)) {
-            close(symbol, ltp, "SL_HIT");
+            String reason = pos.t2Reached ? "TRAIL_HIT_T2"
+                    : pos.t1Reached ? "TRAIL_HIT_T1"
+                    : "SL_HIT";
+            close(symbol, ltp, reason);
             return;
         }
 
-        // ── T2 hit check ─────────────────────────────────────────────────
-        if ((isLong && ltp >= t2) || (!isLong && ltp <= t2)) {
-            close(symbol, ltp, "TARGET_2");
-            return;
-        }
-
-        // ── T1 hit check ─────────────────────────────────────────────────
+        // ── T1 hit → SL moves to EXACTLY T1, trail 0.5% from here ──────
         if (!pos.t1Reached) {
             if ((isLong && ltp >= t1) || (!isLong && ltp <= t1)) {
                 pos.t1Reached = true;
-                // Move SL to breakeven + 0.1%
-                double be = isLong
-                        ? pos.entry * 1.001
-                        : pos.entry * 0.999;
-                if ((isLong && be > sl) || (!isLong && be < sl)) {
-                    pos.currentSl = be;
-                    log.info("[AI-MGMT] {} T1 HIT @ {} → SL moved to breakeven {}",
-                            symbol, String.format("%.2f", ltp), String.format("%.2f", be));
-                }
+                // SL = EXACT T1 level (not breakeven)
+                // Price can never close below T1 from now on
+                // Trail 0.5% will lift it further as price moves up
+                pos.currentSl = t1;
+                log.info("[AI-MGMT] {} T1 HIT @ {} → SL = T1 exactly {} — trailing 0.5%",
+                        symbol,
+                        String.format("%.2f", ltp),
+                        String.format("%.2f", t1));
             }
         }
 
-        // ── Trailing SL (active after T1) ─────────────────────────────────
+        // ── T2 hit → SL moves to EXACTLY T2, trail 0.3% from here ──────
+        if (pos.t1Reached && !pos.t2Reached) {
+            if ((isLong && ltp >= t2) || (!isLong && ltp <= t2)) {
+                pos.t2Reached = true;
+                // SL = EXACT T2 level (not T1)
+                // Minimum profit now locked at T2
+                // Trail 0.3% will lift it further as price moves up
+                pos.currentSl = t2;
+                log.info("[AI-MGMT] {} T2 HIT @ {} → SL = T2 exactly {} — trailing 0.3%",
+                        symbol,
+                        String.format("%.2f", ltp),
+                        String.format("%.2f", t2));
+            }
+        }
+
+        // ── Continuous trailing SL ────────────────────────────────────────
+        // After T1: trail 0.5% below/above current price
+        // After T2: trail 0.3% (tighter — let winner run)
+        // Trail ONLY moves in profit direction — never reverses
+        // SL floor: T1 after T1 hit, T2 after T2 hit
         if (pos.t1Reached) {
+            double trailPct = pos.t2Reached ? 0.003 : TRAIL_PCT;
             double trail = isLong
-                    ? ltp * (1 - TRAIL_PCT)
-                    : ltp * (1 + TRAIL_PCT);
+                    ? ltp * (1 - trailPct)
+                    : ltp * (1 + trailPct);
+            // Only move SL up (LONG) or down (SHORT) — never reverse
             if ((isLong && trail > pos.currentSl) || (!isLong && trail < pos.currentSl)) {
                 pos.currentSl = trail;
-                log.debug("[AI-MGMT] {} Trail SL → {}", symbol, String.format("%.2f", trail));
+                log.debug("[AI-MGMT] {} Trail SL → {} ({})",
+                        symbol,
+                        String.format("%.2f", trail),
+                        pos.t2Reached ? "0.3% after T2" : "0.5% after T1");
             }
         }
     }
@@ -161,7 +181,9 @@ public class AiTradeManagementEngine {
         // Compute P&L
         double pnlPer = isLong ? exitPrice - entry : entry - exitPrice;
         double totalPnl = pnlPer * trade.getQuantity();
-        double slDist   = Math.abs(entry - pos.decision.getStopLoss().doubleValue());
+        // Use ORIGINAL SL (not current trailed SL) for R calculation
+        // currentSl changes during the trade — originalSl is fixed at entry
+        double slDist   = Math.abs(entry - pos.originalSl);
         double rMultiple = slDist > 0 ? pnlPer / slDist : 0;
 
         // Update Trade entity
@@ -258,17 +280,20 @@ public class AiTradeManagementEngine {
     // ═══════════════════════════════════════════════════════════════════════
 
     public static class AiPosition {
-        public final Trade          trade;
+        public final Trade           trade;
         public final AiTradeDecision decision;
         public final double          entry;
+        public final double          originalSl;  // never changes — used for R calculation
         public volatile double       currentSl;
-        public volatile boolean      t1Reached = false;
+        public volatile boolean      t1Reached  = false;
+        public volatile boolean      t2Reached  = false; // T2 hit → trail tightly
 
         public AiPosition(Trade trade, AiTradeDecision decision) {
-            this.trade    = trade;
-            this.decision = decision;
-            this.entry    = trade.getEntryPrice().doubleValue();
-            this.currentSl = decision.getStopLoss().doubleValue();
+            this.trade      = trade;
+            this.decision   = decision;
+            this.entry      = trade.getEntryPrice().doubleValue();
+            this.originalSl = decision.getStopLoss().doubleValue();
+            this.currentSl  = decision.getStopLoss().doubleValue();
         }
     }
 }

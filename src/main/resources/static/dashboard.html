@@ -540,6 +540,8 @@
     </div>
     <!-- All scored items — populated by renderNews() from nc.scoredItems -->
     <div id="news-scored-section"></div>
+    <!-- Global macro news — always visible regardless of scored items -->
+    <div id="news-global-section"></div>
 </div>
 
 <!-- AI ENGINE TAB -->
@@ -882,12 +884,62 @@
 
         // All scored items section
         if(!scoredItems.length){
-            html('news-scored-section',`<div style="padding:9px">
-              <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;color:var(--muted);font-size:11px">
-                ${ingested>0
-                  ?`${ingested} articles ingested · ${active} active · Full score table appears after next 5-min scan cycle`
-                  :'No news ingested yet — sources poll every 3–10 minutes'}
-              </div></div>`);
+            // Show raw ingested articles even if no symbol-matched scores yet
+            const ingestedItems = nc.ingestedItems || [];
+            if (!ingestedItems.length) {
+                html('news-scored-section',`<div style="padding:9px">
+                  <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center;color:var(--muted);font-size:11px">
+                    ${ingested>0
+                      ?`${ingested} articles ingested · ${active} active · Full score table appears after next 5-min scan cycle`
+                      :'No news ingested yet — sources poll every 3–10 minutes'}
+                  </div></div>`);
+                return;
+            }
+            // Show ingested articles with article-level scores
+            html('news-scored-section',`<div style="padding:0 9px 9px">
+              <div style="display:flex;gap:7px;margin-bottom:9px;flex-wrap:wrap">
+                ${[['INGESTED',ingested,'var(--blue)','var(--border)'],
+                   ['ACTIVE',active,'var(--green)','rgba(63,185,80,.4)'],
+                   ['FIRED',signals+'/'+maxSig,'var(--blue)','rgba(88,166,255,.4)']
+                ].map(([l,v,c,bc])=>`<div style="flex:1;min-width:70px;background:var(--card);border:1px solid ${bc};border-radius:8px;padding:8px;text-align:center">
+                  <div style="font-size:18px;font-weight:700;color:${c}">${v}</div>
+                  <div style="font-size:9px;color:var(--muted)">${l}</div>
+                </div>`).join('')}
+              </div>
+              <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px">
+                All Ingested Articles (${ingestedItems.length}) — no stock match yet
+              </div>
+              <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden">
+                ${ingestedItems.map(s=>{
+                  const score=s.articleScore||0;
+                  const cat=(s.category||'—').replace(/_/g,' ');
+                  const sent=s.sentiment||'—';
+                  const age=s.ageMinutes!=null?s.ageMinutes+'min':'—';
+                  const src=s.source||'—';
+                  const barColor=score>=65?'var(--green)':score>=50?'var(--yellow)':'var(--red)';
+                  const scoreColor=score>=65?'var(--green)':score>=50?'var(--gold)':'var(--muted)';
+                  return`<div style="border-bottom:1px solid #1c2129;padding:8px 10px">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+                      <div style="display:flex;align-items:center;gap:5px;flex-wrap:wrap">
+                        <span style="font-size:9px;padding:1px 5px;background:#21262d;border-radius:4px;color:var(--muted)">${cat}</span>
+                        <span style="font-size:9px;color:${sent.includes('POSITIVE')?'var(--green)':sent.includes('NEGATIVE')?'var(--red)':'var(--muted)'}">${sent.replace(/_/g,' ')}</span>
+                      </div>
+                      <span style="font-family:monospace;font-size:13px;font-weight:700;color:${scoreColor}">${score}<span style="font-size:9px;color:var(--muted)">/75</span></span>
+                    </div>
+                    <div style="height:3px;background:#21262d;border-radius:2px;overflow:hidden;margin-bottom:5px">
+                      <div style="height:100%;width:${Math.min(100,score/75*100)}%;background:${barColor};border-radius:2px"></div>
+                    </div>
+                    <div style="display:flex;gap:8px;font-size:9px;color:var(--muted);margin-bottom:4px">
+                      <span>⏱ ${age}</span><span>📡 ${src}</span>
+                    </div>
+                    <div style="font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.headline||'—'}</div>
+                  </div>`;
+                }).join('')}
+              </div>
+              <div style="font-size:9px;color:var(--muted);padding:6px 2px">
+                ℹ Article score = Category(30) + Sentiment(25) + Recency(20). Stock-specific scores appear when articles mention NSE symbols.
+              </div>
+            </div>`);
             return;
         }
 
@@ -952,6 +1004,51 @@
               </div>`;
             }).join('')}
           </div>
+        </div>`);
+
+        // ── Global macro news — ALWAYS shown below scored items ───────────────
+        const globalItems = nc.globalNewsItems || [];
+        html('news-global-section', `<div style="padding:6px 9px 9px">
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;
+                      letter-spacing:.5px;margin-bottom:7px">
+            🌍 Global Macro News ${globalItems.length ? '('+globalItems.length+')' : ''}
+          </div>
+          ${!globalItems.length
+            ? `<div style="background:var(--card);border:1px solid var(--border);
+                           border-radius:8px;padding:10px;text-align:center;
+                           color:var(--muted);font-size:11px">
+                 No global macro news yet — ET Economy and RBI feeds poll every 10-15 min
+               </div>`
+            : `<div style="background:var(--card);border:1px solid var(--border);
+                           border-radius:8px;overflow:hidden">
+                ${globalItems.map(g=>{
+                  const cat  = g.category || '—';
+                  const sent = g.sentiment || 'NEUTRAL';
+                  const age  = g.ageMinutes != null ? g.ageMinutes+'min' : '—';
+                  const src  = (g.source||'—').replace('RSS_','');
+                  const catColor =
+                      cat.includes('RBI')      ? 'var(--purple)' :
+                      cat.includes('ECONOMIC') ? 'var(--blue)'   :
+                      'var(--orange)';
+                  const sentIcon = sent.includes('STRONGLY_POS') ? '🟢'
+                      : sent.includes('POS') ? '🟡'
+                      : sent.includes('NEG') ? '🔴' : '⚪';
+                  return `<div style="padding:8px 10px;border-bottom:1px solid #1c2129">
+                    <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+                      <div style="display:flex;align-items:center;gap:5px">
+                        <span style="font-size:9px;font-weight:700;padding:1px 5px;
+                          background:#21262d;border-radius:4px;color:${catColor}">${cat}</span>
+                        <span style="font-size:9px">${sentIcon}
+                          <span style="color:var(--muted)">${sent.replace(/_/g,' ')}</span>
+                        </span>
+                      </div>
+                      <span style="font-size:9px;color:var(--muted)">⏱${age} 📡${src}</span>
+                    </div>
+                    <div style="font-size:10px;color:var(--fg);overflow:hidden;
+                                text-overflow:ellipsis;white-space:nowrap">${g.headline||'—'}</div>
+                  </div>`;
+                }).join('')}
+               </div>`}
         </div>`);
     }
 
@@ -1022,36 +1119,72 @@
           </div>
           ${watchlist.length ? `
           <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px">
-            <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">
+            <div style="font-size:10px;color:var(--muted);text-transform:uppercase;
+                        letter-spacing:.5px;margin-bottom:8px">
               👀 Watchlist — ${watchlist.length} stock${watchlist.length!==1?'s':''} with confirmed daily patterns
             </div>
             <div style="display:flex;flex-wrap:wrap;gap:6px">
               ${watchlist.map(item=>{
-                const sym = typeof item==='object'?(item.symbol||item):item;
-                const pat = typeof item==='object'?(item.pattern||'Pattern'):'Pattern';
+                const sym    = typeof item==='object'?(item.symbol||item):item;
+                const pat    = typeof item==='object'?(item.pattern||'Pattern'):'Pattern';
+                const reason = typeof item==='object'?(item.skipReason||'ELIGIBLE'):'ELIGIBLE';
+                const score  = typeof item==='object'?(item.score||0):0;
+                const thr    = typeof item==='object'?(item.threshold||70):70;
+
+                // Border and status based on skip reason
+                const borderColor =
+                    reason==='ELIGIBLE'  ? 'rgba(63,185,80,.5)'  :   // green — ready to trade
+                    reason==='NO_CANDLE' ? 'rgba(88,166,255,.4)' :   // blue — waiting for candle
+                    reason==='SCORE_LOW' ? 'rgba(240,192,64,.4)' :   // gold — score too low
+                    reason==='DIRECTION' ? 'rgba(255,100,100,.4)':   // red — counter-trend
+                    reason==='CHOPPY'    ? 'rgba(120,120,120,.4)':   // grey — choppy market
+                    'rgba(88,166,255,.35)';
+
+                const reasonLabel =
+                    reason==='ELIGIBLE'  ? '⚡ Eligible'           :
+                    reason==='NO_CANDLE' ? '⏳ No candle'          :
+                    reason==='SCORE_LOW' ? `${score}/${thr}`        :
+                    reason==='DIRECTION' ? '↔ Direction'            :
+                    reason==='CHOPPY'    ? '〜 Choppy'              :
+                    '—';
+
+                const reasonColor =
+                    reason==='ELIGIBLE'  ? 'var(--green)'   :
+                    reason==='NO_CANDLE' ? 'var(--blue)'    :
+                    reason==='SCORE_LOW' ? 'var(--gold)'    :
+                    reason==='DIRECTION' ? 'var(--red)'     :
+                    reason==='CHOPPY'    ? 'var(--muted)'   :
+                    'var(--muted)';
+
                 const pc2 =
-                  pat.includes('BOS')       ?'var(--green)' :
-                  pat.includes('CHOCH')     ?'var(--blue)'  :
-                  pat.includes('Sweep')     ?'var(--purple)':
-                  pat.includes('S/R')       ?'var(--orange)':
-                  pat.includes('FVG')       ?'var(--yellow)':
-                  pat.includes('Order')     ?'var(--green)' :
-                  pat.includes('Accum')     ?'var(--blue)'  :
-                  pat.includes('Triple')    ?'var(--gold)'  :
-                  pat.includes('H&S')       ?'var(--red)'   :
-                  pat.includes('Triangle')  ?'var(--blue)'  :
-                  pat.includes('Channel')   ?'var(--purple)':
-                  pat.includes('Trendline') ?'var(--orange)':
-                  'var(--muted)';
+                    pat.includes('BOS')       ?'var(--green)' :
+                    pat.includes('CHOCH')     ?'var(--blue)'  :
+                    pat.includes('Sweep')     ?'var(--purple)':
+                    pat.includes('S/R')       ?'var(--orange)':
+                    pat.includes('FVG')       ?'var(--yellow)':
+                    pat.includes('Order')     ?'var(--green)' :
+                    pat.includes('Accum')     ?'var(--blue)'  :
+                    pat.includes('Triple')    ?'var(--gold)'  :
+                    pat.includes('H&S')       ?'var(--red)'   :
+                    pat.includes('Triangle')  ?'var(--blue)'  :
+                    pat.includes('Channel')   ?'var(--purple)':
+                    pat.includes('Trendline') ?'var(--orange)':
+                    'var(--muted)';
+
                 return `<div style="display:flex;flex-direction:column;align-items:center;
-                  background:#0d2544;border:1px solid rgba(88,166,255,.35);
-                  border-radius:8px;padding:5px 10px;min-width:72px;text-align:center">
+                  background:#0d2544;border:1px solid ${borderColor};
+                  border-radius:8px;padding:5px 10px;min-width:80px;text-align:center">
                   <span style="font-size:11px;font-weight:700;color:var(--blue)">${sym}</span>
-                  <span style="font-size:9px;color:${pc2};margin-top:2px;font-weight:600">${pat}</span>
+                  <span style="font-size:9px;color:${pc2};margin-top:1px;font-weight:600">${pat}</span>
+                  <span style="font-size:9px;color:${reasonColor};margin-top:2px">${reasonLabel}</span>
                 </div>`;
               }).join('')}
             </div>
-          </div>` : `<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--muted);font-size:11px">👀 Watchlist empty — scanning for daily patterns every 5 minutes from 9:30 AM</div>`}
+          </div>` : `
+          <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;
+                      padding:10px;color:var(--muted);font-size:11px">
+            👀 Watchlist empty — scanning for daily patterns every 5 minutes from 9:30 AM
+          </div>`}
         </div>`);
 
         // ── CONFIDENCE MODEL + PERFORMANCE ────────────────────────────────

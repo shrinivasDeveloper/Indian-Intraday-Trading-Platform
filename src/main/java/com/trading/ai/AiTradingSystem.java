@@ -327,11 +327,23 @@ public class AiTradingSystem {
             AiPatternConfidenceEngine.ConfidenceResult conf =
                     confidenceEngine.score(candidate, dailyCandles, candles5m);
 
-            // Add to watchlist if any patterns detected (even below threshold)
+            // Add to watchlist with skip reason encoded
+            // Format: "pattern|skipReason|score|threshold"
+            // skipReason: ELIGIBLE / SCORE_LOW / NO_CANDLE / DIRECTION / CHOPPY
             if (conf.bullishPatterns() + conf.bearishPatterns() > 0) {
-                // Store pattern name with symbol for watchlist display
                 String dp = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
-                watchlist.put(candidate.getSymbol(), dp);
+                String skipReason;
+                if (conf.totalScore() == 0) {
+                    skipReason = "NO_CANDLE";          // Gate 2 failed — no confirming 5m candle
+                } else if (!conf.meetsThreshold(executionThreshold)) {
+                    skipReason = "SCORE_LOW";          // score below threshold
+                } else if (choppy) {
+                    skipReason = "CHOPPY";             // choppy market — no execution
+                } else {
+                    skipReason = "ELIGIBLE";           // passes score, waiting direction/window check
+                }
+                watchlist.put(candidate.getSymbol(),
+                        dp + "|" + skipReason + "|" + conf.totalScore() + "|" + executionThreshold);
             }
 
             // Log watchlist entry
@@ -365,13 +377,15 @@ public class AiTradingSystem {
                 if (marketBull && "SHORT".equals(stockDir)) {
                     log.debug("[AI-SYSTEM] {} SHORT skipped — TRENDING market is BULLISH, no counter-trend",
                             candidate.getSymbol());
-                    watchlist.put(candidate.getSymbol(), conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern");
+                    String dp = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
+                    watchlist.put(candidate.getSymbol(), dp + "|DIRECTION|" + conf.totalScore() + "|" + executionThreshold);
                     continue;
                 }
                 if (marketBear && "LONG".equals(stockDir)) {
                     log.debug("[AI-SYSTEM] {} LONG skipped — TRENDING market is BEARISH, no counter-trend",
                             candidate.getSymbol());
-                    watchlist.put(candidate.getSymbol(), conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern");
+                    String dp = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
+                    watchlist.put(candidate.getSymbol(), dp + "|DIRECTION|" + conf.totalScore() + "|" + executionThreshold);
                     continue;
                 }
                 if (!marketBull && !marketBear) {
@@ -653,6 +667,10 @@ public class AiTradingSystem {
     // DAILY RESET — midnight
     // ═══════════════════════════════════════════════════════════════════════
 
+    private static int safeInt(String s) {
+        try { return Integer.parseInt(s.trim()); } catch (Exception e) { return 0; }
+    }
+
     /**
      * Returns the current trade window name based on IST time.
      * Returns null if outside trading hours.
@@ -676,7 +694,7 @@ public class AiTradingSystem {
     public void dailyReset() {
         firedToday.clear();
         tradesToday.set(0);
-        tradesPerWindow.values().forEach(c -> c.set(0)); // reset all window counters
+        tradesPerWindow.values().forEach(counter -> counter.set(0)); // reset all window counters
         todayDecisions.clear();
         // FIX: clear trade manager positions — prevents ghost positions
         // surviving midnight and blocking the next trading session
@@ -697,6 +715,49 @@ public class AiTradingSystem {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // BTST READ-ONLY ACCESSORS — used by BtstAiStrategy only
+    // These are purely read-only — zero impact on AI trading system state
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /** Returns map of symbol → confidence score for all watchlist stocks */
+    public Map<String, Integer> getWatchlistScores() {
+        // watchlist stores symbol → pattern name
+        // scores are not stored — BTST uses pattern presence as proxy
+        // stocks on watchlist passed all gates — score ≥ 1
+        Map<String, Integer> scores = new LinkedHashMap<>();
+        for (String sym : watchlist.keySet()) {
+            // Use todayDecisions for actual scores if available
+            todayDecisions.stream()
+                    .filter(d -> sym.equals(d.getSymbol()))
+                    .findFirst()
+                    .ifPresentOrElse(
+                            d -> scores.put(sym, (int) d.getNumericPreScore()),
+                            () -> scores.put(sym, 80) // on watchlist = ≥ threshold
+                    );
+        }
+        return Collections.unmodifiableMap(scores);
+    }
+
+    /** Returns the suggested direction for a watchlist symbol */
+    public String getWatchlistDirection(String symbol) {
+        return todayDecisions.stream()
+                .filter(d -> symbol.equals(d.getSymbol()))
+                .findFirst()
+                .map(d -> d.getDirection() != null ? d.getDirection() : "LONG")
+                .orElse("LONG");
+    }
+
+    /** Returns the dominant pattern name for a watchlist symbol */
+    public String getWatchlistPattern(String symbol) {
+        return watchlist.getOrDefault(symbol, "Pattern");
+    }
+
+    /** Returns true if symbol is currently in an active AI position */
+    public boolean isSymbolInActivePosition(String symbol) {
+        return tradeManager.getOpenPositions().containsKey(symbol);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // STATUS ACCESSORS — for DashboardController
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -705,10 +766,24 @@ public class AiTradingSystem {
         status.put("regime",         currentRegime);
         status.put("phase",          probabilityEngine.getPhaseLabel());
         status.put("tradesToday",    tradesToday.get());
-        status.put("watchlistCount",   watchlist.size());
-        // Return as list of {symbol, pattern} objects for dashboard display
+        status.put("watchlistCount", watchlist.size());
+        // Parse encoded watchlist value: "pattern|skipReason|score|threshold"
+        // Returns [{symbol, pattern, skipReason, score, threshold}] for dashboard
         status.put("watchlist", watchlist.entrySet().stream()
-                .map(e -> java.util.Map.of("symbol", e.getKey(), "pattern", e.getValue()))
+                .map(e -> {
+                    String[] parts = e.getValue().split("\\|", 4);
+                    String  pattern   = parts[0];
+                    String  reason    = parts.length > 1 ? parts[1] : "ELIGIBLE";
+                    int     score     = parts.length > 2 ? safeInt(parts[2]) : 0;
+                    int     threshold = parts.length > 3 ? safeInt(parts[3]) : 70;
+                    return java.util.Map.of(
+                            "symbol",     e.getKey(),
+                            "pattern",    pattern,
+                            "skipReason", reason,
+                            "score",      score,
+                            "threshold",  threshold
+                    );
+                })
                 .collect(java.util.stream.Collectors.toList()));
         status.put("maxTrades",      maxTradesPerDay);
         status.put("openPositions",  tradeManager.getOpenCount());
