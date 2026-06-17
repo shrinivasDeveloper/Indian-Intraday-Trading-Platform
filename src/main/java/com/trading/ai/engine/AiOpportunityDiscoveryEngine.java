@@ -500,7 +500,10 @@ public class AiOpportunityDiscoveryEngine {
                         // PROXIMITY: ltp must still be within 1.0% of sweep level
                         // If stock dropped 2%+ below level → short opportunity gone
                         if (ltp >= level * 0.990) {
-                            return 1.0; // sweep high confirmed AND price near level
+                            // FIX: was returning +1.0 — caused computePatternScore()
+                            // to never credit SweepHigh for SHORT (checks val < -0.5).
+                            // SweepHigh is a SHORT-only pattern; must be negative.
+                            return -1.0; // sweep high confirmed AND price near level
                         }
                         return 0; // sweep valid but price already dropped too far
                     }
@@ -581,7 +584,11 @@ public class AiOpportunityDiscoveryEngine {
                 }
                 if (touches >= 3 && projected > 0
                         && Math.abs(ltp - projected) / projected < 0.015) {
-                    return 1.0; // at falling daily trendline
+                    // FIX: was returning +1.0 for falling trendline too — identical
+                    // to the rising-trendline LONG case above. Falling resistance
+                    // trendline is a SHORT setup and must be negative-signed so
+                    // computePatternScore()'s bearish check (val < -0.5) can see it.
+                    return -1.0; // at falling daily trendline (SHORT)
                 }
             }
         }
@@ -868,6 +875,12 @@ public class AiOpportunityDiscoveryEngine {
                 ? (aiData.detectSRFlip(daily, structure, ltp) ? 1.0 : 0.0) : 0.0;
 
         // f[57]: Daily channel position — where is price in 20-day daily range
+        // Scale: -1 (range bottom) to +1 (range top), via norm(). Neutral = 0.
+        // FIX: fallback was 0.5 — on a -1..+1 scale, 0.5 means "70% toward
+        // the top", not neutral. This silently gave SHORT setups an
+        // undeserved +2pt bonus (AiPatternConfidenceEngine: cp > 0.2 check)
+        // whenever a stock had <20 days history or a flat/degenerate range.
+        // Correct neutral midpoint on this scale is 0, not 0.5.
         int nD = daily.size();
         if (nD >= 20) {
             double hiD = daily.subList(nD-20, nD).stream()
@@ -875,9 +888,9 @@ public class AiOpportunityDiscoveryEngine {
             double loD = daily.subList(nD-20, nD).stream()
                     .mapToDouble(can -> can.getLow().doubleValue()).min().orElse(ltp);
             double rangeD = hiD - loD;
-            f[57] = rangeD > 0 ? norm((ltp - loD) / rangeD, 0, 1) : 0.5;
+            f[57] = rangeD > 0 ? norm((ltp - loD) / rangeD, 0, 1) : 0.0;
         } else {
-            f[57] = 0.5;
+            f[57] = 0.0;
         }
 
         // f[58]: Daily trendline touch — uses daily swing points, 3-touch validated
@@ -885,7 +898,10 @@ public class AiOpportunityDiscoveryEngine {
         f[58] = detectDailyTrendlineTouch(daily, ltp);
 
         // f[59]: Daily pattern confidence — composite
-        f[59] = (Math.max(f[54], f[55]) + f[56] + f[58]) / 3.0;
+        // FIX: f[55] (SweepHigh) and f[58] (TrendlineI falling case) are now
+        // negative-signed when triggered. Use Math.abs() on both so SHORT
+        // setups contribute equally to this composite as LONG setups do.
+        f[59] = (Math.max(f[54], Math.abs(f[55])) + f[56] + Math.abs(f[58])) / 3.0;
 
         // ── Group K: Daily Pattern Features (f[60-69]) ───────────────────────
         // All patterns validated strictly on daily candles (1-year data).
@@ -913,7 +929,9 @@ public class AiOpportunityDiscoveryEngine {
         s += Math.abs(f[22]) * 20;                          // HTF trend
         s += Math.max(0, f[16]) * 15;                       // RVOL
         s += f[17] > 0 ? 10 : 0;                            // volume spike
-        s += Math.max(f[54], f[55]) > 0 ? 15 : 0;          // FIX: either sweep pattern
+        // FIX: f[55] (SweepHigh) is now negative-signed; use Math.abs() so
+        // either sweep direction (LONG SweepLow or SHORT SweepHigh) credits here.
+        s += Math.max(f[54], Math.abs(f[55])) > 0 ? 15 : 0;  // either sweep pattern
         s += (f[30] > 0 || f[31] > 0) ? 10 : 0;            // sector aligned
         s += Math.max(0, Math.abs(f[8])) * 5;               // recent momentum
         s += Math.max(0, Math.abs(f[38] - 0.5)) * 10;      // breadth extreme
@@ -940,7 +958,9 @@ public class AiOpportunityDiscoveryEngine {
         bearScore += f[3] < 0 ? 3 : 0;
         bearScore += f[22] < 0 ? 3 : 0;
         bearScore += f[31] > 0 ? 2 : 0;
-        bearScore += f[55] > 0 ? 3 : 0;   // sweep high (sell signal)
+        // FIX: f[55] sign convention changed (now -1.0 when triggered, was +1.0)
+        // to match computePatternScore()'s bearish check (val < -0.5).
+        bearScore += f[55] < 0 ? 3 : 0;   // sweep high (sell signal)
         bearScore += f[8] < 0  ? 1 : 0;
         bearScore += f[34] < 0 ? 2 : 0;
         if (f[48] > 0 && f[49] < 0.4) bearScore += 2; // negative news
@@ -989,9 +1009,11 @@ public class AiOpportunityDiscoveryEngine {
                 .distFromSupport(supp != null ? (ltp - supp.price()) / ltp * 100 : 99)
                 .distFromResistance(res != null ? (res.price() - ltp) / ltp * 100 : 99)
                 .supportStrength(supp != null ? supp.touchCount() : 0)
-                .liquiditySweep(f[54] > 0 || f[55] > 0)
+                // FIX: f[55] (SweepHigh) is now negative-signed when triggered
+                .liquiditySweep(f[54] > 0 || f[55] < 0)
                 .srFlip(f[56] > 0)
-                .trendlineTouch(f[58] > 0)
+                // FIX: f[58] now negative for falling-trendline SHORT touches
+                .trendlineTouch(f[58] != 0)
                 .channelPosition(f[57] > 0.7 ? "UPPER" : f[57] < 0.3 ? "LOWER" : "MID")
                 .return5m(f[10])
                 .return15m(f[11])

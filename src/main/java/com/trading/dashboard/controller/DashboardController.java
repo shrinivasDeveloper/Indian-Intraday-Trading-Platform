@@ -1349,9 +1349,21 @@ public class DashboardController {
             // General market news (BSE filings, Moneycontrol) that don't mention
             // a specific NSE stock never appear in scoredItems.
             // ingestedItems shows EVERYTHING that was ingested — for full visibility.
+            //
+            // FIX: Suppress pure regulatory boilerplate from DISPLAY only.
+            // Most BSE ingestion is routine compliance filings (Reg 29(2)/30/44(3),
+            // Postal Ballot results, Analyst Meeting intimations) that carry zero
+            // tradeable signal and clutter the dashboard. This filter only affects
+            // what's RENDERED here — newsIngestionService.getActiveItems() itself,
+            // scoring, and trading logic are completely untouched.
             List<Map<String, Object>> ingestedList = new ArrayList<>();
+            int suppressedBoilerplate = 0;
             for (com.trading.strategy.news.NewsItem item :
                     newsIngestionService.getActiveItems()) {
+                if (isRegulatoryBoilerplate(item.headline(), item.description())) {
+                    suppressedBoilerplate++;
+                    continue;
+                }
                 Map<String, Object> ai = new LinkedHashMap<>();
                 ai.put("headline",   item.headline() != null
                         ? (item.headline().length() > 120
@@ -1381,6 +1393,7 @@ public class DashboardController {
                     Integer.compare((int) b.getOrDefault("articleScore", 0),
                             (int) a.getOrDefault("articleScore", 0)));
             out.put("ingestedItems", ingestedList);
+            out.put("suppressedBoilerplateCount", suppressedBoilerplate);
 
             // ── globalNewsItems: macro/global articles always shown ────────────
             // Filtered to GLOBAL_EVENT, RBI_POLICY, ECONOMIC_DATA categories
@@ -1419,6 +1432,36 @@ public class DashboardController {
             out.put("error", e.getMessage());
         }
         return out;
+    }
+
+    /**
+     * Identifies routine SEBI/BSE regulatory boilerplate that carries zero
+     * tradeable signal — used ONLY to declutter the dashboard's ingestedItems
+     * display. Does NOT affect NewsScoreEngine, NewsKeywordFilter, category/
+     * sentiment classification, or any trading decision. A purely cosmetic
+     * display filter applied after scoring/categorization already happened.
+     */
+    private boolean isRegulatoryBoilerplate(String headline, String description) {
+        String combined = ((headline != null ? headline : "") + " "
+                + (description != null ? description : "")).toLowerCase();
+        // Each phrase below is routine compliance text seen verbatim across
+        // hundreds of BSE filings daily — never carries a trading signal.
+        return combined.contains("regulation 29(2)")
+                || combined.contains("regulation 29 (2)")
+                || combined.contains("reg 29(2)")
+                || combined.contains("regulation 30 of the sebi")
+                || combined.contains("reg 30 of the sebi")
+                || combined.contains("regulation 44(3)")
+                || combined.contains("regulation 44 (3)")
+                || combined.contains("postal ballot")
+                || combined.contains("scrutinizer's report")
+                || combined.contains("analyst/institutional investor meeting")
+                || combined.contains("analyst / institutional investor meeting")
+                || combined.contains("regulation 10(6)")
+                || combined.contains("regulation 10 (6)")
+                || combined.contains("disclosure under sebi (pit)")
+                || combined.contains("prohibition of insider trading")
+                || combined.contains("intimation of analyst");
     }
 
     // ══════════════════════════════════════════════════════════════════════════

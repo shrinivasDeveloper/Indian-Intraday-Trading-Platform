@@ -908,6 +908,7 @@
               </div>
               <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:7px">
                 All Ingested Articles (${ingestedItems.length}) — no stock match yet
+                ${nc.suppressedBoilerplateCount ? ` · ${nc.suppressedBoilerplateCount} routine filing${nc.suppressedBoilerplateCount!==1?'s':''} hidden` : ''}
               </div>
               <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden">
                 ${ingestedItems.map(s=>{

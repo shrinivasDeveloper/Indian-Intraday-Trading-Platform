@@ -39,6 +39,26 @@ public class NewsKeywordFilter {
             "acquires", "acquired by", "merger approved", "board approves merger"
     );
 
+    // ── NEW: Breaking news — sudden company-specific events needing urgent ────
+    // attention. Previously these fell through to OTHER (basePriority 20) since
+    // BREAKING_NEWS (basePriority 50) was defined in the enum but never assigned
+    // by classify(). This restores the category's intended use.
+    // Checked AFTER EARNINGS/M&A (more specific, higher priority) and BEFORE
+    // RBI/MACRO/GLOBAL/sector (which are existing, unmodified paths below).
+    private static final Set<String> TIER1_BREAKING = Set.of(
+            "fire breaks out", "plant fire", "factory fire", "explosion at",
+            "ceo resigns", "md resigns", "cfo resigns", "resigns with immediate effect",
+            "steps down", "sudden resignation",
+            "raided by", "raid at", "ed raid", "cbi raid", "income tax raid",
+            "search and seizure at", "premises searched",
+            "plant shutdown", "factory shutdown", "production halted",
+            "major client cancels", "contract cancelled", "order cancelled",
+            "strike at", "workers strike", "labour unrest", "plant closure",
+            "accident at", "explosion", "fire incident",
+            "arrested", "chairman arrested", "promoter arrested",
+            "trading halted", "circuit breaker hit", "stock halted"
+    );
+
     // ── Tier 2: High-impact macro/policy keywords (weight 70–89) ─────────────
     private static final Set<String> TIER2_RBI = Set.of(
             "rbi", "repo rate", "reverse repo", "crr", "slr", "monetary policy",
@@ -48,9 +68,15 @@ public class NewsKeywordFilter {
 
     private static final Set<String> TIER2_MACRO = Set.of(
             "gdp", "cpi", "inflation", "iip", "trade deficit", "current account",
-            "fiscal deficit", "budget", "gst", "tax", "disinvestment", "fii",
+            "fiscal deficit", "budget", "gst", "disinvestment", "fii",
             "dii", "foreign investment", "fpi", "government policy", "pli scheme",
-            "production linked", "import duty", "export ban", "msme"
+            "production linked", "import duty", "export ban", "msme",
+            // FIX: replaced generic "tax" (was wrongly catching company-specific
+            // tax notices/orders like "Income Tax Order received by XYZ" and
+            // routing them through the strict macro direction filter).
+            // These specific phrases only match genuine macro tax POLICY news.
+            "income tax slab", "income tax rate", "corporate tax rate",
+            "tax policy", "tax reform", "wealth tax", "tax relief for taxpayers"
     );
 
     private static final Set<String> TIER2_GLOBAL = Set.of(
@@ -111,7 +137,18 @@ public class NewsKeywordFilter {
             "high", "strong", "growth", "rise", "positive", "upgrade", "bullish",
             "outperform", "buy", "dividend", "bonus", "win", "award", "approval",
             "contract win", "new order", "expansion", "launch", "partnership",
-            "doubles", "triples", "exceeds", "milestone", "breakthrough", "recovery"
+            "doubles", "triples", "exceeds", "milestone", "breakthrough", "recovery",
+            // Legal / regulatory outcome words — ADDED (covers tax/court/SEBI orders)
+            "favourable", "favorable", "favour of", "favor of", "relief",
+            "exonerated", "acquitted", "quashed", "cleared of", "sanctioned",
+            "approved by", "resolution plan approved", "no penalty", "withdrawn case",
+            "settled in", "ruled in favour", "ruled in favor",
+            // Corporate events — ADDED (orders, stake, FDA, ratings, capacity)
+            "wins order", "receives order", "order worth",
+            "promoter increases stake", "promoter increases holding",
+            "buyback announced", "special dividend", "bonus issue", "stock split",
+            "fda approval", "usfda approval", "credit rating upgraded",
+            "capacity expansion", "plant commissioned"
     );
 
     private static final Set<String> NEGATIVE_WORDS = Set.of(
@@ -119,7 +156,18 @@ public class NewsKeywordFilter {
             "warning", "downgrade", "sell", "bearish", "negative", "concern",
             "risk", "problem", "issue", "delay", "penalty", "fine", "fraud",
             "scam", "recall", "ban", "halt", "suspend", "withdraw", "disappoint",
-            "widens", "narrows to loss", "slump", "crash", "plunge", "probe"
+            "widens", "narrows to loss", "slump", "crash", "plunge", "probe",
+            // Legal / regulatory outcome words — ADDED (covers tax/court/SEBI orders)
+            "unfavourable", "unfavorable", "against the company", "rejected",
+            "raid", "raided", "seized", "search and seizure", "insolvency",
+            "bankruptcy", "npa rises", "pledge shares", "promoter pledge",
+            "qualified opinion", "demand notice", "show cause notice",
+            "litigation", "default on", "defaulted", "irregularities found",
+            // Corporate events — ADDED (stake reduction, audits, NCLT, ratings)
+            "promoter reduces stake", "promoter reduces holding",
+            "forensic audit", "fraud detected", "nclt admits",
+            "insolvency proceedings", "default on payment",
+            "credit rating downgraded"
     );
 
     // NSE symbol pattern — 2-10 uppercase letters (common NSE symbol format)
@@ -442,6 +490,7 @@ public class NewsKeywordFilter {
 
         if (matchesAny(combined, TIER1_EARNINGS))    return NewsItem.NewsCategory.EARNINGS;
         if (matchesAny(combined, TIER1_MA))          return NewsItem.NewsCategory.MERGER_ACQUISITION;
+        if (matchesAny(combined, TIER1_BREAKING))    return NewsItem.NewsCategory.BREAKING_NEWS;
         if (matchesAny(combined, TIER2_RBI))         return NewsItem.NewsCategory.RBI_POLICY;
         if (matchesAny(combined, TIER2_MACRO))       return NewsItem.NewsCategory.ECONOMIC_DATA;
         if (matchesAny(combined, TIER2_GLOBAL))      return NewsItem.NewsCategory.GLOBAL_EVENT;
@@ -496,6 +545,7 @@ public class NewsKeywordFilter {
         // Bonus for multiple keyword hits
         int hits = countMatches(combined, TIER1_EARNINGS) +
                 countMatches(combined, TIER1_MA) +
+                countMatches(combined, TIER1_BREAKING) +
                 countMatches(combined, TIER2_RBI) +
                 countMatches(combined, TIER2_MACRO);
         weight += Math.min(15, hits * 3);

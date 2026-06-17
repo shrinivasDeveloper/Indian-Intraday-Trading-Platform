@@ -400,7 +400,7 @@ public class AiReasoningEngine {
         // Check pattern features (Group I: 54-59)
         // If pattern detected, estimate age from candle momentum decay
         boolean sweepLow  = f[54] > 0;
-        boolean sweepHigh = f[55] > 0;
+        boolean sweepHigh = f[55] < 0; // FIX: SweepHigh now negative-signed
         boolean srFlip    = f[56] > 0;
 
         if (!sweepLow && !sweepHigh && !srFlip) return 5; // no pattern = stale
@@ -468,15 +468,15 @@ public class AiReasoningEngine {
 
         // Liquidity sweep — highest quality pattern
         boolean sweepLow  = f[54] > 0;
-        boolean sweepHigh = f[55] > 0;
+        boolean sweepHigh = f[55] < 0; // FIX: SweepHigh now negative-signed
         if (sweepLow || sweepHigh) score += 1.0;
 
         // SR flip — strong structure change
         boolean srFlip = f[56] > 0;
         if (srFlip) score += 0.7;
 
-        // Trendline touch
-        boolean trendlineTouch = f[58] > 0;
+        // Trendline touch — FIX: f[58] now negative for falling-trendline SHORT
+        boolean trendlineTouch = f[58] != 0;
         if (trendlineTouch) score += 0.5;
 
         // Channel position — prefer entries at extremes not midpoint
@@ -565,7 +565,7 @@ public class AiReasoningEngine {
         double[] f = candidate.getFeatureVector().getFeatures();
         if (f != null && f.length >= 60) {
             if (f[54] > 0) sb.append(". Liquidity sweep low confirmed");
-            else if (f[55] > 0) sb.append(". Liquidity sweep high confirmed");
+            else if (f[55] < 0) sb.append(". Liquidity sweep high confirmed"); // FIX: now negative-signed
             if (f[56] > 0) sb.append(". S/R flip detected");
         }
 
