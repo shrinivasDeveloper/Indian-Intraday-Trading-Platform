@@ -22,7 +22,7 @@ import java.util.List;
  *   4. Trend Alignment           = 10 pts — last 15 days trend supports formation
  *   5. Price Action Quality      = 10 pts — S/R behavior, chart cleanliness
  *
- * Total = 100 pts. Minimum to trade: 70 (TRENDING), 80 (RANGING).
+ * Total = 100 pts. Minimum to trade: 75 (TRENDING), 85 (RANGING).
  * CHOPPY: no execution regardless of score.
  */
 @Component
@@ -31,12 +31,13 @@ import java.util.List;
 public class AiPatternConfidenceEngine {
 
     public record ConfidenceResult(
-            int totalScore,            // 0–100
+            int totalScore,            // 0–100 (up to 105 internally before the 100 cap)
             int patternScore,          // 0–50
             int confirmationScore,     // 0–20
             int volumeScore,           // 0–10
             int trendScore,            // 0–10
             int priceActionScore,      // 0–10
+            int vwapScore,             // 0–5  NEW — see Component 6 below
             int bullishPatterns,       // count of confirmed bullish daily patterns
             int bearishPatterns,       // count of confirmed bearish daily patterns
             String dominantPattern,    // name of strongest pattern detected
@@ -70,7 +71,7 @@ public class AiPatternConfidenceEngine {
         if (ps.score == 0) {
             log.debug("[AI-CONF] {} {} GATE1 FAIL — no daily pattern confirmed",
                     candidate.getSymbol(), direction);
-            return new ConfidenceResult(0, 0, 0, 0, 0, 0,
+            return new ConfidenceResult(0, 0, 0, 0, 0, 0, 0,
                     0, 0, "NONE", "GATE1_FAIL: no daily pattern");
         }
 
@@ -109,7 +110,7 @@ public class AiPatternConfidenceEngine {
                         String.format("%.2f", open5),
                         String.format("%.2f", close5),
                         String.format("%.2f", bodyRatio5));
-                return new ConfidenceResult(0, ps.score, 0, 0, 0, 0,
+                return new ConfidenceResult(0, ps.score, 0, 0, 0, 0, 0,
                         ps.bullCount, ps.bearCount, ps.dominant,
                         "GATE2_FAIL: 5m candle not confirming direction");
             }
@@ -128,17 +129,81 @@ public class AiPatternConfidenceEngine {
         // ── Component 5: Price Action Quality (0–10) ────────────────────────
         int priceAction = computePriceActionScore(f, daily, direction, n);
 
-        int total = ps.score + confirm + vol + trend + priceAction;
+        // ── Component 6: VWAP Alignment (0–5) — NEW, purely additive ────────
+        // Deliberately a BONUS ONLY, never a penalty — misalignment scores 0,
+        // never negative. This means nothing that previously qualified can
+        // now fail purely because of VWAP; it can only help a marginal setup
+        // clear the threshold. total is still capped at 100 below, so an
+        // already-maxed setup is completely unaffected — this only matters
+        // for candidates currently below 100.
+        int vwapBonus = computeVwapScore(candles5m, direction);
+
+        int total = ps.score + confirm + vol + trend + priceAction + vwapBonus;
         total = Math.min(100, Math.max(0, total));
 
         String reason = String.format(
-                "Pattern=%d/50 Candle=%d/20 Vol=%d/10 Trend=%d/10 PA=%d/10 [%s]",
-                ps.score, confirm, vol, trend, priceAction, ps.dominant);
+                "Pattern=%d/50 Candle=%d/20 Vol=%d/10 Trend=%d/10 PA=%d/10 VWAP=%d/5 [%s]",
+                ps.score, confirm, vol, trend, priceAction, vwapBonus, ps.dominant);
 
         log.debug("[AI-CONF] {} {} total={} | {}", candidate.getSymbol(), direction, total, reason);
 
-        return new ConfidenceResult(total, ps.score, confirm, vol, trend, priceAction,
+        return new ConfidenceResult(total, ps.score, confirm, vol, trend, priceAction, vwapBonus,
                 ps.bullCount, ps.bearCount, ps.dominant, reason);
+    }
+
+    /**
+     * Component 6: VWAP Alignment (0–5, bonus only, never a penalty).
+     * Intraday VWAP computed from candles5m (typical price × volume,
+     * cumulative from market open). Proportional to actual distance past
+     * VWAP, not flat — rewards genuine separation more than a marginal
+     * graze (added when scaling to a 500+ stock universe, where a binary
+     * bonus stopped meaningfully differentiating quality):
+     *   >0.8% past VWAP in trade direction  → +5 (strong, clear conviction)
+     *   0.3–0.8% past                        → +3 (decent separation)
+     *   0.0–0.3% past                        → +1 (barely there, weak)
+     *   Not aligned, or no data               → +0 — never subtracted.
+     */
+    private int computeVwapScore(List<Candle> candles5m, String direction) {
+        try {
+            if (candles5m == null || candles5m.isEmpty()) return 0;
+            double cumPV = 0, cumVol = 0;
+            for (Candle c : candles5m) {
+                double typicalPrice = (c.getHigh().doubleValue()
+                        + c.getLow().doubleValue()
+                        + c.getClose().doubleValue()) / 3.0;
+                double v = c.getVolume();
+                cumPV  += typicalPrice * v;
+                cumVol += v;
+            }
+            if (cumVol <= 0) return 0;
+            double vwap = cumPV / cumVol;
+            double ltp  = candles5m.get(candles5m.size() - 1).getClose().doubleValue();
+
+            // UPDATED: proportional to actual distance from VWAP, not flat.
+            // With a 500+ stock universe, a binary "aligned = +5" treats a
+            // stock barely 0.05% past VWAP the same as one with 1%+ clear
+            // separation — exactly the kind of noise a much larger candidate
+            // pool will surface more of. Scaling by distance means only
+            // genuine, clear separation earns the full bonus; a marginal
+            // graze gets a small nudge, not the same reward.
+            double pctPast;
+            if ("LONG".equals(direction)) {
+                if (ltp <= vwap) return 0; // not aligned — unchanged, no bonus
+                pctPast = (ltp - vwap) / vwap;
+            } else if ("SHORT".equals(direction)) {
+                if (ltp >= vwap) return 0; // not aligned — unchanged, no bonus
+                pctPast = (vwap - ltp) / vwap;
+            } else {
+                return 0;
+            }
+
+            if (pctPast > 0.008) return 5; // >0.8% clear — strong, clear conviction
+            if (pctPast > 0.003) return 3; // 0.3–0.8% — decent separation
+            if (pctPast > 0.0)   return 1; // 0.0–0.3% — barely there, weak signal
+            return 0;
+        } catch (Exception e) {
+            return 0; // any failure — no bonus, no penalty, no impact on existing scoring
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════

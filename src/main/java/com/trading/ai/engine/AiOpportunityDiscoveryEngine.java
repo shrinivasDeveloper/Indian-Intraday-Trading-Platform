@@ -786,17 +786,38 @@ public class AiOpportunityDiscoveryEngine {
         f[44] = Math.min(1.0, history.getTimesThisWeek() / 5.0);
         f[45] = history.getLastOutcome();
         f[46] = history.getTotalTrades() > 0 ? 1.0 : 0.0;
-        // FIX: f[47] = Supply/Demand zone proximity
-        // Demand zone: daily candle where price launched UP with >1.5% body (buying base)
-        // Supply zone:  daily candle where price launched DOWN with >1.5% body (selling base)
+        // FIX (accuracy issue found): f[47] = Supply/Demand zone proximity
+        // Demand zone: a tight, quiet BASE candle immediately followed by a
+        // strong institutional up-move (the "launch pad"). Supply zone:
+        // same idea, downward.
         // +1.0 = price at demand zone (institutional buy zone — bullish)
         // -1.0 = price at supply zone (institutional sell zone — bearish)
         //  0.0 = no nearby S/D zone
+        //
+        // BUG FIXED: baseBody was computed but never actually checked —
+        // the old code flagged ANY candle followed by a big move as a
+        // "zone", regardless of whether that first candle was a genuine
+        // quiet consolidation or itself a chaotic, wide-ranging candle.
+        // That's not real S/D zone theory and explains the low accuracy —
+        // now requires baseBody < 0.6×ATR (a genuinely small/flat base).
+        //
+        // BUG FIXED: when both a demand-like and supply-like base existed
+        // within the lookback window, the old code let whichever matched
+        // LAST in the loop silently overwrite the other via Math.max/min
+        // on a single shared variable — an arbitrary, index-order-dependent
+        // result, not a quality- or distance-based decision. Now tracks the
+        // CLOSEST valid zone of each type by actual distance from current
+        // price, and between the two, the nearer one wins (the more
+        // recently/closely relevant zone, structurally).
         try {
             double sdScore = 0.0;
             if (daily.size() >= 5) {
                 double atrForSD = aiData.computeATR(daily, 14);
                 double sdTolerance = atrForSD * 2; // zone is 2 ATR wide
+                double maxBaseBody = atrForSD * 0.6; // genuine "quiet base" threshold
+
+                double bestDemandDist = Double.MAX_VALUE;
+                double bestSupplyDist = Double.MAX_VALUE;
 
                 for (int i = daily.size() - 20; i < daily.size() - 1; i++) {
                     if (i < 0) continue;
@@ -809,28 +830,41 @@ public class AiOpportunityDiscoveryEngine {
                     double baseBody  = Math.abs(baseClose - baseOpen);
                     double nextBody  = Math.abs(nextClose - nextOpen);
 
-                    // Demand zone: base candle flat/small, NEXT candle big green
-                    // The "base" before a strong up move is the demand zone
-                    boolean strongUpMove = nextClose > nextOpen
+                    boolean baseIsQuiet = baseBody < maxBaseBody;
+                    double zoneTop = Math.max(baseOpen, baseClose);
+                    double zoneBot = Math.min(baseOpen, baseClose);
+                    double zoneMid = (zoneTop + zoneBot) / 2.0;
+                    double distFromZone = Math.abs(ltp - zoneMid);
+
+                    // Demand zone: quiet base, NEXT candle big green
+                    boolean strongUpMove = baseIsQuiet && nextClose > nextOpen
                             && nextBody > atrForSD * 1.5;
-                    if (strongUpMove) {
-                        double zoneTop = Math.max(baseOpen, baseClose);
-                        double zoneBot = Math.min(baseOpen, baseClose);
-                        if (ltp >= zoneBot - sdTolerance && ltp <= zoneTop + sdTolerance) {
-                            sdScore = Math.max(sdScore, 0.8); // at demand zone
-                        }
+                    if (strongUpMove
+                            && ltp >= zoneBot - sdTolerance && ltp <= zoneTop + sdTolerance
+                            && distFromZone < bestDemandDist) {
+                        bestDemandDist = distFromZone;
                     }
 
-                    // Supply zone: base candle flat/small, NEXT candle big red
-                    boolean strongDownMove = nextClose < nextOpen
+                    // Supply zone: quiet base, NEXT candle big red
+                    boolean strongDownMove = baseIsQuiet && nextClose < nextOpen
                             && nextBody > atrForSD * 1.5;
-                    if (strongDownMove) {
-                        double zoneTop = Math.max(baseOpen, baseClose);
-                        double zoneBot = Math.min(baseOpen, baseClose);
-                        if (ltp >= zoneBot - sdTolerance && ltp <= zoneTop + sdTolerance) {
-                            sdScore = Math.min(sdScore, -0.8); // at supply zone
-                        }
+                    if (strongDownMove
+                            && ltp >= zoneBot - sdTolerance && ltp <= zoneTop + sdTolerance
+                            && distFromZone < bestSupplyDist) {
+                        bestSupplyDist = distFromZone;
                     }
+                }
+
+                boolean hasDemand = bestDemandDist < Double.MAX_VALUE;
+                boolean hasSupply = bestSupplyDist < Double.MAX_VALUE;
+                if (hasDemand && hasSupply) {
+                    // Both present — the structurally nearer zone wins,
+                    // not whichever happened to be processed last.
+                    sdScore = bestDemandDist <= bestSupplyDist ? 0.8 : -0.8;
+                } else if (hasDemand) {
+                    sdScore = 0.8;
+                } else if (hasSupply) {
+                    sdScore = -0.8;
                 }
             }
             f[47] = sdScore;

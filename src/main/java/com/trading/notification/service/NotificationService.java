@@ -10,6 +10,18 @@ import org.springframework.web.client.RestTemplate;
 
 import java.util.Map;
 
+/**
+ * NotificationService — Telegram alerts.
+ *
+ * CLEANUP: removed onTradeApproved(TradeApprovedEvent) and
+ * onTradeResult(TradeExecutionResultEvent) — both events were published
+ * exclusively by TradeExecutionService, which served the other strategies
+ * (SCPS/ORB/HighRR/SMC) and has been deleted along with them. AI and News
+ * have their own independent execution paths (AiLiveOrderExecutionService)
+ * with their own logging — they never published these events to begin with.
+ * onCircuitBreaker is untouched — circuit breaker alerts remain relevant
+ * regardless of which strategies are active.
+ */
 @Service
 @Slf4j
 public class NotificationService {
@@ -22,35 +34,9 @@ public class NotificationService {
 
     @EventListener
     @Async("tradingExecutor")
-    public void onTradeApproved(TradeApprovedEvent event) {
-        String msg = String.format(
-            "✅ TRADE APPROVED: %s %s qty=%d entry=%.2f sl=%.2f target=%.2f score=%.1f",
-            event.getDirection(), event.getTradingSymbol(),
-            event.getQuantity(),
-            event.getEntryPrice().doubleValue(),
-            event.getStopLoss().doubleValue(),
-            event.getTarget().doubleValue(),
-            event.getProbabilityScore().doubleValue());
-        sendTelegram(msg);
-        log.info(msg);
-    }
-
-    @EventListener
-    @Async("tradingExecutor")
-    public void onTradeResult(TradeExecutionResultEvent event) {
-        String msg = String.format("📊 TRADE %s: %s pnl=%.2f reason=%s",
-            event.getStatus(), event.getTradingSymbol(),
-            event.getNetPnl() != null ? event.getNetPnl().doubleValue() : 0,
-            event.getExitReason() != null ? event.getExitReason() : "");
-        sendTelegram(msg);
-        log.info(msg);
-    }
-
-    @EventListener
-    @Async("tradingExecutor")
     public void onCircuitBreaker(CircuitBreakerEvent event) {
         String msg = String.format("🚨 CIRCUIT BREAKER [%s]: %s",
-            event.getEventType(), event.getReason());
+                event.getEventType(), event.getReason());
         sendTelegram(msg);
         log.warn(msg);
     }
@@ -59,9 +45,9 @@ public class NotificationService {
         if (!telegramEnabled || botToken.isBlank() || chatId.isBlank()) return;
         try {
             String url = String.format(
-                "https://api.telegram.org/bot%s/sendMessage", botToken);
+                    "https://api.telegram.org/bot%s/sendMessage", botToken);
             restTemplate.postForObject(url,
-                Map.of("chat_id", chatId, "text", text), String.class);
+                    Map.of("chat_id", chatId, "text", text), String.class);
         } catch (Exception e) {
             log.warn("Telegram notification failed: {}", e.getMessage());
         }

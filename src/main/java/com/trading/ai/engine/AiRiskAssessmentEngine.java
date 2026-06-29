@@ -6,7 +6,6 @@ import com.trading.ai.data.AiMarketDataService.AiStructureLevels;
 import com.trading.ai.model.AiCandidate;
 import com.trading.ai.model.AiPrediction;
 import com.trading.ai.model.AiTradeDecision;
-import com.trading.papertrading.model.PaperAccount;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -35,6 +34,14 @@ import java.math.RoundingMode;
  * T1 = SL distance × 2.0  (2:1 RR minimum)
  * T2 = SL distance × 3.2  (T1dist × 1.6 = 3.2R)
  * Risk per trade = 1% of capital
+ *
+ * INDEPENDENCE FIX (cleanup audit): removed PaperAccount dependency —
+ * that's the shared, cross-strategy capital pool other (removed)
+ * strategies also drew from. Capital is now resolved from
+ * AiNewsCapitalLedger, the same independent ledger AiTradeManagementEngine
+ * and NewsTradingStrategy already use — so AI's position sizing is no
+ * longer entangled with any other strategy's capital usage, and
+ * PaperAccount has zero remaining callers from the AI module.
  */
 @Service
 @ConditionalOnProperty(name = "ai.trading.enabled", havingValue = "true")
@@ -46,7 +53,7 @@ public class AiRiskAssessmentEngine {
     private static final double T2_MULTIPLIER = 1.6;   // T2 = T1-dist × 1.6 = 3.2R
 
     private final AiMarketDataService aiData;
-    private final PaperAccount        paperAccount;
+    private final com.trading.ai.execution.AiNewsCapitalLedger capitalLedger;
     private final AiConfidenceScoringEngine   confidenceEngine;
     private final AiTradeQualityScoringEngine qualityEngine;
 
@@ -54,11 +61,11 @@ public class AiRiskAssessmentEngine {
     private double defaultCapital;
 
     public AiRiskAssessmentEngine(AiMarketDataService aiData,
-                                  PaperAccount paperAccount,
+                                  com.trading.ai.execution.AiNewsCapitalLedger capitalLedger,
                                   AiConfidenceScoringEngine confidenceEngine,
                                   AiTradeQualityScoringEngine qualityEngine) {
         this.aiData           = aiData;
-        this.paperAccount     = paperAccount;
+        this.capitalLedger    = capitalLedger;
         this.confidenceEngine = confidenceEngine;
         this.qualityEngine    = qualityEngine;
     }
@@ -106,15 +113,32 @@ public class AiRiskAssessmentEngine {
             return null;
         }
 
-        // ── Position sizing: 1% capital risk ─────────────────────────────
-        double riskAmt = capital * RISK_PCT;
-        int    qty     = (int) Math.floor(riskAmt / riskPerShare);
+        // ── Position sizing: 1% capital risk, CAPPED by available capital ───
+        // FIX (critical, found before going live): the risk-only formula
+        // below can size a position whose total VALUE (qty × entry) exceeds
+        // available capital entirely — this was true even at the original
+        // ₹1L default (e.g. a ₹1400 stock at 0.5% SL sizes to ~₹1,98,800
+        // position value, almost double the capital), it just rarely showed
+        // up. At smaller capital amounts it becomes the common case, not
+        // the exception. qty is now capped by both risk AND affordability.
+        double riskAmt        = capital * RISK_PCT;
+        int    riskBasedQty   = (int) Math.floor(riskAmt / riskPerShare);
+        int    affordableQty  = (int) Math.floor(capital / entryDbl);
+        int    qty            = Math.min(riskBasedQty, affordableQty);
         if (qty <= 0) {
-            log.debug("[AI-RISK] {} qty=0 (riskAmt={} riskPerShare={}) — rejected",
+            log.debug("[AI-RISK] {} qty=0 (riskAmt={} riskPerShare={} riskBasedQty={} " +
+                            "affordableQty={}) — rejected",
                     symbol,
                     String.format("%.2f", riskAmt),
-                    String.format("%.2f", riskPerShare));
+                    String.format("%.2f", riskPerShare),
+                    riskBasedQty, affordableQty);
             return null;
+        }
+        if (affordableQty < riskBasedQty) {
+            log.info("[AI-RISK] {} qty capped by capital: risk-based={} → affordable={} " +
+                            "(entry={} capital={})",
+                    symbol, riskBasedQty, affordableQty,
+                    String.format("%.2f", entryDbl), String.format("%.0f", capital));
         }
 
         // ── T1: 2:1 RR (same as news strategy) ───────────────────────────
@@ -184,7 +208,7 @@ public class AiRiskAssessmentEngine {
     // ═══════════════════════════════════════════════════════════════════════
 
     private double resolveCapital() {
-        try { return paperAccount.getCapital().doubleValue(); }
+        try { return capitalLedger.getAvailableCapital("AI_TRADING_V2").doubleValue(); }
         catch (Exception e) { return defaultCapital; }
     }
 

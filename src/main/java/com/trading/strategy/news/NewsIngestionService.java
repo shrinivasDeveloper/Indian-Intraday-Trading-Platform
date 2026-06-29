@@ -338,8 +338,14 @@ public class NewsIngestionService {
     public void purgeStaleItems() {
         Instant cutoff = Instant.now().minusSeconds(7_200);
         int before = activeItems.size();
+        // FIX: was item.isActionableMonday() — that method now falls back to
+        // isActionable() which always returns true (60-min cutoff removed for
+        // scoring purposes), which would have made this purge exempt EVERY
+        // item EVERY day, leaking memory. isMondayWeekendException() is a
+        // narrow, dedicated check that only protects genuine Monday weekend
+        // BSE/NSE filings — everything else still purges normally after 2h.
         activeItems.removeIf(item -> {
-            if (item.isActionableMonday()) return false;
+            if (item.isMondayWeekendException()) return false;
             return item.publishedAt().isBefore(cutoff);
         });
         int purged = before - activeItems.size();

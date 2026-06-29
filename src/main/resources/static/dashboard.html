@@ -148,10 +148,6 @@
     <span class="ws-dot ws-off" id="ws-dot"></span>
     <span id="ws-lbl"  style="font-size:11px;color:var(--muted)">WS:OFF</span>
     <span id="h-lat"   style="font-size:11px"></span>
-    <span id="h-scps"  class="badge badge-orange" style="display:none">SCPS:0</span>
-    <span id="h-hrr"   class="badge badge-purple" style="display:none">HRR:0/2</span>
-    <span id="h-orb"   class="badge badge-gold"   style="display:none">ORB:0</span>
-    <span id="h-smc"   class="badge badge-purple" style="display:none">SMC:—</span>
     <span id="h-news"  class="badge badge-blue"   style="display:none">NEWS:0</span>
     <span id="h-ai"    class="badge badge-purple"  style="display:none">AI:0/5</span>
     <span class="rtime" id="rtime">—</span>
@@ -160,16 +156,7 @@
 
 <div class="tabs">
     <div class="tab active" onclick="switchTab('overview',this)">Overview</div>
-    <div class="tab" onclick="switchTab('orb',this)">ORB 🎯</div>
-    <div class="tab" onclick="switchTab('highrr',this)">High RR 🏆</div>
-    <div class="tab" onclick="switchTab('trades',this)">Trades</div>
-    <div class="tab" onclick="switchTab('portfolio',this)">Portfolio 📊</div>
-    <div class="tab" onclick="switchTab('strategy',this)">Strategy</div>
-    <div class="tab" onclick="switchTab('channels',this)">Channels 📡</div>
-    <div class="tab" onclick="switchTab('scanner',this)">Scanner</div>
     <div class="tab" onclick="switchTab('sectors',this)">Sectors</div>
-    <div class="tab" onclick="switchTab('risk',this)">Risk</div>
-    <div class="tab" onclick="switchTab('smc',this)">SMC 🧠</div>
     <div class="tab" onclick="switchTab('news',this)">News 📰</div>
     <div class="tab" onclick="switchTab('ai',this)" id="tab-ai">AI Engine 🤖</div>
 </div>
@@ -228,191 +215,27 @@
             <div id="cb-rsn" class="sub" style="color:var(--red);display:none"></div>
         </div>
         <div class="card">
-            <div class="ct">🎰 10-2-3 Slots</div>
-            <div id="slot-dots" style="display:flex;gap:4px;margin-bottom:7px"></div>
-            <div class="ir"><span class="il">Phase-1 Used</span><span id="p1c" class="iv">—</span></div>
-            <div class="ir"><span class="il">Any Breakeven</span><span id="any-be" class="iv">—</span></div>
-            <div id="sec-exp" class="sub" style="margin-top:4px;font-size:10px"></div>
-        </div>
-    </div>
-</div>
-
-<!-- ORB TAB -->
-<div id="tc-orb" class="tc">
-    <div class="g" style="grid-template-columns:repeat(5,1fr);padding-bottom:0">
-        <div class="card highlight-gold"><div class="ct">📌 Selected</div><div class="stat sgold" id="orb-selected-cnt">0</div><div class="sub">Top-10 watched / 2 exec</div></div>
-        <div class="card"><div class="ct">🔍 Shortlisted</div><div class="stat sb" id="orb-shortlist-cnt">0</div><div class="sub">Gap ≥ 0.3% + Vol OK</div></div>
-        <div class="card"><div class="ct">✅ Valid at 9:30</div><div class="stat sg" id="orb-valid-cnt">0</div><div class="sub">RVOL ≥ 1.0 passed</div></div>
-        <div class="card"><div class="ct">⚡ Triggered</div><div class="stat" id="orb-triggered-cnt">0</div><div class="sub">Breakouts fired</div></div>
-        <div class="card"><div class="ct">🔒 ORB State</div><div class="stat" id="orb-locked-stat">—</div><div class="sub" id="orb-prevclose-stat">—</div></div>
-    </div>
-    <div class="card" style="margin:0 9px"><div class="ct">⏱ Today's Pipeline</div><div class="timeline" id="orb-timeline"></div></div>
-    <div class="g g2" style="padding-top:0">
-        <div class="card highlight-gold"><div class="ct">🥇 Selected Setups</div><div id="orb-selected-body"><div class="sub">Waiting for 9:30 ORB lock…</div></div></div>
-        <div class="card">
-            <div class="ct">💹 ORB P&L Today</div>
-            <div class="ir"><span class="il">Realised P&L</span><span class="iv" id="orb-pnl">—</span></div>
-            <div class="ir"><span class="il">Open Trades</span><span class="iv" id="orb-open-trades">—</span></div>
-            <div class="ir"><span class="il">Executed / Max</span><span class="iv" id="orb-exec-slots">—</span></div>
-            <div class="ir"><span class="il">Direction Lock</span><span class="iv" id="orb-dir-lock">—</span></div>
-            <div class="ir"><span class="il">Target RR</span><span class="iv">2.5× (T1) · 4.0× (T2)</span></div>
-            <div class="ir"><span class="il">Auto-Cancel</span><span class="iv">11:30 AM if no breakout</span></div>
-            <div class="ir"><span class="il">EOD Close</span><span class="iv">15:00 IST</span></div>
-            <div style="margin-top:8px"><div class="ct">Active ORB Trades</div><div id="orb-active-trades"><div class="sub">No active ORB trades</div></div></div>
-        </div>
-    </div>
-    <div class="card" style="margin:0 9px 9px">
-        <div class="ct">📊 All Scored Setups at 9:30 (<span id="orb-all-cnt">0</span>)</div>
-        <div id="orb-all-empty" class="sub" style="padding:5px 0">No data yet — available after 9:30 AM lock</div>
-        <table id="orb-all-tbl" style="display:none">
-            <thead><tr><th></th><th>Symbol</th><th>Gap%</th><th>ORB High</th><th>ORB Low</th><th>Range%</th><th>RVOL</th><th>Score</th><th>Clean</th><th>Sector</th><th>Aligned</th><th>Near S/R</th><th>Status</th></tr></thead>
-            <tbody id="orb-all-body"></tbody>
-        </table>
-    </div>
-</div>
-
-<!-- HIGH RR TAB -->
-<div id="tc-highrr" class="tc">
-    <div class="g g4" style="padding-bottom:0">
-        <div class="card highlight-purple"><div class="ct">🏆 Trades Executed</div><div class="stat spur" id="hrr-executed">0</div><div class="sub" id="hrr-max-sub">Max 2 per day</div></div>
-        <div class="card"><div class="ct">🎯 Slots Remaining</div><div class="stat sb" id="hrr-slots">2</div><div class="sub" id="hrr-limit-sub">—</div></div>
-        <div class="card"><div class="ct">📡 Active Signals</div><div class="stat sg" id="hrr-active-cnt">0</div><div class="sub">Open positions</div></div>
-        <div class="card"><div class="ct">💰 Strategy P&L</div><div class="stat" id="hrr-pnl">₹0</div><div class="sub" id="hrr-wr">Win Rate: —</div></div>
-    </div>
-    <div class="g g2" style="padding-top:0">
-        <div class="card highlight-purple">
-            <div class="ct">🎰 Daily Execution Slots</div>
-            <div class="slot-track" id="hrr-slot-track"></div>
-            <div class="ir"><span class="il">Strategy Name</span><span class="iv" style="font-size:10px">HIGH_RR_INTRADAY_V1</span></div>
-            <div class="ir"><span class="il">Status</span><span class="iv" id="hrr-status">—</span></div>
-            <div class="ir"><span class="il">Daily Limit Reached</span><span class="iv" id="hrr-limit-reached">—</span></div>
-            <div class="ir"><span class="il">Window</span><span class="iv">9:35 AM – 3:00 PM</span></div>
-            <div class="ir"><span class="il">Target</span><span class="iv">Min RR 2.0 · T1=2R · T2=3R</span></div>
-        </div>
-        <div class="card">
-            <div class="ct">📋 Fired Today</div>
-            <div id="hrr-fired-body"><div class="sub">No signals fired today</div></div>
-            <div style="margin-top:9px"><div class="ct">Active High RR Trades</div><div id="hrr-active-trades"><div class="sub">No active High RR trades</div></div></div>
-        </div>
-    </div>
-    <div class="g g2" style="padding-top:0">
-        <div class="card">
-            <div class="ct">💹 High RR P&L Today</div>
-            <div class="ir"><span class="il">Realised P&L</span><span class="iv" id="hrr-realised-pnl">—</span></div>
-            <div class="ir"><span class="il">Wins</span><span class="iv sg" id="hrr-wins">—</span></div>
-            <div class="ir"><span class="il">Losses</span><span class="iv sr" id="hrr-losses">—</span></div>
-            <div class="ir"><span class="il">Win Rate</span><span class="iv" id="hrr-winrate">—</span></div>
-        </div>
-        <div class="card">
-            <div class="ct">📋 Closed High RR Trades</div>
-            <div id="hrr-closed-empty" class="sub">No closed trades today</div>
-            <table id="hrr-closed-tbl" style="display:none">
-                <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>Exit</th><th>P&L</th><th>R</th><th>Reason</th></tr></thead>
-                <tbody id="hrr-closed-body"></tbody>
-            </table>
-        </div>
-    </div>
-</div>
-
-<!-- TRADES -->
-<div id="tc-trades" class="tc">
-    <div class="g g2">
-        <div class="card">
-            <div class="ct">📈 Active Paper Trades</div>
-            <div id="pt-empty" class="sub">No active trades</div>
-            <table id="pt-tbl" style="display:none">
-                <thead><tr><th>Symbol</th><th>Dir</th><th>Strategy</th><th>Qty</th><th>Entry</th><th>LTP</th><th>SL</th><th>T1</th><th>PnL</th><th>R</th><th>Phase</th></tr></thead>
-                <tbody id="pt-body"></tbody>
-            </table>
-        </div>
-        <div class="card">
-            <div class="ct">📋 Closed Today</div>
-            <div id="ct-empty" class="sub">No closed trades</div>
-            <table id="ct-tbl" style="display:none">
-                <thead><tr><th>Symbol</th><th>Dir</th><th>Strategy</th><th>Entry</th><th>Exit</th><th>P&L</th><th>R</th><th>Reason</th></tr></thead>
-                <tbody id="ct-body"></tbody>
-            </table>
-        </div>
-    </div>
-</div>
-
-<!-- STRATEGY -->
-<div id="tc-strategy" class="tc">
-    <div class="g g4">
-        <div class="card highlight"><div class="ct">🎯 SCPS Signals Today</div><div class="stat so" id="scps-cnt">0</div><div class="sub" id="scps-active">Active: 0</div></div>
-        <div class="card"><div class="ct">📡 Valid Channels</div><div class="stat sb" id="ch-valid">0</div><div class="sub" id="ch-tracked">Tracked: 0</div></div>
-        <div class="card"><div class="ct">💰 SCPS P&L</div><div class="stat" id="scps-pnl">₹0</div><div class="sub" id="scps-wr">Win Rate: —</div></div>
-        <div class="card"><div class="ct">⚙ SCPS Status</div><div class="stat" id="scps-status">—</div><div class="sub" id="scps-mode">—</div></div>
-    </div>
-    <div class="g g3">
-        <div class="card">
-            <div class="ct">📊 SCPS Performance</div>
-            <div class="metric-row">
-                <div class="metric-box"><div class="mv sg" id="sm-wins">0</div><div class="ml">Wins</div></div>
-                <div class="metric-box"><div class="mv sr" id="sm-loss">0</div><div class="ml">Losses</div></div>
-                <div class="metric-box"><div class="mv sb" id="sm-tot">0</div><div class="ml">Total</div></div>
+            <div class="ct">💰 Capital Allocation</div>
+            <div class="ir" style="margin-bottom:4px">
+                <span class="il">AI Capital</span>
+                <span class="iv" id="cap-ai-avail">—</span>
             </div>
-            <div class="ir"><span class="il">Win Rate</span><span id="sm-wr" class="iv">—</span></div>
-            <div class="ir"><span class="il">Profit Factor</span><span id="sm-pf" class="iv">—</span></div>
-            <div class="ir"><span class="il">Avg R-Multiple</span><span id="sm-avr" class="iv">—</span></div>
-        </div>
-        <div class="card"><div class="ct">🔒 Active Signals</div><div id="active-signals-body"><div class="sub">No active signals</div></div></div>
-        <div class="card"><div class="ct">📋 SCPS Session Log</div><div id="scps-log"><div class="sub">No signals yet today</div></div></div>
-    </div>
-    <div class="g g2">
-        <div class="card"><div class="ct">💹 P&L by Strategy</div><div id="str-pnl"><div class="sub">No trades yet</div></div></div>
-        <div class="card"><div class="ct">📌 Fired Today (All)</div><div id="fired" class="sub">None yet</div></div>
-    </div>
-</div>
-
-<!-- CHANNELS -->
-<div id="tc-channels" class="tc">
-    <div class="g g2">
-        <div class="card">
-            <div class="ct">📡 Channel Summary</div>
-            <div class="g g3" style="padding:0;margin-bottom:9px">
-                <div style="text-align:center;padding:7px;background:#21262d;border-radius:6px"><div class="stat sb" id="ch-total">0</div><div class="sub">Tracked</div></div>
-                <div style="text-align:center;padding:7px;background:#21262d;border-radius:6px"><div class="stat sg" id="ch-valid2">0</div><div class="sub">Valid</div></div>
-                <div style="text-align:center;padding:7px;background:#21262d;border-radius:6px"><div class="stat" id="ch-hq" style="color:var(--gold)">0</div><div class="sub">High Quality</div></div>
+            <div style="display:flex;gap:5px;margin-bottom:8px">
+                <input type="number" id="cap-ai-input" placeholder="₹"
+                       style="width:90px;padding:4px 6px;background:#0d1117;border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px">
+                <button class="btn" style="padding:4px 10px;font-size:11px" onclick="saveCapital('AI_TRADING_V2','cap-ai-input','cap-ai-status')">Save</button>
             </div>
-            <div class="ir"><span class="il">Bullish Channels</span><span id="ch-bull-cnt" class="iv sg">—</span></div>
-            <div class="ir"><span class="il">Bearish Channels</span><span id="ch-bear-cnt" class="iv sr">—</span></div>
-        </div>
-        <div class="card">
-            <div class="ct">⚙ Detection Config</div>
-            <div class="ir"><span class="il">Buffer Size</span><span class="iv sb">75 candles (6.25h)</span></div>
-            <div class="ir"><span class="il">Min Candles</span><span class="iv">8</span></div>
-            <div class="ir"><span class="il">Touch Tolerance</span><span class="iv">0.3%</span></div>
-            <div class="ir"><span class="il">Valid Touches</span><span class="iv">≥2 (VALID) / ≥3 (HQ)</span></div>
-            <div class="ir"><span class="il">Pullback Zone</span><span class="iv">50% of width</span></div>
-        </div>
-    </div>
-    <div class="card" style="margin:0 9px 9px">
-        <div class="ct">📈 Valid Channels (<span id="ch-list-cnt">0</span>)</div>
-        <div id="ch-list-empty" class="sub">No valid channels detected yet</div>
-        <table id="ch-tbl" style="display:none">
-            <thead><tr><th>Symbol</th><th>Type</th><th>Quality</th><th>Support</th><th>Resistance</th><th>Width%</th><th>S.Touches</th><th>R.Touches</th><th>Age(min)</th><th>In PB Zone?</th></tr></thead>
-            <tbody id="ch-body"></tbody>
-        </table>
-    </div>
-</div>
-
-<!-- SCANNER -->
-<div id="tc-scanner" class="tc">
-    <div class="g g2">
-        <div class="card"><div class="ct">🏆 Stock Rankings</div><div id="rank-empty" class="sub">No rankings yet</div><div id="rank-body"></div></div>
-        <div class="card">
-            <div class="ct">📡 System Health</div>
-            <div class="ir"><span class="il">WebSocket</span><span class="iv" id="s-ws">—</span></div>
-            <div class="ir"><span class="il">Reconnects</span><span class="iv" id="s-rc">—</span></div>
-            <div class="ir"><span class="il">Tick Lag</span><span class="iv" id="s-lag">—</span></div>
-            <div class="ir"><span class="il">Last Tick</span><span class="iv" id="s-tick">—</span></div>
-            <div class="ir"><span class="il">Ticks Received</span><span class="iv" id="s-ticks">—</span></div>
-            <div class="ir"><span class="il">Candles Done</span><span class="iv" id="s-cand">—</span></div>
-            <div class="ir"><span class="il">Status</span><span class="iv" id="s-stat">—</span></div>
-            <div class="ir"><span class="il">Trading Mode</span><span class="iv" id="s-mode">—</span></div>
-            <div class="ir"><span class="il">Entry Allowed</span><span class="iv" id="s-ent">—</span></div>
-            <div class="ir"><span class="il">Window</span><span class="iv" id="s-win">—</span></div>
+            <div class="ir" style="margin-bottom:4px">
+                <span class="il">News Capital</span>
+                <span class="iv" id="cap-news-avail">—</span>
+            </div>
+            <div style="display:flex;gap:5px">
+                <input type="number" id="cap-news-input" placeholder="₹"
+                       style="width:90px;padding:4px 6px;background:#0d1117;border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px">
+                <button class="btn" style="padding:4px 10px;font-size:11px" onclick="saveCapital('NEWS_CATALYST_V1','cap-news-input','cap-news-status')">Save</button>
+            </div>
+            <div id="cap-ai-status" class="sub" style="margin-top:4px;min-height:14px"></div>
+            <div id="cap-news-status" class="sub" style="min-height:14px"></div>
         </div>
     </div>
 </div>
@@ -424,98 +247,6 @@
         <table><thead><tr><th>Sector</th><th>Status</th><th>Change%</th><th>Green%</th><th>RS</th><th>Stocks</th><th>Aligned</th></tr></thead>
             <tbody id="sec-body"></tbody>
         </table>
-    </div>
-</div>
-
-<!-- RISK -->
-<div id="tc-risk" class="tc">
-    <div class="g g3">
-        <div class="card">
-            <div class="ct">🛡 Risk Slots</div>
-            <div class="ir"><span class="il">Phase-1 Count</span><span class="iv" id="r-p1">—</span></div>
-            <div class="ir"><span class="il">Max Phase-1</span><span class="iv" id="r-max">—</span></div>
-            <div class="ir"><span class="il">Any Breakeven</span><span class="iv" id="r-be">—</span></div>
-            <div style="margin-top:7px;font-size:10px;color:var(--muted)">Sector Exposure</div>
-            <div id="r-sexp" style="margin-top:3px"></div>
-            <div style="margin-top:6px;font-size:10px;color:var(--muted)">Strategy Exposure</div>
-            <div id="r-stexp" style="margin-top:3px"></div>
-        </div>
-        <div class="card">
-            <div class="ct">📉 P&L Summary</div>
-            <div class="ir"><span class="il">Capital</span><span class="iv" id="r-cap">—</span></div>
-            <div class="ir"><span class="il">Daily P&L</span><span class="iv" id="r-daily">—</span></div>
-            <div class="ir"><span class="il">Daily %</span><span class="iv" id="r-dpct">—</span></div>
-            <div class="ir"><span class="il">Weekly P&L</span><span class="iv" id="r-wk">—</span></div>
-            <div class="ir"><span class="il">Monthly P&L</span><span class="iv" id="r-mo">—</span></div>
-            <div class="ir"><span class="il">Circuit Breaker</span><span class="iv" id="r-cb">—</span></div>
-        </div>
-        <div class="card">
-            <div class="ct">🌡 Config & Status</div>
-            <div class="ir"><span class="il">VIX</span><span class="iv" id="r-vix">—</span></div>
-            <div class="ir"><span class="il">VIX Regime</span><span class="iv" id="r-vreg">—</span></div>
-            <div class="ir"><span class="il">Phase Threshold</span><span class="iv" id="r-thr">—</span></div>
-            <div class="ir"><span class="il">IB Force Needed</span><span class="iv" id="r-ibf">—</span></div>
-            <div class="ir"><span class="il">ORB Allowed</span><span class="iv" id="r-orb">—</span></div>
-            <div class="ir"><span class="il">Data Status</span><span class="iv" id="r-dat">—</span></div>
-        </div>
-    </div>
-</div>
-
-<!-- PORTFOLIO -->
-<div id="tc-portfolio" class="tc">
-    <div class="g g4" style="padding-bottom:0">
-        <div class="card highlight-gold"><div class="ct">📊 Total P&L Today</div><div class="stat" id="port-total-pnl">—</div><div class="sub" id="port-pnl-sub">Realised + Unrealised</div></div>
-        <div class="card"><div class="ct">📋 Trades Today</div><div class="stat sb" id="port-total-trades">—</div><div class="sub" id="port-slots-sub">— slots remaining</div></div>
-        <div class="card"><div class="ct">✅ Realised P&L</div><div class="stat" id="port-realised">—</div><div class="sub" id="port-closed-count">0 closed</div></div>
-        <div class="card"><div class="ct">⚡ Unrealised P&L</div><div class="stat" id="port-unreal">—</div><div class="sub" id="port-active-count">0 active</div></div>
-    </div>
-    <div class="g" style="padding-top:0" id="port-strat-grid"></div>
-    <div class="card" style="margin:0 9px 9px">
-        <div class="ct">📋 Daily Trade Log — All Strategies (<span id="port-log-count">0</span> trades)</div>
-        <div id="port-log-empty" class="sub" style="padding:5px 0">No trades today</div>
-        <div style="overflow-x:auto">
-            <table id="port-log-tbl" style="display:none;min-width:900px">
-                <thead><tr><th>#</th><th>Symbol</th><th>Strategy</th><th>Dir</th><th>Qty</th><th>Entry ₹</th><th>Entry Time</th><th>Exit ₹</th><th>Exit Time</th><th>SL ₹</th><th>T1 ₹</th><th>LTP ₹</th><th>P&L</th><th>R</th><th>Reason</th><th>Status</th></tr></thead>
-                <tbody id="port-log-body"></tbody>
-            </table>
-        </div>
-    </div>
-</div>
-
-<!-- SMC TAB -->
-<div id="tc-smc" class="tc">
-    <div class="g g4" style="padding-bottom:0">
-        <div class="card highlight-purple"><div class="ct">🧠 SMC Status</div><div class="stat spur" id="smc-status">—</div><div class="sub" id="smc-fired">Signals fired: —</div></div>
-        <div class="card"><div class="ct">🔄 Bootstrap</div><div class="stat sb" id="smc-cycles">⏳</div><div class="sub">Candle data readiness</div></div>
-        <div class="card"><div class="ct">📊 Symbols Loaded</div><div class="stat" id="smc-scanned">0</div><div class="sub" id="smc-qualified">— slots left</div></div>
-        <div class="card"><div class="ct">💰 SMC P&L</div><div class="stat" id="smc-pnl">—</div><div class="sub" id="smc-wr">Win Rate: —</div></div>
-    </div>
-    <div class="g g2" style="padding-top:0">
-        <div class="card highlight-purple">
-            <div class="ct">🎯 SMC_INSTITUTIONAL_V1 Live State</div>
-            <div class="ir"><span class="il">Trades Executed</span><span class="iv sg" id="smc-trades-exec">—</span></div>
-            <div class="ir"><span class="il">Remaining Slots</span><span class="iv sb" id="smc-remain">—</span></div>
-            <div class="ir"><span class="il">Bootstrap Complete</span><span class="iv" id="smc-bootstrap">—</span></div>
-            <div class="ir"><span class="il">Symbols Loaded</span><span class="iv sb" id="smc-symbols">—</span></div>
-            <div class="ir"><span class="il">Signals Fired Today</span><span class="iv sg" id="smc-signals-fired">—</span></div>
-            <div style="margin-top:9px" id="smc-setup-body"><div class="sub">Waiting for candle bootstrap to complete…</div></div>
-        </div>
-        <div class="card">
-            <div class="ct">📋 SMC Engine State</div>
-            <div class="ir"><span class="il">Last Scan Summary</span><span class="iv" id="smc-summary" style="font-size:10px">—</span></div>
-            <div class="ir"><span class="il">No-Trade Reason</span><span class="iv sr" id="smc-noreason" style="font-size:10px">—</span></div>
-            <div class="ir"><span class="il">Strategy</span><span class="iv">SMC_INSTITUTIONAL_V1</span></div>
-            <div class="ir"><span class="il">Max Trades/Day</span><span class="iv" id="smc-max-trades">2</span></div>
-            <div class="ir"><span class="il">Scan Window</span><span class="iv">9:30–14:40 every candle</span></div>
-            <div class="ir"><span class="il">Min RR</span><span class="iv" id="smc-min-rr">3.0×</span></div>
-        </div>
-    </div>
-    <div class="card" style="margin:0 9px 9px">
-        <div class="ct">⏳ Bootstrap Progress</div>
-        <div id="smc-readiness" style="padding:4px 0">
-            <div class="sub">SMC_INSTITUTIONAL_V1 bootstraps daily + 15m + 5m candles on startup (~120s delay).</div>
-            <div style="margin-top:8px" id="smc-data-bar"></div>
-        </div>
     </div>
 </div>
 
@@ -554,7 +285,7 @@
 
 <script>
     const API = '/api/dashboard';
-    let D = {}, SMC = {}, AI = {};
+    let D = {}, AI = {}, CAP = {};
 
     function switchTab(name, el) {
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -578,15 +309,15 @@
 
     async function load() {
         try {
-            const [r, rs, ra] = await Promise.all([
+            const [r, ra, rc] = await Promise.all([
                 fetch(API + '/snapshot'),
-                fetch(API + '/smc/status').catch(() => null),
-                fetch(API + '/ai/status').catch(() => null)
+                fetch(API + '/ai/status').catch(() => null),
+                fetch(API + '/capital').catch(() => null)
             ]);
             if (r.status === 401) { window.location.href = '/login'; return; }
             D = await r.json();
-            if (rs && rs.ok) SMC = await rs.json();
             if (ra && ra.ok) AI  = await ra.json();
+            if (rc && rc.ok) CAP = await rc.json();
             render();
             q('loading').style.display = 'none';
             set('rtime', new Date().toLocaleTimeString('en-IN'));
@@ -594,17 +325,51 @@
     }
 
     function render() {
-        renderHdr(); renderOv(); renderOrb(); renderHighRR(); renderTrades();
-        renderPortfolio(); renderStrategy(); renderChannels(); renderScanner();
-        renderSectors(); renderRisk(); renderSmc(); renderNews(); renderAI();
+        renderHdr(); renderOv(); renderCapital();
+        renderSectors(); renderNews(); renderAI();
+    }
+
+    // ── CAPITAL ALLOCATION (UI-editable, per-strategy) ──────────────────────────
+    function renderCapital() {
+        const ai = (CAP.AI_TRADING_V2)||{}, news = (CAP.NEWS_CATALYST_V1)||{};
+        const aiAvail = (parseFloat(ai.starting_capital||0) + parseFloat(ai.realised_pnl||0) - parseFloat(ai.margin_used||0));
+        const newsAvail = (parseFloat(news.starting_capital||0) + parseFloat(news.realised_pnl||0) - parseFloat(news.margin_used||0));
+        const aiEl = q('cap-ai-avail'); if (aiEl) aiEl.textContent = ai.starting_capital ? '₹' + aiAvail.toLocaleString() : '—';
+        const newsEl = q('cap-news-avail'); if (newsEl) newsEl.textContent = news.starting_capital ? '₹' + newsAvail.toLocaleString() : '—';
+    }
+
+    async function saveCapital(strategyName, inputId, statusId) {
+        const input = q(inputId), status = q(statusId);
+        const val = parseFloat(input.value);
+        if (!val || val <= 0) { status.textContent = 'Enter a valid amount'; status.style.color = 'var(--red)'; return; }
+        status.textContent = 'Saving…'; status.style.color = 'var(--muted)';
+        try {
+            const res = await fetch(API + '/capital', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ strategyName: strategyName, capital: val })
+            });
+            const data = await res.json();
+            if (data.success) {
+                status.textContent = '✅ Saved ₹' + val.toLocaleString();
+                status.style.color = 'var(--green)';
+                input.value = '';
+                const rc = await fetch(API + '/capital');
+                if (rc.ok) { CAP = await rc.json(); renderCapital(); }
+            } else {
+                status.textContent = '❌ ' + (data.error || 'Failed');
+                status.style.color = 'var(--red)';
+            }
+        } catch (e) {
+            status.textContent = '❌ ' + e.message;
+            status.style.color = 'var(--red)';
+        }
     }
 
     // ── HEADER ───────────────────────────────────────────────────────────────────
     function renderHdr() {
         const mode=D.tradingMode||'PAPER',phase=D.marketPhase||{},mkt=D.market||{},
-              mm=D.marketMode||{},lat=D.latency||{},sys=D.system||{},
-              scps=(D.strategyStatus||{}).smartChannelPullback||{},
-              hrr=(D.strategyStatus||{}).highRR||{},orb=D.orbData||{};
+              mm=D.marketMode||{},lat=D.latency||{},sys=D.system||{};
 
         set('h-mode',mode); q('h-mode').className='badge '+(mode==='LIVE'?'badge-red':'badge-blue');
         const ph=phase.phase||'PRE_OPEN'; set('h-phase',ph);
@@ -619,21 +384,6 @@
         if(le){if(lat.isStale){le.textContent='⚠STALE';le.style.color='var(--red)';}
                else{le.textContent=lat.lagMs>0?lat.lagMs+'ms':'OK';le.style.color=lat.lagMs>5000?'var(--yellow)':'var(--green)';}}
         q('stale-banner').style.display=lat.isStale?'block':'none';
-
-        const sc=scps.sessionSignalCount||0;
-        const se=q('h-scps');if(se){se.textContent='SCPS:'+sc;se.style.display=sc>0?'inline-block':'none';}
-        const hrrExec=hrr.tradesExecutedToday||0,hrrMax=hrr.maxTradesPerDay||2;
-        const he=q('h-hrr');if(he){he.textContent='HRR:'+hrrExec+'/'+hrrMax;he.style.display=hrrExec>0?'inline-block':'none';}
-        const orbSel=orb.selectedCount||0;
-        const oe=q('h-orb');if(oe){oe.textContent='ORB:'+orbSel;oe.style.display=orbSel>0?'inline-block':'none';}
-
-        const smcEl=q('h-smc');
-        if(smcEl){
-            const smcFired=(SMC.tradesExecutedToday||0)>0,smcBooted=SMC.bootstrapComplete===true;
-            smcEl.textContent='SMC:'+(smcFired?SMC.tradesExecutedToday+'/'+SMC.maxTradesPerDay:smcBooted?'✓READY':'BOOT');
-            smcEl.style.display=SMC.enabled===false?'none':'inline-block';
-            smcEl.className='badge '+(smcFired?'badge-green':smcBooted?'badge-purple':'badge-yellow');
-        }
 
         const nc=D.newsCatalyst||{};
         const newsEl=q('h-news');
@@ -653,7 +403,7 @@
     function renderOv() {
         const pnl=D.pnl||{},phase=D.marketPhase||{},mkt=D.market||{},
               mm=D.marketMode||{},lat=D.latency||{},dir=D.marketDirection||{},
-              risk=D.riskSlots||{},bnf=D.bankNiftyMode||{};
+              bnf=D.bankNiftyMode||{};
         const dp=parseFloat(pnl.dailyPnl||0);
         const de=q('dpnl');if(de){de.textContent=fp(dp);de.className='stat '+pc(dp);}
         set('dpct',(dp>=0?'+':'')+f2(pnl.dailyPct)+'%');
@@ -684,169 +434,12 @@
         const cs=q('cb-stat');if(cs){cs.textContent=cbOk?'OK':'BLOCKED';cs.className='stat '+(cbOk?'sg':'sr');}
         set('cb-d',f2(pnl.dailyPct)+'%');set('cb-w',fp(pnl.weeklyPnl||0));set('cb-mo',fp(pnl.monthlyPnl||0));
         const cr=q('cb-rsn');if(cr){cr.textContent=!cbOk?(pnl.cbReason||'CB tripped'):'';cr.style.display=!cbOk?'block':'none';}
-        const p1=risk.phase1Count||0,mx=risk.maxPhase1||3;
-        html('slot-dots',Array.from({length:mx},(_,i)=>`<div style="width:15px;height:15px;border-radius:50%;background:${i<p1?'var(--blue)':'#21262d'};border:1px solid var(--border)"></div>`).join(''));
-        set('p1c',p1+' / '+mx);set('any-be',risk.anyAtBreakeven?'✅ Yes':'—');
-        const se2=risk.sectorExposure||{};
-        set('sec-exp','Sectors: '+(Object.entries(se2).filter(([,v])=>v>0).map(([k,v])=>k+':'+v).join(', ')||'None'));
-    }
-
-    // ── ORB TAB ──────────────────────────────────────────────────────────────────
-    function renderOrb() {
-        const orb=D.orbData||{},setups=orb.setups||{},selSyms=orb.selectedSymbols||[],locked=orb.orbLocked===true;
-        set('orb-selected-cnt',orb.selectedCount||0);set('orb-shortlist-cnt',orb.shortlistCount||0);
-        set('orb-valid-cnt',orb.validOrbCount||0);set('orb-triggered-cnt',orb.triggeredCount||0);
-        const ls=q('orb-locked-stat');if(ls){ls.textContent=locked?'🔒 LOCKED':'⏳ WAITING';ls.className='stat '+(locked?'sgold':'sy');}
-        set('orb-prevclose-stat',orb.prevCloseAvailable===false?'⚠ No prev-close (first run)':'Prev-close data ✅');
-        const now=new Date(),mins=now.getHours()*60+now.getMinutes();
-        const steps=[{label:'9:00\nReset',done:mins>=9*60},{label:'9:15\nOpen',done:mins>=9*60+15},{label:'9:20\nShortlist',done:mins>=9*60+20},{label:'9:30\nLock+Score',done:locked},{label:'9:30:05\nCache',done:locked&&(orb.selectedCount||0)>0},{label:'9:30-11:30\nMonitor',done:(orb.triggeredCount||0)>0},{label:'11:30\nAutoCancel',done:mins>=11*60+30},{label:'15:00\nEOD Close',done:mins>=15*60}];
-        const tlEl=q('orb-timeline');
-        if(tlEl){let h='';steps.forEach((s,i)=>{const active=!s.done&&(i===0||steps[i-1].done);const cls=s.done?'tl-done':active?'tl-active':'tl-wait';const icon=s.done?'✓':active?'●':(i+1);h+=`<div class="tl-step"><div class="tl-dot ${cls}">${icon}</div><div class="tl-label">${s.label.replace('\n','<br>')}</div></div>`;if(i<steps.length-1){const lc=s.done?'tl-line-done':active?'tl-line-active':'tl-line-wait';h+=`<div class="tl-line ${lc}"></div>`;}});tlEl.innerHTML=h;}
-        const pnlMap=(D.strategyStatus||{}).perStrategyPnl||{};
-        const orbPnl=pnlMap['ORB_BREAKOUT_V1']||{};
-        set('orb-pnl',fp(orbPnl.pnl||0));
-        const opEl=q('orb-pnl');if(opEl)opEl.className='iv '+pc(orbPnl.pnl||0);
-        const orbTrades=(D.paperTrades||[]).filter(t=>t.strategyName==='ORB_BREAKOUT_V1');
-        set('orb-open-trades',orbTrades.length);set('orb-exec-slots',(orb.executedTradesCount||0)+' / 2');
-        const dir2=orb.lockedDirection;set('orb-dir-lock',dir2?'🔒 '+dir2:'Unlocked');
-        html('orb-active-trades',orbTrades.length?orbTrades.map(t=>{const pv=parseFloat(t.unrealPnl||0);return`<div class="signal-card ${t.direction==='SHORT'?'short':''}" style="margin-top:7px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><b>${t.tradingSymbol}</b> ${dpill(t.direction)}<span class="${pc(pv)}">${fp(pv)}</span></div><div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px"><span class="pill pm">Entry:₹${f2(t.entryPrice)}</span><span class="pill pr">SL:₹${f2(t.stopLoss)}</span><span class="pill pg">T1:₹${f2(t.target)}</span>${phpill(t.phase)}</div></div>`;}).join(''):'<div class="sub">No active ORB trades</div>');
-        if(!locked||selSyms.length===0){html('orb-selected-body',`<div class="sub">${locked?'No stocks passed scoring today':'Waiting for 9:30 ORB lock…'}</div>`);}
-        else{html('orb-selected-body',selSyms.map((sym,idx)=>{const s=setups[sym]||{},gapUp=(s.gapPct||0)>0,triggered=s.triggered===true;const range=s.orbHigh&&s.orbLow?(s.orbHigh-s.orbLow):0;const rangePct=s.orbLow>0?(range/s.orbLow*100):0;const medal=idx===0?'🥇':'🥈';return`<div class="orb-setup-card ${triggered?'triggered':'selected'}"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><div style="display:flex;align-items:center;gap:7px"><span style="font-size:16px">${medal}</span><b style="font-size:14px">${sym}</b><span class="pill ${gapUp?'pg':'pr'}">${gapUp?'▲':'▼'} GAP ${Math.abs((s.gapPct||0)*100).toFixed(2)}%</span>${triggered?'<span class="pill pg">✅ TRIGGERED</span>':'<span class="pill py">⏳ WATCHING</span>'}</div><span class="pill ${scorePill(s.score||0)}" style="font-size:12px">${s.score||0}/85</span></div><div style="display:flex;gap:9px;flex-wrap:wrap;margin-bottom:6px"><div style="flex:1;min-width:140px"><div class="ir"><span class="il">ORB High</span><span class="iv sg">₹${f2(s.orbHigh)}</span></div><div class="ir"><span class="il">ORB Low</span><span class="iv sr">₹${f2(s.orbLow)}</span></div><div class="ir"><span class="il">Range</span><span class="iv">₹${f2(range)} (${rangePct.toFixed(2)}%)</span></div></div><div style="flex:1;min-width:140px"><div class="ir"><span class="il">RVOL</span><span class="iv ${(s.rvol||0)>=2?'sg':(s.rvol||0)>=1.5?'sy':'sr'}">${f2(s.rvol)}×</span></div><div class="ir"><span class="il">Sector</span><span class="iv">${s.sectorName||'—'} ${s.sectorAligned?'✅':''}</span></div></div></div><div class="orb-score-bar"><div class="orb-score-fill" style="width:${Math.min(100,(s.score||0)/85*100)}%;background:${scoreColor(s.score||0)}"></div></div></div>`;}).join(''));}
-        const allSetups=Object.values(setups);set('orb-all-cnt',allSetups.length);
-        if(!allSetups.length){q('orb-all-empty').style.display='block';q('orb-all-tbl').style.display='none';}
-        else{q('orb-all-empty').style.display='none';q('orb-all-tbl').style.display='table';const sorted=[...allSetups].sort((a,b)=>(b.score||0)-(a.score||0));html('orb-all-body',sorted.map((s,idx)=>{const isSel=selSyms.includes(s.symbol),gapUp=(s.gapPct||0)>0;const rangePct=s.orbLow>0?((s.orbHigh-s.orbLow)/s.orbLow*100):0;const sp=s.triggered?'<span class="pill pg">TRIGGERED</span>':isSel?'<span class="pill po">SELECTED</span>':!s.valid?'<span class="pill pr">FILTERED</span>':'<span class="pill pm">SCORED</span>';const rd=isSel?(selSyms.indexOf(s.symbol)===0?'🥇':'🥈'):(idx<5?`<span class="rn rb">${idx+1}</span>`:'');return`<tr style="${isSel?'background:#1a1600':''}"><td>${rd}</td><td><b>${s.symbol}</b></td><td class="${gapUp?'sg':'sr'}">${gapUp?'▲':'▼'}${Math.abs((s.gapPct||0)*100).toFixed(2)}%</td><td>₹${f2(s.orbHigh)}</td><td>₹${f2(s.orbLow)}</td><td>${rangePct.toFixed(2)}%</td><td class="${(s.rvol||0)>=2?'sg':(s.rvol||0)>=1.5?'sy':'sr'}">${f2(s.rvol)}×</td><td><span class="pill ${scorePill(s.score||0)}">${s.score||0}</span></td><td>${s.cleanCandleCount||0}</td><td style="font-size:11px">${s.sectorName||'—'}</td><td>${s.sectorAligned?'<span class="pill pg">✅</span>':'<span class="pill pm">No</span>'}</td><td>${s.nearSR?'<span class="pill pr">⚠</span>':'<span class="pill pg">Clear</span>'}</td><td>${sp}</td></tr>`;}).join(''));}
-    }
-
-    // ── HIGH RR TAB ──────────────────────────────────────────────────────────────
-    function renderHighRR() {
-        const hrr=(D.strategyStatus||{}).highRR||{};
-        const executed=hrr.tradesExecutedToday||0,maxTrades=hrr.maxTradesPerDay||2;
-        const slots=hrr.remainingSlots||0,active=Array.from(hrr.activeSignals||[]),fired=Array.from(hrr.firedToday||[]);
-        const limitReached=hrr.dailyLimitReached===true;
-        set('hrr-executed',executed);set('hrr-max-sub','Max '+maxTrades+' per day');
-        const slotsEl=q('hrr-slots');if(slotsEl){slotsEl.textContent=slots;slotsEl.className='stat '+(slots===0?'sr':slots===maxTrades?'sg':'sy');}
-        set('hrr-limit-sub',limitReached?'🏁 Daily limit reached':'Slots available');set('hrr-active-cnt',active.length);
-        const realisedPnl=parseFloat(hrr.realisedPnl||0);
-        const hpEl=q('hrr-pnl');if(hpEl){hpEl.textContent=fp(realisedPnl);hpEl.className='stat '+pc(realisedPnl);}
-        set('hrr-wr','Win Rate: '+(hrr.winRate||'—'));
-        html('hrr-slot-track',Array.from({length:maxTrades},(_,i)=>{let cls,label;if(i<executed){cls='slot-done';label='✓';}else if(i<executed+active.length){cls='slot-used';label='●';}else{cls='slot-open';label=(i+1);}return`<div class="slot-box ${cls}">${label}</div>`;}).join('')+'<span class="sub" style="margin-left:8px;align-self:center">'+(limitReached?'Complete':executed+'/'+maxTrades+' used')+'</span>');
-        set('hrr-status',hrr.enabled!==false?(limitReached?'🏁 LIMIT REACHED':'✅ ACTIVE'):'❌ DISABLED');
-        set('hrr-limit-reached',limitReached?'✅ Yes ('+executed+'/'+maxTrades+')':'No ('+executed+'/'+maxTrades+')');
-        const activeDetails=hrr.activeTradeDetails||[],closedDetails=hrr.closedTradeDetails||[];
-        const detailBySymbol={};closedDetails.forEach(d=>{detailBySymbol[d.symbol]={...d,isClosed:true};});activeDetails.forEach(d=>{detailBySymbol[d.symbol]={...d,isClosed:false};});
-        html('hrr-fired-body',fired.length?fired.map(sym=>{const d=detailBySymbol[sym];if(!d){return`<div class="channel-bar"><b>${sym}</b><span class="pill pm">—</span></div>`;}if(d.isClosed){const pv=parseFloat(d.netPnl||0),er=d.exitReason||'—';const etag=er.includes('TARGET')?`<span class="pill pg">✅ ${er}</span>`:er.includes('STOP')||er.includes('SL')?`<span class="pill pr">🛑 ${er}</span>`:`<span class="pill pm">${er}</span>`;return`<div class="hrr-trade-card" style="opacity:.85"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px"><div style="display:flex;align-items:center;gap:6px"><b>${sym}</b>${dpill(d.direction)}<span class="pill pm">CLOSED</span></div><span class="${pc(pv)}" style="font-size:14px;font-weight:700">${fp(pv)}</span></div><div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px;margin-bottom:4px"><span class="pill pm">Entry:₹${f2(d.entryPrice)}</span><span class="pill pm">Exit:₹${f2(d.exitPrice)}</span></div><div>${etag}</div></div>`;}const pv=parseFloat(d.unrealPnl||0);return`<div class="hrr-trade-card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px"><div style="display:flex;align-items:center;gap:6px"><b>${sym}</b>${dpill(d.direction)}<span class="pill py">● LIVE</span></div><span class="${pc(pv)}" style="font-size:14px;font-weight:700">${fp(pv)}</span></div><div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px"><span class="pill pm">Entry:₹${f2(d.entryPrice)}</span><span class="pill pr">SL:₹${f2(d.stopLoss)}</span><span class="pill pg">T1:₹${f2(d.target)}</span><span class="pill pm">LTP:₹${f2(d.ltp)}</span></div></div>`;}).join(''):'<div class="sub">No signals fired today</div>');
-        html('hrr-active-trades',activeDetails.length?activeDetails.map(t=>{const pv=parseFloat(t.unrealPnl||0);return`<div class="hrr-trade-card" style="margin-bottom:5px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><div style="display:flex;align-items:center;gap:6px"><b>${t.symbol}</b>${dpill(t.direction)}</div><span class="${pc(pv)}" style="font-weight:700">${fp(pv)}</span></div><div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px"><span class="pill pm">Entry:₹${f2(t.entryPrice)}</span><span class="pill pr">SL:₹${f2(t.stopLoss)}</span><span class="pill pg">T1:₹${f2(t.target)}</span><span class="pill pm">LTP:₹${f2(t.ltp)}</span></div></div>`;}).join(''):'<div class="sub">No active High RR trades</div>');
-        set('hrr-realised-pnl',fp(realisedPnl));set('hrr-wins',hrr.winsToday||0);set('hrr-losses',hrr.lossesToday||0);set('hrr-winrate',hrr.winRate||'—');
-        if(!closedDetails.length){q('hrr-closed-empty').style.display='block';q('hrr-closed-tbl').style.display='none';}
-        else{q('hrr-closed-empty').style.display='none';q('hrr-closed-tbl').style.display='table';html('hrr-closed-body',closedDetails.map(t=>{const pv=parseFloat(t.netPnl||0),er=t.exitReason||'—';const erStyle=er.includes('TARGET')?'color:var(--green)':er.includes('STOP')||er.includes('SL')?'color:var(--red)':'';return`<tr><td><b>${t.symbol}</b></td><td>${dpill(t.direction)}</td><td>₹${f2(t.entryPrice)}</td><td>₹${f2(t.exitPrice)}</td><td class="${pc(pv)}">${fp(pv)}</td><td>${t.rMultiple||'—'}</td><td style="font-size:10px;${erStyle}">${er}</td></tr>`;}).join(''));}
-    }
-
-    // ── TRADES TAB ───────────────────────────────────────────────────────────────
-    function renderTrades() {
-        const paper=D.paperTrades||[],closed=(D.todayTrades||[]).filter(t=>t.status==='CLOSED');
-        if(!paper.length){q('pt-empty').style.display='block';q('pt-tbl').style.display='none';}
-        else{q('pt-empty').style.display='none';q('pt-tbl').style.display='table';html('pt-body',paper.map(t=>{const p=parseFloat(t.unrealPnl||0);return`<tr><td><b>${t.tradingSymbol}</b></td><td>${dpill(t.direction)}</td><td style="font-size:10px">${t.strategyName||'—'}</td><td>${t.remainingQty}/${t.quantity}</td><td>₹${f2(t.entryPrice)}</td><td>₹${f2(t.ltp)}</td><td>₹${f2(t.stopLoss)}</td><td>₹${f2(t.target)}</td><td class="${pc(p)}">${fp(p)}</td><td>${t.rMultiple||'—'}</td><td>${phpill(t.phase)}</td></tr>`;}).join(''));}
-        if(!closed.length){q('ct-empty').style.display='block';q('ct-tbl').style.display='none';}
-        else{q('ct-empty').style.display='none';q('ct-tbl').style.display='table';html('ct-body',closed.map(t=>{const p=parseFloat(t.netPnl||0);const r1=t.entryPrice&&t.stopLoss?Math.abs(parseFloat(t.entryPrice)-parseFloat(t.stopLoss)):0;const rm=r1>0&&t.exitPrice?((parseFloat(t.exitPrice)-parseFloat(t.entryPrice))/r1).toFixed(1)+'R':'—';const er=t.exitReason||'—';const erStyle=er.includes('TARGET')||er.includes('T1')||er.includes('T2')?'color:var(--green)':er.includes('STOP')||er.includes('SL')?'color:var(--red)':'';return`<tr><td><b>${t.tradingSymbol}</b></td><td>${dpill(t.direction)}</td><td style="font-size:10px">${t.strategyName||'—'}</td><td>₹${f2(t.entryPrice)}</td><td>₹${f2(t.exitPrice)}</td><td class="${pc(p)}">${fp(p)}</td><td>${rm}</td><td style="font-size:10px;${erStyle}">${er}</td></tr>`;}).join(''));}
-    }
-
-    // ── PORTFOLIO TAB ─────────────────────────────────────────────────────────────
-    function renderPortfolio() {
-        const P=D.portfolioSummary||{},log=P.tradeLog||[],strats=P.strategyBreakdown||[];
-        const totalPnl=parseFloat(P.totalCombinedPnl||0),realisedPnl=parseFloat(P.totalRealisedPnl||0),unrealPnl=parseFloat(P.totalUnrealisedPnl||0);
-        const tpEl=q('port-total-pnl');if(tpEl){tpEl.textContent=fp(totalPnl);tpEl.className='stat '+pc(totalPnl);}
-        set('port-pnl-sub','Realised '+fp(realisedPnl)+' + Live '+fp(unrealPnl));
-        const ttEl=q('port-total-trades');if(ttEl){ttEl.textContent=(P.totalTrades||0)+' / '+(P.maxTradesPerDay||10);ttEl.className='stat '+(P.totalTrades>=P.maxTradesPerDay?'sr':'sb');}
-        set('port-slots-sub',(P.slotsRemaining||0)+' slots remaining');
-        const rpEl=q('port-realised');if(rpEl){rpEl.textContent=fp(realisedPnl);rpEl.className='stat '+pc(realisedPnl);}
-        set('port-closed-count',(P.totalClosedTrades||0)+' closed');
-        const upEl=q('port-unreal');if(upEl){upEl.textContent=fp(unrealPnl);upEl.className='stat '+pc(unrealPnl);}
-        set('port-active-count',(P.totalActiveTrades||0)+' active');
-        const stratColors={'ORB_BREAKOUT_V1':{border:'var(--gold)',bg:'#1a1600',icon:'🎯',label:'ORB'},'HIGH_RR_INTRADAY_V1':{border:'var(--purple)',bg:'#12101f',icon:'🏆',label:'High RR'},'SMART_CHANNEL_PULLBACK_V3':{border:'var(--orange)',bg:'#1a0e00',icon:'📡',label:'Pullback'},'NEWS_CATALYST_V1':{border:'var(--green)',bg:'#0d1f15',icon:'📰',label:'News'},'SMC_INSTITUTIONAL_V1':{border:'var(--purple)',bg:'#12101f',icon:'🧠',label:'SMC'},'AI_TRADING_V1':{border:'var(--blue)',bg:'#0d1a30',icon:'🤖',label:'AI'},'AI_TRADING_V2':{border:'var(--blue)',bg:'#0d1a30',icon:'🤖',label:'AI'}};
-        html('port-strat-grid',strats.length?`<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:9px;padding:0 9px 9px">`+strats.map(s=>{const col=stratColors[s.strategyName]||{border:'var(--border)',bg:'var(--card)',icon:'◆',label:s.strategyName};const spnl=parseFloat(s.totalPnl||0),rpnl=parseFloat(s.realisedPnl||0),used=s.slotsUsed||0,max=s.allocationMax||0,pct=max>0?Math.round(used/max*100):0;const barCol=used>=max?'var(--red)':used>0?'var(--blue)':'var(--border)';return`<div style="background:${col.bg};border:1px solid ${col.border};border-radius:8px;padding:11px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px"><div style="font-size:11px;font-weight:700;color:var(--muted)">${col.icon} ${col.label}</div><span class="pill ${used>=max?'pr':'pb'}">${used}/${max}</span></div><div style="font-size:19px;font-weight:700;margin-bottom:3px" class="${pc(spnl)}">${fp(spnl)}</div><div style="font-size:10px;color:var(--muted);margin-bottom:6px">R:${fp(rpnl)} W:${s.wins||0} L:${s.losses||0}</div><div style="height:4px;border-radius:2px;background:#21262d;overflow:hidden"><div style="height:100%;border-radius:2px;width:${Math.min(100,pct)}%;background:${barCol};transition:width .4s"></div></div><div style="font-size:10px;color:var(--muted);margin-top:3px">${s.closedTrades||0} closed · ${s.activeTrades||0} active</div></div>`;}).join('')+'</div>':'<div class="sub" style="padding:9px">No trades yet today</div>');
-        set('port-log-count',log.length);
-        if(!log.length){q('port-log-empty').style.display='block';q('port-log-tbl').style.display='none';}
-        else{q('port-log-empty').style.display='none';q('port-log-tbl').style.display='table';html('port-log-body',log.map((t,idx)=>{const pv=parseFloat(t.pnl||0),isClosed=t.status==='CLOSED';const stCol=stratColors[t.strategyName];const stLabel=stCol?stCol.label:(t.strategyName||'—');const stBadge=`<span class="pill pb" style="border-color:${stCol?stCol.border:'var(--border)'};font-size:9px">${stLabel}</span>`;const erStyle=!isClosed?'':(t.exitReason&&(t.exitReason.includes('TARGET')||t.exitReason.includes('T1')||t.exitReason.includes('T2')))?'color:var(--green)':(t.exitReason&&(t.exitReason.includes('STOP')||t.exitReason.includes('SL')))?'color:var(--red)':'';return`<tr style="${!isClosed?'background:#0d1a0d':''}"><td style="color:var(--muted)">${idx+1}</td><td><b>${t.tradingSymbol||'—'}</b></td><td>${stBadge}</td><td>${dpill(t.direction)}</td><td>${t.quantity||'—'}</td><td>₹${t.entryPrice||'—'}</td><td style="font-size:11px;color:var(--muted)">${t.entryTime||'—'}</td><td>${isClosed?'₹'+(t.exitPrice||'—'):'<span class="pill pm">open</span>'}</td><td style="font-size:11px;color:var(--muted)">${isClosed?(t.exitTime||'—'):'—'}</td><td style="color:var(--red)">₹${t.stopLoss||'—'}</td><td style="color:var(--green)">₹${t.target||'—'}</td><td>${!isClosed?'₹'+(t.ltp||'—'):'—'}</td><td class="${pc(pv)}" style="font-weight:700">${fp(pv)}</td><td>${t.rMultiple||'—'}</td><td style="font-size:10px;${erStyle}">${t.exitReason||'—'}</td><td><span class="pill ${isClosed?'pm':'pg'}">${t.status||'—'}</span></td></tr>`;}).join(''));}
-    }
-
-    // ── STRATEGY TAB ─────────────────────────────────────────────────────────────
-    function renderStrategy() {
-        const ss=D.strategyStatus||{},scps=ss.smartChannelPullback||{},pnlMap=ss.perStrategyPnl||{},frd=Array.from(ss.firedToday||[]);
-        const chDet=D.channelDetection||{};
-        set('scps-cnt',scps.sessionSignalCount||0);set('scps-active','Active: '+(scps.activeSignalCount||0));
-        set('ch-valid',chDet.validChannels||scps.validChannels||0);set('ch-tracked','Tracked: '+(chDet.trackedSymbols||scps.trackedSymbols||0));
-        const scpsPnl=pnlMap['SMART_CHANNEL_PULLBACK_V3']||{};const p=parseFloat(scpsPnl.pnl||0);
-        const pnlEl=q('scps-pnl');if(pnlEl){pnlEl.textContent=fp(p);pnlEl.className='stat '+pc(p);}
-        set('scps-wr','Win Rate: '+(scpsPnl.winRate||'—'));
-        const enabled=scps.enabled!==false;set('scps-status',enabled?'ENABLED':'DISABLED');q('scps-status').className='stat '+(enabled?'sg':'sr');
-        set('scps-mode',D.tradingMode||'PAPER');
-        const wins=parseInt(scpsPnl.wins||0),losses=parseInt(scpsPnl.losses||0),total=wins+losses;
-        set('sm-wins',wins);set('sm-loss',losses);set('sm-tot',total);set('sm-wr',total>0?((wins/total*100).toFixed(1)+'%'):'—');set('sm-pf',scpsPnl.profitFactor||'—');set('sm-avr',scpsPnl.avgRMultiple||'—');
-        const active=Array.from(scps.activeSignals||[]);
-        html('active-signals-body',active.length?active.map(sym=>{const trade=(D.paperTrades||[]).find(t=>t.tradingSymbol===sym);if(!trade)return`<div class="channel-bar"><b>${sym}</b><span class="pill pora">Signal Pending</span></div>`;const pv=parseFloat(trade.unrealPnl||0);return`<div class="signal-card ${trade.direction==='SHORT'?'short':''}"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px"><b>${sym}</b> ${dpill(trade.direction)}<span class="${pc(pv)}">${fp(pv)}</span></div><div style="display:flex;gap:5px;flex-wrap:wrap;font-size:11px"><span class="pill pm">Entry:₹${f2(trade.entryPrice)}</span><span class="pill pr">SL:₹${f2(trade.stopLoss)}</span><span class="pill pg">T:₹${f2(trade.target)}</span>${phpill(trade.phase)}</div></div>`;}).join(''):'<div class="sub">No active signals</div>');
-        const scpsTrades=(D.todayTrades||[]).filter(t=>(t.strategyName==='SMART_CHANNEL_PULLBACK_V3')&&t.status==='CLOSED');
-        html('scps-log',scpsTrades.length?scpsTrades.map(t=>{const pv=parseFloat(t.netPnl||0);return`<div class="ir"><span class="il"><b>${t.tradingSymbol}</b> ${dpill(t.direction)}</span><span class="${pc(pv)}">${fp(pv)} · ${t.exitReason||'—'}</span></div>`;}).join(''):'<div class="sub">No closed signals yet</div>');
-        html('str-pnl',!Object.keys(pnlMap).length?'<span class="sub">No trades yet</span>':Object.entries(pnlMap).map(([k,v])=>{const pv=parseFloat(v.pnl||0);return`<div class="ir"><span class="il" style="font-size:11px">${k}</span><span class="iv ${pc(pv)}">${fp(pv)} (${v.wins||0}W/${v.losses||0}L)</span></div>`;}).join(''));
-        set('fired',frd.length?frd.join(', '):'None yet');
-    }
-
-    // ── CHANNELS ─────────────────────────────────────────────────────────────────
-    function renderChannels() {
-        const chDet=D.channelDetection||{},allChannels=chDet.topChannels||[];
-        set('ch-total',chDet.trackedSymbols||0);set('ch-valid2',chDet.validChannels||0);
-        let bull=0,bear=0,hq=0;allChannels.forEach(c=>{if(c.type==='BULLISH')bull++;if(c.type==='BEARISH')bear++;if(c.validity==='HIGH_QUALITY')hq++;});
-        set('ch-hq',hq);set('ch-bull-cnt',bull+' bullish');set('ch-bear-cnt',bear+' bearish');set('ch-list-cnt',allChannels.length);
-        if(!allChannels.length){q('ch-list-empty').style.display='block';q('ch-tbl').style.display='none';}
-        else{q('ch-list-empty').style.display='none';q('ch-tbl').style.display='table';html('ch-body',allChannels.map(c=>{const isBull=c.type==='BULLISH',isHQ=c.validity==='HIGH_QUALITY';return`<tr><td><b>${c.symbol}</b></td><td><span class="${isBull?'ch-bull':'ch-bear'}">${c.type}</span></td><td><span class="pill ${isHQ?'po':'pb'}">${c.validity}</span></td><td>₹${f2(c.supportPrice)}</td><td>₹${f2(c.resistancePrice)}</td><td>${f2(c.widthPct||c.channelWidthPct)}%</td><td>${c.supportTouches||'—'}</td><td>${c.resistanceTouches||'—'}</td><td>${c.ageMinutes!=null?c.ageMinutes:'—'}</td><td>${c.inPullbackZone?'<span class="pill pg">✅ YES</span>':'<span class="pill pm">No</span>'}</td></tr>`;}).join(''));}
-    }
-
-    // ── SCANNER ──────────────────────────────────────────────────────────────────
-    function renderScanner() {
-        const ranks=D.stockRankings||[],lat=D.latency||{},sys=D.system||{};
-        if(!ranks.length){q('rank-empty').style.display='block';html('rank-body','');}
-        else{q('rank-empty').style.display='none';html('rank-body',ranks.map(r=>{const rc=r.rank===1?'r1':r.rank===2?'r2':r.rank===3?'r3':'rn';return`<div style="display:flex;align-items:center;gap:7px;padding:5px 0;border-bottom:1px solid var(--border)"><div class="rb ${rc}">${r.rank}</div><div style="flex:1"><div style="font-weight:700">${r.symbol} <span class="sub">${r.sector||''}</span></div><div class="sub">Score: ${r.finalScore}</div></div>${r.inTop3?'<span class="pill po">TOP-3</span>':''}</div>`;}).join(''));}
-        set('s-ws',sys.websocketConnected?'✅ Connected':'❌ Disconnected');set('s-rc',sys.reconnectCount||0);
-        set('s-lag',lat.lagMs>0?lat.lagMs+'ms':'< 1ms');set('s-tick',lat.lastTickTime||lat.lastCandleTime||'—');
-        set('s-ticks',lat.ticksReceived!=null?lat.ticksReceived.toLocaleString():'—');set('s-cand',lat.candlesProcessed?lat.candlesProcessed.toLocaleString():'—');
-        set('s-stat',lat.status||'—');set('s-mode',D.tradingMode||'—');set('s-ent',sys.entryAllowed?'✅ Yes':'❌ No');set('s-win',sys.currentWindow||'—');
     }
 
     // ── SECTORS ──────────────────────────────────────────────────────────────────
     function renderSectors() {
         const secs=(D.sectors||[]).sort((a,b)=>b.changePercent-a.changePercent);
         html('sec-body',secs.map(s=>{const c=parseFloat(s.changePercent||0),g=parseFloat(s.greenPct||0);const st=s.isTopSector?'<span class="pill pg">TOP</span>':s.isBottomSector?'<span class="pill pr">BOTTOM</span>':s.alignedBullish?'<span class="pill pg">BULL</span>':s.alignedBearish?'<span class="pill pr">BEAR</span>':'<span class="pill pm">NEUT</span>';return`<tr><td><b>${s.name}</b></td><td>${st}</td><td class="${pc(c)}">${c>=0?'+':''}${c.toFixed(2)}%</td><td><div class="sub">${g.toFixed(0)}% (${s.greenStocks||0}G/${s.redStocks||0}R)</div><div class="bt"><div class="bf" style="width:${g}%;background:var(--green)"></div></div></td><td>${f2(s.relativeStrength)}</td><td>${s.totalStocks||0}</td><td>${s.alignedBullish?'✅ Bull':s.alignedBearish?'❌ Bear':'—'}</td></tr>`;}).join(''));
-    }
-
-    // ── RISK ─────────────────────────────────────────────────────────────────────
-    function renderRisk() {
-        const risk=D.riskSlots||{},pnl=D.pnl||{},phase=D.marketPhase||{},mm=D.marketMode||{},mkt=D.market||{},lat=D.latency||{};
-        set('r-p1',(risk.phase1Count||0)+' / '+(risk.maxPhase1||3));set('r-max',risk.maxPhase1||3);set('r-be',risk.anyAtBreakeven?'✅ Yes — 4th slot unlockable':'No');
-        set('r-cap','₹'+parseFloat(pnl.capital||0).toLocaleString());set('r-daily',fp(pnl.dailyPnl||0));set('r-dpct',f2(pnl.dailyPct)+'%');set('r-wk',fp(pnl.weeklyPnl||0));set('r-mo',fp(pnl.monthlyPnl||0));
-        const cbOk=pnl.cbActive===true;const rce=q('r-cb');if(rce){rce.textContent=cbOk?'✅ OK':'⚠ TRIPPED — '+(pnl.cbReason||'');rce.style.color=cbOk?'var(--green)':'var(--red)';}
-        set('r-vix',f2(mkt.vix));set('r-vreg',mkt.vixRegime||'—');set('r-thr',phase.isEarlyPhase?'58 (EARLY)':(mm.minProbability||'—')+' (CONFIRMED)');set('r-ibf',phase.ibForceNeeded?'⚠ YES':'✅ No');set('r-orb',phase.isOrbAllowed?'✅ Yes':'❌ No');
-        set('r-dat',lat.status||'—');const rd=q('r-dat');if(rd)rd.style.color=lat.isStale?'var(--red)':'var(--green)';
-        const se=risk.sectorExposure||{},ste=risk.strategyExposure||{};
-        html('r-sexp',Object.entries(se).filter(([,v])=>v>0).map(([k,v])=>`<span class="pill pb" style="margin:2px">${k}:${v}</span>`).join('')||'<span class="sub">None</span>');
-        html('r-stexp',Object.entries(ste).filter(([,v])=>v>0).map(([k,v])=>`<span class="pill pp" style="margin:2px">${k}:${v}</span>`).join('')||'<span class="sub">None</span>');
-    }
-
-    // ── SMC TAB ──────────────────────────────────────────────────────────────────
-    function renderSmc() {
-        const enabled=SMC.enabled!==false,booted=SMC.bootstrapComplete===true,executed=SMC.tradesExecutedToday||0,remaining=SMC.remainingSlots||0,symbols=SMC.symbolsLoaded||0,fired=SMC.signalsFiredToday||0,maxTrades=SMC.maxTradesPerDay||2,minRr=SMC.minRr||3.0;
-        const stEl=q('smc-status');if(stEl){stEl.textContent=!enabled?'DISABLED':executed>0?'✅ '+executed+' TRADE'+(executed>1?'S':''):booted?'SCANNING':'BOOTING';stEl.className='stat '+(!enabled?'sr':executed>0?'sg':booted?'spur':'sy');}
-        set('smc-fired','Signals fired: '+fired);set('smc-cycles',booted?'✅ Done':'⏳ Pending');set('smc-scanned',symbols);set('smc-qualified',remaining+' slots left');
-        set('smc-summary',booted?symbols+' symbols loaded · '+executed+'/'+maxTrades+' trades':'Bootstrapping candle data…');
-        const nrEl=q('smc-noreason');if(nrEl){nrEl.textContent=!booted?'Candle bootstrap pending':executed>=maxTrades?'Daily limit reached':'—';nrEl.style.color=!booted?'var(--yellow)':'var(--muted)';}
-        const teEl=q('smc-trades-exec');if(teEl){teEl.textContent=executed+' / '+maxTrades;teEl.className='iv '+(executed>=maxTrades?'sg':'sb');}
-        const rmEl=q('smc-remain');if(rmEl){rmEl.textContent=remaining;rmEl.className='iv '+(remaining===0?'sr':'sg');}
-        const btEl=q('smc-bootstrap');if(btEl){btEl.textContent=booted?'✅ Yes ('+symbols+' symbols)':'⏳ Loading…';btEl.style.color=booted?'var(--green)':'var(--yellow)';}
-        set('smc-symbols',symbols);const sfEl=q('smc-signals-fired');if(sfEl){sfEl.textContent=fired;sfEl.className='iv '+(fired>0?'sg':'sb');}
-        set('smc-max-trades',maxTrades);set('smc-min-rr',minRr+'×');
-        const setupEl=q('smc-setup-body');if(setupEl){if(!booted){setupEl.innerHTML='<div class="sub">⏳ Candle bootstrap in progress…</div>';}else if(executed>0){setupEl.innerHTML='<div style="background:#0d1f0d;border:1px solid var(--green);border-radius:8px;padding:10px"><div style="font-weight:700;color:var(--green);margin-bottom:5px">✅ '+executed+' trade'+(executed>1?'s':'')+' executed today</div></div>';}else{setupEl.innerHTML='<div class="sub">Scanning '+symbols+' symbols every candle · Min RR '+minRr+'×</div>';}}
-        const pnlMap=(D.strategyStatus||{}).perStrategyPnl||{},smcPnl=pnlMap['SMC_INSTITUTIONAL_V1']||{};const p=parseFloat(smcPnl.pnl||0);
-        const pEl=q('smc-pnl');if(pEl){pEl.textContent=fp(p);pEl.className='stat '+pc(p);}set('smc-wr','Win Rate: '+(smcPnl.winRate||'—'));
-        const needed=293,pct=booted?100:Math.min(99,Math.round(symbols/needed*100));
-        html('smc-data-bar',`<div style="display:flex;align-items:center;gap:8px"><div style="flex:1;height:8px;border-radius:4px;background:#21262d;overflow:hidden"><div style="height:100%;border-radius:4px;width:${pct}%;background:${pct>=100?'var(--green)':'var(--yellow)'};transition:width .5s"></div></div><span class="sub" style="white-space:nowrap">${symbols}/${needed} (${pct}%${pct>=100?' ✅ Ready':' — loading'})</span></div>`);
     }
 
     // ── NEWS TAB ──────────────────────────────────────────────────────────────────
@@ -860,10 +453,12 @@
         const stEl=q('news-status');if(stEl){stEl.textContent=!enabled?'DISABLED':signals>=maxSig?'🏁 CAP REACHED':'✅ ACTIVE';stEl.className='stat '+(!enabled?'sr':signals>=maxSig?'sy':'sg');}
         set('news-fired-sub','Fired today: '+signals+'/'+maxSig);
         set('news-ingested',ingested);set('news-active-sub','Active: '+active+' items');set('news-signals',signals);
-        const pnlMap=(D.strategyStatus||{}).perStrategyPnl||{},nPnl=pnlMap['NEWS_CATALYST_V1']||{};
-        const p=parseFloat(nPnl.pnl||0);
-        const npEl=q('news-pnl');if(npEl){npEl.textContent=fp(p);npEl.className='stat '+pc(p);}
-        set('news-wr','Win Rate: '+(nPnl.winRate||'—'));
+        // NOTE: P&L for News isn't currently exposed via the snapshot API
+        // (AiNewsCapitalLedger tracks it internally, not yet wired into
+        // DashboardController's JSON output). Showing "—" honestly rather
+        // than a misleading ₹0.00.
+        const npEl=q('news-pnl');if(npEl){npEl.textContent='—';npEl.className='stat';}
+        set('news-wr','Win Rate: —');
 
         // Fired / recent events section
         html('news-events-body',events.length||fired.length

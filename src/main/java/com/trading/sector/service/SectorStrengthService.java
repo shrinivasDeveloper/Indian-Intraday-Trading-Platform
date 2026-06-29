@@ -3,11 +3,14 @@ package com.trading.sector.service;
 import com.trading.domain.Candle;
 import com.trading.events.CandleCompleteEvent;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDate;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
@@ -48,6 +51,31 @@ import java.util.concurrent.atomic.AtomicLong;
  *     Also: recalculateSectors() now skips sectors where no price data exists yet
  *     (count == 0) instead of writing empty SectorData records.
  *
+ *   BUG 4 (NEW — mid-day restart shows wrong sector %, this session's fix):
+ *     openPrices.putIfAbsent(sym, open) inside onCandle() captures whichever 5-minute
+ *     candle this service instance happens to see FIRST as the symbol's "day open"
+ *     reference price. openPrices was pure in-memory (ConcurrentHashMap), with zero
+ *     persistence anywhere in this file.
+ *       - Restart BEFORE market open: openPrices starts empty, the genuinely first
+ *         candle of the day (9:15-9:20 AM) is correctly captured as day-open. Correct.
+ *       - Restart MID-DAY (e.g. 11:30 AM): openPrices ALSO starts empty, but the real
+ *         market open (9:15 AM) already happened hours ago. The first candle THIS NEW
+ *         INSTANCE sees (e.g. 11:35 AM) gets wrongly captured as "day open" via
+ *         putIfAbsent, even though it isn't. Every changePercent computed afterward
+ *         measures change-since-restart instead of change-since-actual-market-open —
+ *         a completely different, wrong number. This is the exact symptom reported:
+ *         "before market deploy = okay, mid-day deploy = different calculation."
+ *     FIX: Added JdbcTemplate-backed persistence for openPrices. Every NEWLY-captured
+ *     open price (i.e., where putIfAbsent genuinely inserted, not a no-op) is written
+ *     to sector_open_prices (symbol, trade_date, open_price). On startup
+ *     (ApplicationReadyEvent, fires on every restart including mid-day),
+ *     reconcileOpenPricesFromDatabase() pre-loads today's already-known opens BEFORE
+ *     any live candle can incorrectly overwrite them — since openPrices is then
+ *     already populated for those symbols, the live onCandle()'s putIfAbsent
+ *     correctly becomes a no-op instead of capturing a wrong restart-time price.
+ *     All DB operations are wrapped in try/catch — a DB hiccup never blocks live
+ *     sector tracking, it only loses the restart-recovery safety net for that run.
+ *
  *   ADDED: getSectorDirection(sectorName) — unchanged from previous version.
  *   ADDED: symbolSector map for reverse lookup (symbol → sector name).
  *          Populated by registerSymbol(), enables isSectorAlignedForSymbol().
@@ -78,6 +106,78 @@ public class SectorStrengthService {
     private final Map<String, String>        symbolSector    = new ConcurrentHashMap<>();
 
     private final AtomicLong lastCalcEpoch = new AtomicLong(0);
+
+    // ── BUG 4 FIX: persistence for openPrices ───────────────────────────────────
+    private final JdbcTemplate jdbc;
+
+    public SectorStrengthService(JdbcTemplate jdbc) {
+        this.jdbc = jdbc;
+        ensureOpenPricesTableExists();
+    }
+
+    private void ensureOpenPricesTableExists() {
+        try {
+            jdbc.execute("""
+                CREATE TABLE IF NOT EXISTS sector_open_prices (
+                    symbol      VARCHAR(20) NOT NULL,
+                    trade_date  DATE        NOT NULL,
+                    open_price  DOUBLE      NOT NULL,
+                    PRIMARY KEY (symbol, trade_date)
+                )
+                """);
+        } catch (Exception e) {
+            log.warn("[SECTOR] Could not create sector_open_prices table — " +
+                    "restart-recovery disabled this session, live tracking still " +
+                    "works normally: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * BUG 4 FIX: Runs on every application startup (including mid-day restarts).
+     * Pre-loads today's already-known day-open prices from the database BEFORE
+     * any live candle event can run — this is what prevents onCandle()'s
+     * putIfAbsent from wrongly capturing a restart-time price as "day open".
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    public void reconcileOpenPricesFromDatabase() {
+        try {
+            List<Map<String, Object>> rows = jdbc.queryForList(
+                    "SELECT symbol, open_price FROM sector_open_prices WHERE trade_date = ?",
+                    LocalDate.now());
+            if (rows.isEmpty()) {
+                log.info("[SECTOR] Reconciliation: no day-open prices found in database " +
+                        "yet today (normal for a before-market start).");
+                return;
+            }
+            for (Map<String, Object> row : rows) {
+                String symbol = (String) row.get("symbol");
+                double open   = ((Number) row.get("open_price")).doubleValue();
+                openPrices.putIfAbsent(symbol, open);
+            }
+            log.info("[SECTOR] ✅ Reconciled {} day-open price(s) from database — " +
+                    "mid-day restart will compute correct change% from true market " +
+                    "open, not from restart time.", rows.size());
+        } catch (Exception e) {
+            log.warn("[SECTOR] reconcileOpenPricesFromDatabase failed — falling back " +
+                            "to capturing day-open from the next live candle, as before this " +
+                            "fix existed (correct before market open, wrong if mid-day): {}",
+                    e.getMessage());
+        }
+    }
+
+    private void persistOpenPrice(String symbol, double open) {
+        try {
+            jdbc.update("""
+                INSERT INTO sector_open_prices (symbol, trade_date, open_price)
+                VALUES (?, ?, ?)
+                ON DUPLICATE KEY UPDATE open_price = open_price
+                """,
+                    symbol, LocalDate.now(), open);
+        } catch (Exception e) {
+            log.debug("[SECTOR] persistOpenPrice failed for {} (non-fatal): {}",
+                    symbol, e.getMessage());
+        }
+    }
 
     // ── Public direction enum ───────────────────────────────────────────────────
 
@@ -223,7 +323,17 @@ public class SectorStrengthService {
         double close = c.getClose().doubleValue();
         double open  = c.getOpen().doubleValue();
 
-        openPrices.putIfAbsent(sym, open);
+        // BUG 4 FIX: only persist when this is a GENUINE first-capture (i.e. the
+        // symbol truly had no day-open yet — either real start-of-day, or the
+        // database reconciliation above hasn't covered it). If reconciliation
+        // already populated this symbol's true 9:15 AM open, this putIfAbsent
+        // correctly becomes a no-op and nothing gets overwritten.
+        Double previousOpen = openPrices.putIfAbsent(sym, open);
+        if (previousOpen == null) {
+            // This call genuinely inserted a new value — persist it so a future
+            // mid-day restart can recover this exact day-open price.
+            persistOpenPrice(sym, open);
+        }
         latestPrices.put(sym, close);
 
         // BUG 1 FIX: read value once into local variable for atomic CAS
@@ -352,6 +462,13 @@ public class SectorStrengthService {
         lastCalcEpoch.set(0);
         // NOTE: symbolsBySector and symbolSector are NOT cleared —
         // sector↔symbol mappings are built once at startup from instruments.
+        // BUG 4 FIX: clear stale (yesterday's or older) persisted open prices
+        // so they can never be reconciled into a future day by mistake.
+        try {
+            jdbc.update("DELETE FROM sector_open_prices WHERE trade_date < ?", LocalDate.now());
+        } catch (Exception e) {
+            log.debug("[SECTOR] Daily DB cleanup failed (non-fatal): {}", e.getMessage());
+        }
         log.info("[SECTOR] Daily reset complete — prices cleared, sector mappings retained");
     }
 

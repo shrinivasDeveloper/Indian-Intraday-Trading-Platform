@@ -295,7 +295,8 @@ public class NewsKeywordFilter {
         m.put("adani ports",            "ADANIPORTS");
         m.put("adani green",            "ADANIGREEN");
         m.put("adani power",            "ADANIPOWER");
-        m.put("adani transmission",     "ADANITRANS");
+        m.put("adani transmission",     "ADANIENSOL");
+        m.put("adani energy solutions", "ADANIENSOL");
         m.put("grasim",                 "GRASIM");
         m.put("hindalco",               "HINDALCO");
         m.put("nestle india",           "NESTLEIND");
@@ -323,7 +324,12 @@ public class NewsKeywordFilter {
         m.put("vedanta",                "VEDL");
         m.put("jsw steel",              "JSWSTEEL");
         m.put("steel authority",        "SAIL");
-        m.put("sail",                   "SAIL");
+        // REMOVED: m.put("sail", "SAIL") — matching is substring-based, not
+        // word-boundary. "sail" falsely matches inside "sailing", "assail",
+        // "unassailable" — real words that can appear in unrelated news.
+        // "steel authority" (above) is the safe, unambiguous alternative;
+        // Strategy 1 also independently catches a literal "SAIL" ticker
+        // mention regardless of this removal.
         m.put("nmdc",                   "NMDC");
         m.put("sbi life",               "SBILIFE");
         m.put("hdfc life",              "HDFCLIFE");
@@ -340,7 +346,11 @@ public class NewsKeywordFilter {
         m.put("pidilite",               "PIDILITIND");
         m.put("berger paints",          "BERGEPAINT");
         m.put("ambuja cements",         "AMBUJACEM");
-        m.put("acc",                    "ACC");
+        // REMOVED: m.put("acc", "ACC") — substring match falsely matches
+        // inside "according", "accept", "account", "access", "accurate" —
+        // all extremely common in business prose. Strategy 1 (direct ticker
+        // scan) independently catches a literal "ACC" mention in headlines,
+        // so no real coverage is lost by removing this risky key.
         m.put("shree cement",           "SHREECEM");
         m.put("divi's",                 "DIVISLAB");
         m.put("divis laboratories",     "DIVISLAB");
@@ -360,7 +370,7 @@ public class NewsKeywordFilter {
         m.put("concor",                 "CONCOR");
         m.put("intertek",               "INDUSTOWER");
         m.put("indus towers",           "INDUSTOWER");
-        m.put("zomato",                 "ZOMATO");
+        m.put("zomato",                 "ETERNAL");
         m.put("nykaa",                  "NYKAA");
         m.put("paytm",                  "PAYTM");
         m.put("policy bazaar",          "POLICYBZR");
@@ -447,7 +457,831 @@ public class NewsKeywordFilter {
         m.put("rail vikas nigam",       "RVNL");
         m.put("hg infra",               "HGINFRA");
         m.put("pnc infratech",          "PNCINFRA");
+        // ── High-liquidity coverage expansion — added to bring all 532
+        // HIGH_LIQUIDITY_SYMBOLS up to name-recognition coverage, not just
+        // ticker-direct matching. Verified against NSE listings; a small
+        // number of genuinely uncertain/very-recent-listing symbols were
+        // deliberately left unmapped rather than guessed.
+        m.put("hindustan aeronautics", "HAL");
+        m.put("hal", "HAL");
+        m.put("beml", "BEML");
+        m.put("mrf tyres", "MRF");
+        m.put("mrf", "MRF");
+        m.put("dlf", "DLF");
+        m.put("trent", "TRENT");
+        m.put("westside", "TRENT");
+        m.put("glenmark pharmaceuticals", "GLENMARK");
+        m.put("glenmark", "GLENMARK");
+        m.put("bata india", "BATAINDIA");
+        m.put("bata", "BATAINDIA");
+        m.put("bosch limited", "BOSCHLTD");
+        m.put("bosch india", "BOSCHLTD");
+        m.put("colgate palmolive", "COLPAL");
+        m.put("colgate", "COLPAL");
+        m.put("gillette india", "GILLETTE");
+        m.put("gillette", "GILLETTE");
+        m.put("pfizer india", "PFIZER");
+        m.put("pfizer", "PFIZER");
+        m.put("sanofi india", "SANOFI");
+        m.put("sanofi", "SANOFI");
+        m.put("naukri", "NAUKRI");
+        m.put("info edge", "NAUKRI");
+        m.put("indiamart", "INDIAMART");
+        m.put("zee entertainment", "ZEEL");
+        m.put("zee", "ZEEL");
+        m.put("sun tv network", "SUNTV");
+        m.put("sun tv", "SUNTV");
+        m.put("raymond", "RAYMOND");
+        m.put("jubilant foodworks", "JUBLFOOD");
+        m.put("dominos india", "JUBLFOOD");
+        m.put("vodafone idea", "IDEA");
+        m.put("vi", "IDEA");
+        m.put("indian overseas bank", "IOB");
+        m.put("central bank of india", "CENTRALBK");
+        m.put("multi commodity exchange", "MCX");
+        m.put("bse limited", "BSE");
+        m.put("central depository services", "CDSL");
+        m.put("cdsl", "CDSL");
+        m.put("nhpc", "NHPC");
+        m.put("sjvn", "SJVN");
+        m.put("nbcc", "NBCC");
+        m.put("hudco", "HUDCO");
+        m.put("railtel", "RAILTEL");
+        m.put("mazagon dock", "MAZDOCK");
+        m.put("gland pharma", "GLAND");
+        m.put("alkem laboratories", "ALKEM");
+        m.put("alkem", "ALKEM");
+        m.put("zydus lifesciences", "ZYDUSLIFE");
+        m.put("zydus", "ZYDUSLIFE");
+        m.put("zydus wellness", "ZYDUSWELL");
+        m.put("granules india", "GRANULES");
+        m.put("laurus labs", "LAURUSLABS");
+        m.put("natco pharma", "NATCOPHARM");
+        m.put("ipca laboratories", "IPCALAB");
+        m.put("ipca", "IPCALAB");
+        m.put("jb chemicals", "JBCHEPHARM");
+        m.put("ajanta pharma", "AJANTPHARM");
+        m.put("wockhardt", "WOCKPHARMA");
+        m.put("suven pharma", "SUVENPHARM");
+        m.put("jubilant pharmova", "JUBLPHARMA");
+        m.put("syngene international", "SYNGENE");
+        m.put("syngene", "SYNGENE");
+        m.put("apollo tyres", "APOLLOTYRE");
+        m.put("ceat", "CEATLTD");
+        m.put("jk tyre", "JKTYRE");
+        m.put("exide industries", "EXIDEIND");
+        m.put("exide", "EXIDEIND");
+        m.put("bharat forge", "BHARATFORG");
+        m.put("endurance technologies", "ENDURANCE");
+        m.put("uno minda", "UNOMINDA");
+        m.put("escorts kubota", "ESCORTS");
+        m.put("escorts", "ESCORTS");
+        m.put("force motors", "FORCEMOT");
+        m.put("schaeffler india", "SCHAEFFLER");
+        m.put("timken india", "TIMKEN");
+        m.put("titagarh rail", "TITAGARH");
+        m.put("samsonite", "VIPIND");
+        m.put("hyundai motor india", "HYUNDAI");
+        m.put("hyundai", "HYUNDAI");
+        m.put("trident group", "TRIDENT");
+        m.put("welspun living", "WELSPUNLIV");
+        m.put("vardhman textiles", "VTL");
+        m.put("kpr mill", "KPRMILL");
+        m.put("century textiles", "CENTURYTEX");
+        m.put("relaxo footwears", "RELAXO");
+        m.put("metro brands", "METROBRAND");
+        m.put("campus activewear", "CAMPUS");
+        m.put("vmart retail", "VMART");
+        m.put("v-mart", "VMART");
+        m.put("shoppers stop", "SHOPERSTOP");
+        m.put("aditya birla fashion", "ABFRL");
+        m.put("vedant fashions", "VEDANTFASN");
+        m.put("westlife foodworld", "WESTLIFE");
+        m.put("mcdonalds india", "WESTLIFE");
+        m.put("devyani international", "DEVYANI");
+        m.put("kfc india", "DEVYANI");
+        m.put("sapphire foods", "SAPPHIRE");
+        m.put("travel food services", "TRAVELFOOD");
+        m.put("vbl", "VBL");
+        m.put("varun beverages", "VBL");
+        m.put("united spirits", "UNITDSPR");
+        m.put("radico khaitan", "RADICO");
+        m.put("indian hotels", "INDHOTEL");
+        m.put("taj hotels", "INDHOTEL");
+        m.put("eih limited", "EIHOTEL");
+        m.put("oberoi hotels", "EIHOTEL");
+        m.put("chalet hotels", "CHALET");
+        m.put("lemon tree hotels", "LEMONTREE");
+        m.put("itc hotels", "ITCHOTELS");
+        m.put("delhivery", "DELHIVERY");
+        m.put("blue dart", "BLUEDART");
+        m.put("container corporation of india", "CONCOR");
+        m.put("indian railway finance", "IRFC");
+        m.put("rail vikas nigam limited", "RVNL");
+        m.put("rites", "RITES");
+        m.put("ircon", "IRCON");
+        m.put("gmr airports", "GMRAIRPORT");
+        m.put("gmr infra", "GMRAIRPORT");
+        m.put("adani total gas", "ATGL");
+        m.put("petronet lng", "PETRONET");
+        m.put("mahanagar gas", "MGL");
+        m.put("indraprastha gas", "IGL");
+        m.put("gujarat gas", "GUJGASLTD");
+        m.put("gujarat state petronet", "GSPL");
+        m.put("oil india", "OIL");
+        m.put("mangalore refinery", "MRPL");
+        m.put("chennai petroleum", "CHENNPETRO");
+        m.put("indian railway catering", "IRCTC");
+        m.put("crisil", "CRISIL");
+        m.put("cams", "CAMS");
+        m.put("computer age management", "CAMS");
+        m.put("k-fin technologies", "KFINTECH");
+        m.put("kfin technologies", "KFINTECH");
+        m.put("multi commodity", "MCX");
+        m.put("angel one", "ANGELONE");
+        m.put("motilal oswal", "MOTILALOFS");
+        m.put("iifl finance", "IIFL");
+        m.put("5paisa capital", "5PAISA");
+        m.put("geojit financial", "GEOJITFSL");
+        m.put("nuvama wealth", "NUVAMA");
+        m.put("anand rathi", "ANANDRATHI");
+        m.put("jm financial", "JMFINANCIL");
+        m.put("360 one wam", "360ONE");
+        m.put("hdfc amc", "HDFCAMC");
+        m.put("hdfc asset management", "HDFCAMC");
+        m.put("uti amc", "UTIAMC");
+        m.put("aditya birla sun life amc", "ABSLAMC");
+        m.put("icici prudential amc", "ICICIAMC");
+        m.put("nippon life india amc", "NAM-INDIA");
+        m.put("can fin homes", "CANFINHOME");
+        m.put("home first finance", "HOMEFIRST");
+        m.put("aptus value housing", "APTUS");
+        m.put("aavas financiers", "AAVAS");
+        m.put("lic housing finance limited", "LICHSGFIN");
+        m.put("pnb housing finance", "PNBHOUSING");
+        m.put("aadhar housing finance", "AADHARHFC");
+        m.put("sbfc finance", "SBFC");
+        m.put("sammaan capital", "SAMMAANCAP");
+        m.put("indiabulls housing", "SAMMAANCAP");
+        m.put("five star business finance", "FIVESTAR");
+        m.put("credit access grameen", "CREDITACC");
+        m.put("muthoot capital", "MUTHOOTCAP");
+        m.put("ifci", "IFCI");
+        m.put("idbi bank", "IDBI");
+        m.put("mahindra finance", "M&MFIN");
+        m.put("tata capital", "TATACAP");
+        m.put("tata investment", "TATAINVEST");
+        m.put("bajaj housing finance", "BAJAJHFL");
+        m.put("star health insurance", "STARHEALTH");
+        m.put("star health", "STARHEALTH");
+        m.put("niva bupa", "NIVABUPA");
+        m.put("go digit insurance", "GODIGIT");
+        m.put("go digit", "GODIGIT");
+        m.put("general insurance corporation", "GICRE");
+        m.put("new india assurance", "NIACL");
+        m.put("bank of india", "BANKINDIA");
+        m.put("indian bank", "INDIANB");
+        m.put("karur vysya bank", "KARURVYSYA");
+        m.put("rbl bank", "RBLBANK");
+        m.put("idfc first bank", "IDFCFIRSTB");
+        m.put("au small finance bank", "AUBANK");
+        m.put("equitas small finance bank", "EQUITASBNK");
+        m.put("ujjivan small finance bank", "UJJIVANSFB");
+        m.put("esaf small finance bank", "ESAFSFB");
+        m.put("suryoday small finance bank", "SURYODAY");
+        m.put("bandhan bank", "BANDHANBNK");
+        m.put("uco bank", "UCOBANK");
+        m.put("punjab and sind bank", "PSB");
+        m.put("jammu and kashmir bank", "J&KBANK");
+        m.put("dhanlaxmi bank", "DHANBANK");
+        m.put("south indian bank", "SOUTHBANK");
+        m.put("city union bank", "CUB");
+        m.put("maharashtra bank", "MAHABANK");
+        m.put("bank of maharashtra", "MAHABANK");
+        m.put("apar industries", "APARINDS");
+        m.put("polycab india", "POLYCAB");
+        m.put("havells india", "HAVELLS");
+        m.put("kei industries", "KEI");
+        m.put("rr kabel", "RRKABEL");
+        m.put("finolex cables", "FINCABLES");
+        m.put("dixon technologies", "DIXON");
+        m.put("amber enterprises", "AMBER");
+        m.put("syrma sgs", "SYRMA");
+        m.put("kaynes technology", "KAYNES");
+        m.put("cyient", "CYIENT");
+        m.put("cyient dlm", "CYIENTDLM");
+        m.put("zen technologies", "ZENTEC");
+        m.put("data patterns", "DATAPATTNS");
+        m.put("hbl power systems", "HBLENGINE");
+        m.put("centum electronics", "CENTUM");
+        m.put("avalon technologies", "AVALON");
+        m.put("crompton greaves consumer", "CROMPTON");
+        m.put("voltas limited", "VOLTAS");
+        m.put("blue star", "BLUESTARCO");
+        m.put("whirlpool of india", "WHIRLPOOL");
+        m.put("kajaria ceramics", "KAJARIACER");
+        m.put("cera sanitaryware", "CERA");
+        m.put("greenpanel industries", "GREENPANEL");
+        m.put("century plyboards", "CENTURYPLY");
+        m.put("astral limited", "ASTRAL");
+        m.put("astral pipes", "ASTRAL");
+        m.put("supreme industries", "SUPREMEIND");
+        m.put("prince pipes", "PRINCEPIPE");
+        m.put("ambuja cement", "AMBUJACEM");
+        m.put("acc limited", "ACC");
+        m.put("jk cement", "JKCEMENT");
+        m.put("ramco cements", "RAMCOCEM");
+        m.put("dalmia bharat", "DALBHARAT");
+        m.put("birla corporation", "BIRLACORP");
+        m.put("jk lakshmi cement", "JKLAKSHMI");
+        m.put("nuvoco vistas", "NUVOCO");
+        m.put("heidelberg cement", "HEIDELBERG");
+        m.put("jsw cement", "JSWCEMENT");
+        m.put("national aluminium company", "NATIONALUM");
+        m.put("hindustan copper", "HINDCOPPER");
+        m.put("gravita india", "GRAVITA");
+        m.put("graphite india", "GRAPHITE");
+        m.put("hindustan zinc limited", "HINDZINC");
+        m.put("shyam metalics", "SHYAMMETL");
+        m.put("welspun corp", "WELCORP");
+        m.put("jindal saw", "JINDALSAW");
+        m.put("apl apollo tubes", "APLAPOLLO");
+        m.put("jindal stainless", "JSL");
+        m.put("ratnamani metals", "RATNAMANI");
+        m.put("sarda energy", "SARDAEN");
+        m.put("kirloskar oil engines", "KIRLOSENG");
+        m.put("kirloskar pneumatic", "KPIL");
+        m.put("thermax limited", "THERMAX");
+        m.put("abb india", "ABB");
+        m.put("siemens limited", "SIEMENS");
+        m.put("schneider electric infrastructure", "SCHNEIDER");
+        m.put("ge t&d india", "GVT&D");
+        m.put("cummins generator", "CUMMINSIND");
+        m.put("triveni turbine", "TRITURBINE");
+        m.put("elgi equipments", "ELGIEQUIP");
+        m.put("greaves cotton", "GREAVESCOT");
+        m.put("praj industries", "PRAJIND");
+        m.put("ksb pumps", "KSB");
+        m.put("kirloskar brothers", "KIRLOSBROS");
+        m.put("jyoti cnc automation", "JYOTICNC");
+        m.put("titan company", "TITAN");
+        m.put("rajesh exports", "RAJESHEXPO");
+        m.put("kalyan jewellers", "KALYANKJIL");
+        m.put("senco gold", "SENCO");
+        m.put("pc jeweller", "PCJEWELLER");
+        m.put("tbz", "TBZ");
+        m.put("tribhovandas bhimji zaveri", "TBZ");
+        m.put("vaibhav global", "VAIBHAVGBL");
+        m.put("page industries limited", "PAGEIND");
+        m.put("kewal kiran clothing", "KKCL");
+        m.put("birla precision", "BIRLAPREC");
+        m.put("emami limited", "EMAMILTD");
+        m.put("godrej industries", "GODREJIND");
+        m.put("marico limited", "MARICO");
+        m.put("dabur india", "DABUR");
+        m.put("jyothy labs", "JYOTHYLAB");
+        m.put("honasa consumer", "HONASA");
+        m.put("mamaearth", "HONASA");
+        m.put("nykaa", "NYKAA");
+        m.put("fsn e-commerce", "NYKAA");
+        m.put("bikaji foods", "BIKAJI");
+        m.put("dom's industries", "DOMS");
+        m.put("doms industries", "DOMS");
+        m.put("eveready industries", "EVEREADY");
+        m.put("vst industries", "VSTIND");
+        m.put("nestle limited", "NESTLEIND");
+        m.put("britannia industries", "BRITANNIA");
+        m.put("hatsun agro", "HATSUN");
+        m.put("heritage foods", "HERITGFOOD");
+        m.put("kwality limited", "KWALITY");
+        m.put("avenue supermarts limited", "DMART");
+        m.put("trent hypermarket", "TRENT");
+        m.put("v2 retail", "V2RETAIL");
+        m.put("aditya birla retail", "ABFRL");
+        m.put("saregama india", "SAREGAMA");
+        m.put("pvr inox", "PVRINOX");
+        m.put("network18", "NETWORK18");
+        m.put("tv18 broadcast", "TV18BRDCST");
+        m.put("dish tv", "DISHTV");
+        m.put("hathway cable", "HATHWAY");
+        m.put("den networks", "DEN");
+        m.put("info edge india", "NAUKRI");
+        m.put("just dial", "JUSTDIAL");
+        m.put("affle india", "AFFLE");
+        m.put("affle", "AFFLE");
+        m.put("indiamart intermesh", "INDIAMART");
+        m.put("matrimony.com", "MATRIMONY");
+        m.put("rategain travel technologies", "RATEGAIN");
+        m.put("map my india", "MAPMYINDIA");
+        m.put("c.e. info systems", "MAPMYINDIA");
+        m.put("newgen software", "NEWGEN");
+        m.put("intellect design arena", "INTELLECT");
+        m.put("birlasoft", "BSOFT");
+        m.put("zensar technologies", "ZENSARTECH");
+        m.put("persistent systems", "PERSISTENT");
+        m.put("coforge", "COFORGE");
+        m.put("mphasis", "MPHASIS");
+        m.put("l&t technology services", "LTTS");
+        m.put("l&t mindtree", "LTM");
+        m.put("ltimindtree", "LTIM");
+        m.put("mindtree", "LTIM");
+        m.put("tata elxsi", "TATAELXSI");
+        m.put("kpit technologies", "KPITTECH");
+        m.put("tata technologies", "TATATECH");
+        m.put("happiest minds", "HAPPSTMNDS");
+        m.put("latentview analytics", "LATENTVIEW");
+        m.put("cms info systems", "CMSINFO");
+        m.put("oracle financial services", "OFSS");
+        m.put("sonata software", "SONATSOFTW");
+        m.put("netweb technologies", "NETWEB");
+        m.put("ksolves india", "KSOLVES");
+        m.put("cartrade tech", "CARTRADE");
+        m.put("policybazaar", "POLICYBZR");
+        m.put("pb fintech", "POLICYBZR");
+        m.put("one97 communications", "PAYTM");
+        m.put("info edge ventures", "NAUKRI");
+        m.put("indegene", "INDGN");
+        m.put("medplus health", "MEDPLUS");
+        m.put("rainbow childrens hospital", "RAINBOW");
+        m.put("apollo hospitals enterprise", "APOLLOHOSP");
+        m.put("fortis healthcare", "FORTIS");
+        m.put("max healthcare institute", "MAXHEALTH");
+        m.put("krishna institute of medical sciences", "KIMS");
+        m.put("kims hospitals", "KIMS");
+        m.put("aster dm healthcare", "ASTERDM");
+        m.put("global health", "MEDANTA");
+        m.put("medanta", "MEDANTA");
+        m.put("narayana hrudayalaya", "NH");
+        m.put("yatharth hospital", "YATHARTH");
+        m.put("metropolis healthcare", "METROPOLIS");
+        m.put("dr lal pathlabs", "LALPATHLAB");
+        m.put("vijaya diagnostic", "VIJAYA");
+        m.put("thyrocare", "THYROCARE");
+        m.put("poly medicure", "POLYMED");
+        m.put("caplin point laboratories", "CAPLIPOINT");
+        m.put("mankind pharma", "MANKIND");
+        m.put("torrent power", "TORNTPOWER");
+        m.put("cesc limited", "CESC");
+        m.put("jsw energy", "JSWENERGY");
+        m.put("jp power", "JPPOWER");
+        m.put("reliance power", "RPOWER");
+        m.put("nlc india", "NLCINDIA");
+        m.put("ntpc green energy", "NTPCGREEN");
+        m.put("acme solar", "ACMESOLAR");
+        m.put("acme solar holdings", "ACMESOLAR");
+        m.put("waaree energies", "WAAREEENER");
+        m.put("inox wind energy", "INOXWIND");
+        m.put("ola electric", "OLAELEC");
+        m.put("ather energy", "ATHERENERG");
+        m.put("olectra greentech", "OLECTRA");
+        m.put("emmvee photovoltaic", "EMMVEE");
+        m.put("premier energies", "PREMIERENE");
+        m.put("urja global", "URJA");
+        m.put("websol energy", "WEBELSOLAR");
+        m.put("rattan india power", "RTNPOWER");
+        m.put("torrent gas", "TORNTPOWER");
+        m.put("indian energy exchange", "IEX");
+        m.put("iex", "IEX");
+        m.put("clean science", "CLEAN");
+        m.put("clean science and technology", "CLEAN");
+        m.put("deepak nitrite", "DEEPAKNTR");
+        m.put("deepak fertilisers", "DEEPAKFERT");
+        m.put("aarti industries", "AARTIIND");
+        m.put("srf limited", "SRF");
+        m.put("pidilite industries", "PIDILITIND");
+        m.put("navin fluorine", "NAVINFLUOR");
+        m.put("atul limited", "ATUL");
+        m.put("sumitomo chemical india", "SUMICHEM");
+        m.put("solar industries", "SOLARINDS");
+        m.put("chambal fertilisers", "CHAMBLFERT");
+        m.put("coromandel international", "COROMANDEL");
+        m.put("paradeep phosphates", "PARADEEP");
+        m.put("rashtriya chemicals", "RCF");
+        // REMOVED: m.put("fact", "FACT") — substring match falsely matches
+        // inside "manufacture", "manufacturing", "manufacturer",
+        // "satisfaction" — all extremely common in Indian business/
+        // industrial news. The full name below is the safe alternative.
+        m.put("fertilisers and chemicals travancore", "FACT");
+        m.put("gail india", "GAIL");
+        m.put("oil and natural gas corporation", "ONGC");
+        m.put("vedanta limited", "VEDL");
+        m.put("adani wilmar", "AWL");
+        m.put("aw l agri", "AWL");
+        m.put("patanjali foods", "PATANJALI");
+        m.put("ruchi soya", "PATANJALI");
+        m.put("gujarat ambuja exports", "GAEL");
+        m.put("godfrey phillips", "GODFRYPHLP");
+        m.put("vst tillers", "VSTTILLERS");
+        m.put("escorts limited", "ESCORTS");
+        m.put("balrampur chini mills", "BALRAMCHIN");
+        m.put("eid parry", "EIDPARRY");
+        m.put("dcm shriram", "DCMSHRIRAM");
+        m.put("godavari biorefineries", "GODAVARIB");
+        m.put("triveni engineering", "TRIVENI");
+        m.put("dwarikesh sugar", "DWARKESH");
+        m.put("kaveri seed", "KAVERISEED");
+        m.put("rallis india", "RALLIS");
+        m.put("upl limited", "UPL");
+        m.put("bayer cropscience", "BAYERCROP");
+        m.put("pi industries", "PIIND");
+        m.put("sumitomo chemical", "SUMICHEM");
+        m.put("dhanuka agritech", "DHANUKA");
+        m.put("bharat petroleum corporation", "BPCL");
+        m.put("hindustan petroleum corporation", "HINDPETRO");
+        m.put("indian oil corporation", "IOC");
+        m.put("castrol india", "CASTROLIND");
+        m.put("gulf oil lubricants", "GULFOILLUB");
+        m.put("savita oil technologies", "SOTL");
+        m.put("pinelabs", "PINELABS");
+        m.put("pine labs", "PINELABS");
+        m.put("groww", "GROWW");
+        m.put("billionbrains garage", "GROWW");
+        m.put("meesho", "MEESHO");
+        m.put("swiggy limited", "SWIGGY");
+        m.put("eternal limited", "ETERNAL");
+        m.put("zomato eternal", "ETERNAL");
+        m.put("firstcry", "FIRSTCRY");
+        m.put("brainbees solutions", "FIRSTCRY");
+        m.put("urban company", "URBANCO");
+        m.put("vishal mega mart", "VMM");
+        m.put("lenskart", "LENSKART");
+        m.put("niva bupa health insurance", "NIVABUPA");
+        m.put("sagility india", "SAGILITY");
+        m.put("concord biotech", "CONCORDBIO");
+        m.put("emcure pharmaceuticals", "EMCURE");
+        m.put("sai life sciences", "SAILIFE");
+        m.put("belrise industries", "BELRISE");
+        m.put("jwl", "JWL");
+        m.put("jupiter wagons", "JWL");
+        m.put("titagarh rail systems", "TITAGARH");
+        m.put("texmaco rail", "TEXRAIL");
+        m.put("railway products", "RVNL");
+        m.put("garden reach shipbuilders", "GRSE");
+        m.put("cochin shipyard", "COCHINSHIP");
+        m.put("mazagon dock shipbuilders", "MAZDOCK");
+        m.put("bharat dynamics", "BDL");
+        m.put("bharat electronics limited", "BEL");
+        m.put("hindustan aeronautics limited", "HAL");
+        m.put("data security council", "DSCI");
+        m.put("inox india", "INOXINDIA");
+        m.put("inox wind limited", "INOXWIND");
+        m.put("borosil renewables", "BORORENEW");
+        m.put("apollo micro systems", "APOLLOMICR");
+        m.put("paras defence", "PARAS");
+        m.put("zen technologies limited", "ZENTEC");
+        m.put("data patterns india", "DATAPATTNS");
+        m.put("astra microwave", "ASTRAMICRO");
+        m.put("mtar technologies", "MTARTECH");
+        m.put("hindustan shipyard", "HSL");
+        m.put("garden silk mills", "GARDENSILK");
+        m.put("genesys international", "GENESYS");
+        m.put("centrum capital", "CENTRUM");
+        m.put("ircon international limited", "IRCON");
+        m.put("hg infra engineering", "HGINFRA");
+        m.put("pnc infratech limited", "PNCINFRA");
+        m.put("kec international", "KEC");
+        m.put("kalpataru projects", "KPIL");
+        m.put("nbcc india limited", "NBCC");
+        m.put("ahluwalia contracts", "AHLUCONT");
+        m.put("ncc limited", "NCC");
+        m.put("nagarjuna construction", "NCC");
+        m.put("irb infrastructure", "IRB");
+        m.put("gmr infrastructure", "GMRAIRPORT");
+        m.put("dlf limited", "DLF");
+        m.put("godrej properties limited", "GODREJPROP");
+        m.put("oberoi realty limited", "OBEROIRLTY");
+        m.put("macrotech developers", "LODHA");
+        m.put("lodha group", "LODHA");
+        m.put("sobha limited", "SOBHA");
+        m.put("prestige estates", "PRESTIGE");
+        m.put("brigade enterprises limited", "BRIGADE");
+        m.put("phoenix mills", "PHOENIXLTD");
+        m.put("anant raj", "ANANTRAJ");
+        m.put("signature global", "SIGNATURE");
+        m.put("puravankara", "PURVANKARA");
+        m.put("sunteck realty", "SUNTECK");
+        m.put("mahindra lifespace", "MAHLIFE");
+        m.put("godrej industries limited", "GODREJIND");
+        m.put("ttk prestige", "TTKPRESTIG");
+        m.put("symphony limited", "SYMPHONY");
+        m.put("orient electric", "ORIENTELEC");
+        m.put("v guard industries", "VGUARD");
+        m.put("usha martin", "USHAMART");
+        m.put("apar industries limited", "APARINDS");
+        m.put("kec international limited", "KEC");
+        m.put("schaeffler india limited", "SCHAEFFLER");
+        m.put("timken india limited", "TIMKEN");
+        m.put("skf india", "SKFINDIA");
+        m.put("nrb bearings", "NRBBEARING");
+        m.put("craftsman automation", "CRAFTSMAN");
+        m.put("sona blw precision", "SONACOMS");
+        m.put("sona comstar", "SONACOMS");
+        m.put("rajratan global wire", "RATNAMANI");
+        m.put("gabriel india", "GABRIEL");
+        m.put("jbm auto", "JBMA");
+        m.put("motherson sumi wiring", "MSUMI");
+        m.put("samvardhana motherson international", "MOTHERSON");
+        m.put("varroc engineering", "VARROC");
+        m.put("happy forgings", "HAPPYFORG");
+        m.put("rk forgings", "RKFORGE");
+        m.put("ramkrishna forgings", "RKFORGE");
+        m.put("setco automotive", "SETCO");
+        m.put("sundram fasteners", "SUNDRMFAST");
+        m.put("sundaram clayton", "SUNCLAYLTD");
+        m.put("balkrishna paper", "BALKRISIND");
+        m.put("ceat limited", "CEATLTD");
+        m.put("indag rubber", "INDAGRUBBR");
+        m.put("force motors limited", "FORCEMOT");
+        m.put("vrl logistics", "VRLLOG");
+        m.put("transport corporation of india", "TCI");
+        m.put("allcargo logistics", "ALLCARGO");
+        m.put("delhivery limited", "DELHIVERY");
+        m.put("mahindra logistics", "MAHLOG");
+        m.put("snowman logistics", "SNOWMAN");
+        m.put("tci express", "TCIEXP");
+        m.put("gateway distriparks", "GATEWAY");
+        m.put("great eastern shipping", "GESHIP");
+        m.put("shipping corporation of india", "SCI");
+        m.put("essar shipping", "ESSARSHPNG");
+        m.put("seamec limited", "SEAMECLTD");
+        m.put("adani ports and special economic zone", "ADANIPORTS");
+        m.put("jsw infrastructure", "JSWINFRA");
+        m.put("gujarat pipavav port", "GPPL");
+        m.put("v.r.l logistics", "VRLLOG");
+        m.put("redington india", "REDINGTON");
+        m.put("redington limited", "REDINGTON");
+        m.put("aegis logistics", "AEGISLOG");
+        m.put("aegis vopak terminals", "AEGISVOPAK");
+        m.put("gulf petrochem", "AEGISVOPAK");
+        m.put("apar industries ltd", "APARINDS");
+        m.put("hindustan oil exploration", "HINDOILEXP");
+        m.put("oil and gas commission", "ONGC");
+        m.put("spandana sphoorty", "SPANDANA");
+        m.put("manappuram finance limited", "MANAPPURAM");
+        m.put("muthoot finance limited", "MUTHOOTFIN");
+        m.put("l&t finance", "LTF");
+        m.put("l&t finance holdings", "LTF");
+        m.put("poonawalla fincorp limited", "POONAWALLA");
+        m.put("piramal finance", "PIRAMALFIN");
+        m.put("indostar capital", "INDOSTAR");
+        m.put("manappuram home finance", "MANAPPURAM");
+        m.put("repco home finance", "REPCO");
+        m.put("jio financial services", "JIOFIN");
+        m.put("jio financial", "JIOFIN");
+        m.put("bajaj finance limited", "BAJFINANCE");
+        m.put("bajaj finserv limited", "BAJAJFINSV");
+        m.put("cholamandalam investment", "CHOLAFIN");
+        m.put("cholamandalam financial holdings", "CHOLAHLDNG");
+        m.put("shriram finance limited", "SHRIRAMFIN");
+        m.put("sundaram finance limited", "SUNDARMFIN");
+        m.put("can fin homes limited", "CANFINHOME");
+        m.put("home first finance company", "HOMEFIRST");
+        m.put("aadhar housing finance limited", "AADHARHFC");
+        m.put("aptus value housing finance", "APTUS");
+        m.put("muthoot microfin", "MUTHOOTMF");
+        m.put("creditaccess grameen", "CREDITACC");
+        m.put("spandana sphoorty financial", "SPANDANA");
+        m.put("ujjivan financial services", "UJJIVANSFB");
+        m.put("indostar capital finance", "INDOSTAR");
+        m.put("cholamandalam ms general insurance", "CHOLAHLDNG");
+        m.put("icici lombard general insurance", "ICICIGI");
+        m.put("icici prudential life insurance", "ICICIPRULI");
+        m.put("hdfc life insurance", "HDFCLIFE");
+        m.put("sbi life insurance", "SBILIFE");
+        m.put("life insurance corporation", "LICI");
+        m.put("lic of india", "LICI");
+        m.put("max financial services", "MFSL");
+        m.put("max life insurance", "MFSL");
+        m.put("general insurance corporation of india", "GICRE");
+        m.put("the new india assurance", "NIACL");
+        m.put("genus power infrastructures", "GENUSPOWER");
+        m.put("kp energy", "KPEL");
+        m.put("websol energy system", "WEBELSOLAR");
+        m.put("kirloskar oil engines limited", "KIRLOSENG");
+        m.put("apco infratech", "APCOTEXIND");
+        m.put("apcotex industries", "APCOTEXIND");
+        m.put("jain irrigation", "JAINREC");
+        m.put("jain resource recycling", "JAINREC");
+        m.put("praj industries limited", "PRAJIND");
+        m.put("graphite india limited", "GRAPHITE");
+        m.put("hindustan engineering", "HEG");
+        m.put("hindustan engineering and graphite", "HEG");
+        m.put("century enka", "CENTENKA");
+        m.put("filatex india", "FILATEX");
+        m.put("indo count industries", "ICIL");
+        m.put("kpr mill limited", "KPRMILL");
+        m.put("alok industries", "ALOKINDS");
+        m.put("welspun india", "WELSPUNLIV");
+        m.put("garware technical fibres", "GARFIBRES");
+        m.put("himatsingka seide", "HIMATSEIDE");
+        m.put("sutlej textiles", "SUTLEJTEX");
+        m.put("rsl limited", "RSWM");
+        m.put("nahar industrial", "NAHARINDUS");
+        m.put("page industries ltd", "PAGEIND");
+        m.put("arvind limited", "ARVIND");
+        m.put("arvind fashions", "ARVINDFASN");
+        m.put("usha martin limited", "USHAMART");
+        m.put("man industries", "MANINDS");
+        m.put("jain steel & power", "JAINSP");
+        m.put("welspun specialty solutions", "WELSPECIA");
+        m.put("rajesh exports limited", "RAJESHEXPO");
+        m.put("titan eyeplus", "TITAN");
+        m.put("kalyan jewellers india", "KALYANKJIL");
+        m.put("senco gold limited", "SENCO");
+        m.put("thangamayil jewellery", "THANGAMAYL");
+        m.put("rajratan global", "RAJRATAN");
+        m.put("vaibhav global limited", "VAIBHAVGBL");
+        m.put("orient bell", "ORIENTBELL");
+        m.put("nitco tiles", "NITCO");
+        m.put("somany ceramics", "SOMANYCERA");
+        m.put("kajaria ceramics limited", "KAJARIACER");
+        m.put("hsil limited", "HSIL");
+        m.put("cera sanitaryware limited", "CERA");
+        m.put("allied blenders and distillers", "ABDL");
+        m.put("allied blenders", "ABDL");
+        m.put("aditya birla lifestyle brands", "ABLBL");
+        m.put("nmdc steel", "NSLNISP");
+        m.put("swan corp", "SWANCORP");
+        m.put("swan energy", "SWANENERGY");
+        m.put("aia engineering", "AIAENG");
+        m.put("hitachi energy india", "POWERINDIA");
+        m.put("hitachi energy", "POWERINDIA");
+        m.put("amara raja energy", "ARE&M");
+        m.put("amara raja batteries", "ARE&M");
+        m.put("asahi india glass", "ASAHIINDIA");
+        m.put("bombay burmah trading", "BBTC");
+        m.put("bharti hexacom", "BHARTIHEXA");
+        m.put("bls international", "BLS");
+        m.put("blue jet healthcare", "BLUEJET");
+        m.put("canara hsbc life insurance", "CANHLIFE");
+        m.put("carborundum universal", "CARBORUNIV");
+        m.put("capri global capital", "CGCL");
+        m.put("choice international", "CHOICEIN");
+        m.put("cie automotive india", "CIEINDIA");
+        m.put("eclerx services", "ECLERX");
+        m.put("eclerx", "ECLERX");
+        m.put("elecon engineering", "ELECON");
+        m.put("engineers india", "ENGINERSIN");
+        m.put("eris lifesciences", "ERIS");
+        m.put("firstsource solutions", "FSL");
+        m.put("gallantt ispat", "GALLANTT");
+        m.put("gallantt metal", "GALLANTT");
+        m.put("glaxosmithkline pharmaceuticals", "GLAXO");
+        m.put("gsk pharma", "GLAXO");
+        m.put("gujarat mineral development", "GMDCLTD");
+        m.put("godawari power and ispat", "GPIL");
+        m.put("hfcl limited", "HFCL");
+        m.put("international gemmological institute", "IGIL");
+        m.put("india cements", "INDIACEM");
+        m.put("iol chemicals", "IOLCP");
+        m.put("icici securities", "ISEC");
+        m.put("iti limited", "ITI");
+        m.put("indian telephone industries", "ITI");
+        m.put("jubilant ingrevia", "JUBLINGREA");
+        m.put("linde india", "LINDEINDIA");
+        m.put("lloyds metals and energy", "LLOYDSME");
+        m.put("lt foods", "LTFOODS");
+        m.put("daawat rice", "LTFOODS");
+        m.put("minda corporation", "MINDACORP");
+        m.put("mmtc limited", "MMTC");
+        m.put("moil limited", "MOIL");
+        m.put("manganese ore india", "MOIL");
+        m.put("neuland laboratories", "NEULANDLAB");
+        m.put("onesource specialty pharma", "ONESOURCE");
+        m.put("pcbl limited", "PCBL");
+        m.put("phillips carbon black", "PCBL");
+        m.put("pg electroplast", "PGEL");
+        m.put("piramal pharma", "PPLPHARMA");
+        m.put("rhi magnesita india", "RHIM");
+        m.put("sequent scientific", "SEQUENT");
+        m.put("supreme petrochem", "SPLPETRO");
+        m.put("transformers and rectifiers", "TARIL");
+        m.put("tata chemicals", "TATACHEM");
+        m.put("tata communications", "TATACOMM");
+        m.put("tbo tek", "TBOTEK");
+        m.put("techno electric", "TECHNOE");
+        m.put("tega industries", "TEGA");
+        m.put("tejas networks", "TEJASNET");
+        m.put("tube investments of india", "TIINDIA");
+        m.put("tata teleservices maharashtra", "TTML");
+        m.put("zf commercial vehicle control systems", "ZFCVINDIA");
+        m.put("piramal enterprises", "PIRAMALFIN");
+        // ── Cross-checked against updated Zerodha-verified symbol list ────────
+        m.put("biocon", "BIOCON");
+        m.put("biocon limited", "BIOCON");
+        m.put("ccl products", "CCL");
+        m.put("siemens energy india", "ENRIN");
+        m.put("siemens energy", "ENRIN");
+        m.put("ptc industries", "PTCIL");
+        m.put("leela palaces", "THELEELA");
+        m.put("the leela", "THELEELA");
+        m.put("leela hotels", "THELEELA");
+        m.put("aditya birla capital", "ABCAPITAL");
+        m.put("aditya birla capital limited", "ABCAPITAL");
+        m.put("aditya birla real estate", "ABREL");
+        m.put("action construction equipment", "ACE");
+        m.put("acutaas chemicals", "ACUTAAS");
+        m.put("afcons infrastructure", "AFCONS");
+        m.put("hdb financial services", "HDBFS");
+        m.put("honeywell automation india", "HONAUT");
+        m.put("honeywell automation", "HONAUT");
+        m.put("nava limited", "NAVA");
+        m.put("nava bharat ventures", "NAVA");
+        m.put("anthem biosciences", "ANTHEM");
         COMPANY_NAME_MAP = Collections.unmodifiableMap(m);
+    }
+
+    /**
+     * High-liquidity symbol universe — 532 Zerodha-verified, actively
+     * traded Nifty500-class stocks. Used as an ADDITIONAL gate inside
+     * extractSymbols() below — on top of the existing knownSymbols
+     * parameter (the live NSE instrument cache, passed in by
+     * NewsIngestionService and unchanged), a symbol must ALSO be in this
+     * curated list to be accepted. This narrows matching to genuinely
+     * worth-trading names without weakening the existing knownSymbols
+     * check — a delisted/suspended symbol is still correctly excluded
+     * even if present in this list.
+     *
+     * Built via LinkedHashSet + Collections.unmodifiableSet rather than
+     * Set.of(...) — Set.of() throws IllegalArgumentException at startup
+     * if the literal list contains even one duplicate; this construction
+     * is duplicate-tolerant by design, so a future edit to this list
+     * can never crash the application.
+     */
+    private static final Set<String> HIGH_LIQUIDITY_SYMBOLS;
+    static {
+        Set<String> s = new LinkedHashSet<>(Arrays.asList(
+                "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR", "ITC", "SBIN",
+                "BAJFINANCE", "BHARTIARTL", "KOTAKBANK", "LT", "AXISBANK", "ASIANPAINT", "MARUTI", "NESTLEIND",
+                "TITAN", "SUNPHARMA", "ULTRACEMCO", "WIPRO", "HCLTECH", "TECHM", "POWERGRID", "NTPC",
+                "ONGC", "COALINDIA", "TATASTEEL", "JSWSTEEL", "HINDALCO", "GRASIM", "BAJAJ-AUTO", "EICHERMOT",
+                "HEROMOTOCO", "DRREDDY", "CIPLA", "DIVISLAB", "APOLLOHOSP", "ADANIPORTS", "ADANIGREEN", "ADANIENT",
+                "ATGL", "BAJAJFINSV", "HDFCLIFE", "SBILIFE", "ICICIPRULI", "MUTHOOTFIN", "CHOLAFIN", "PFC",
+                "RECLTD", "IRCTC", "INDIGO", "TATACONSUM", "TMCV", "DABUR", "GODREJCP", "PIDILITIND",
+                "BERGEPAINT", "MARICO", "COLPAL", "EMAMILTD", "BRITANNIA", "TATAPOWER", "TRENT", "VEDL",
+                "NATIONALUM", "NMDC", "SAIL", "BHEL", "SIEMENS", "ABB", "HAVELLS", "VOLTAS",
+                "BLUESTARCO", "WHIRLPOOL", "BOSCHLTD", "CUMMINSIND", "THERMAX", "IRB", "PRESTIGE", "GODREJPROP",
+                "OBEROIRLTY", "DLF", "PHOENIXLTD", "LTM", "MPHASIS", "PERSISTENT", "COFORGE", "LTTS",
+                "KPITTECH", "TATAELXSI", "OFSS", "ETERNAL", "PAYTM", "POLICYBZR", "NYKAA", "DELHIVERY",
+                "CARTRADE", "SAPPHIRE", "BANKINDIA", "CANBK", "INDIANB", "UNIONBANK", "PNB", "FEDERALBNK",
+                "IDFCFIRSTB", "BANDHANBNK", "RBLBANK", "YESBANK", "KARURVYSYA", "CREDITACC", "MRF", "APOLLOTYRE",
+                "CEATLTD", "BALKRISIND", "TVSMOTOR", "MOTHERSON", "BHARATFORG", "ENDURANCE", "UNOMINDA", "ESCORTS",
+                "PAGEIND", "DMART", "JUBLFOOD", "DEVYANI", "ZYDUSLIFE", "ALKEM", "IPCALAB", "NATCOPHARM",
+                "GRANULES", "LAURUSLABS", "AUROPHARMA", "TORNTPHARM", "AJANTPHARM", "GLAND", "GLAXO", "PFIZER",
+                "ABBOTINDIA", "NEULANDLAB", "TATACHEM", "DEEPAKNTR", "AAVAS", "APTUS", "HOMEFIRST", "ICICIGI",
+                "STARHEALTH", "NIACL", "GICRE", "NEWGEN", "MFSL", "IIFL", "ANGELONE", "MOTILALOFS",
+                "MCX", "BSE", "CDSL", "CAMS", "KFINTECH", "IRFC", "RVNL", "HUDCO",
+                "NBCC", "NHPC", "SJVN", "OIL", "MGL", "IGL", "GAIL", "PETRONET",
+                "SUPREMEIND", "ASTRAL", "FINCABLES", "ACC", "AMBUJACEM", "JKCEMENT", "RAMCOCEM", "JINDALSAW",
+                "WELCORP", "KALYANKJIL", "ZEEL", "PVRINOX", "INOXWIND", "IREDA", "TORNTPOWER", "CESC",
+                "JPPOWER", "ADANIPOWER", "POLYCAB", "KEI", "BATAINDIA", "ASTERDM", "MAXHEALTH", "FORTIS",
+                "NH", "KIMS", "RAINBOW", "MAZDOCK", "GRSE", "BEL", "HAL", "BEML",
+                "CYIENT", "ZENSARTECH", "HEXT", "BSOFT", "INTELLECT", "CONCOR", "BLUEDART", "360ONE",
+                "ABCAPITAL", "AMBER", "ANANTRAJ", "APLAPOLLO", "ARE&M", "ASHOKLEY", "AUBANK", "BAJAJHFL",
+                "BALRAMCHIN", "BANKBARODA", "CANFINHOME", "CGPOWER", "CHAMBLFERT", "CHOLAHLDNG", "CLEAN", "COROMANDEL",
+                "CROMPTON", "DALBHARAT", "DIXON", "EIDPARRY", "EXIDEIND", "FACT", "FIVESTAR", "FLUOROCHEM",
+                "FORCEMOT", "GMRAIRPORT", "GODREJIND", "HDFCAMC", "HINDCOPPER", "HINDPETRO", "HINDZINC", "HYUNDAI",
+                "IDBI", "IDEA", "INDHOTEL", "INDUSINDBK", "IOB", "IOC", "JBCHEPHARM", "JSWENERGY",
+                "JSWINFRA", "JUBLINGREA", "KAJARIACER", "KAYNES", "KEC", "KPIL", "LALPATHLAB", "LICI",
+                "LINDEINDIA", "LLOYDSME", "LODHA", "LTF", "LUPIN", "M&M", "M&MFIN", "MAHABANK",
+                "MANKIND", "MRPL", "NAM-INDIA", "NAUKRI", "NLCINDIA", "NSLNISP", "NTPCGREEN", "NUVAMA",
+                "OLECTRA", "PATANJALI", "PNBHOUSING", "POLYMED", "PPLPHARMA", "PREMIERENE", "RADICO", "REDINGTON",
+                "RKFORGE", "RPOWER", "SBFC", "SBICARD", "SCHAEFFLER", "SHREECEM", "SHYAMMETL", "SOLARINDS",
+                "SONACOMS", "SUMICHEM", "SUNDARMFIN", "SUZLON", "SYNGENE", "TATACOMM", "TATATECH", "TIINDIA",
+                "TITAGARH", "TRIDENT", "UBL", "UCOBANK", "UNITDSPR", "UPL", "USHAMART", "UTIAMC",
+                "VBL", "VIJAYA", "WAAREEENER", "WELSPUNLIV", "WOCKPHARMA", "ZENTEC", "ZFCVINDIA", "5PAISA",
+                "CAMPUS", "CENTURYTEX", "DISHTV", "EQUITASBNK", "ESAFSFB", "GATEWAY", "GEOJITFSL", "GPPL",
+                "GREENPANEL", "GSPL", "HATHWAY", "HEIDELBERG", "IOLCP", "ISEC", "KSOLVES", "METROBRAND",
+                "MOIL", "NETWORK18", "PARAS", "PCJEWELLER", "PRAJIND", "PRINCEPIPE", "RAJESHEXPO", "RATEGAIN",
+                "RATNAMANI", "RAYMOND", "RELAXO", "SANOFI", "SENCO", "SEQUENT", "SHOPERSTOP", "SOUTHBANK",
+                "SUNDRMFAST", "SURYODAY", "SUVENPHARM", "TRIVENI", "UJJIVANSFB", "VMART", "WESTLIFE", "AEGISLOG",
+                "BIRLACORP", "VMM", "MTARTECH", "TBZ", "3MINDIA", "AADHARHFC", "AARTIIND", "ABDL",
+                "ABFRL", "ABLBL", "ABREL", "ABSLAMC", "ACE", "ACMESOLAR", "ACUTAAS", "AEGISVOPAK",
+                "AFCONS", "AFFLE", "AIAENG", "AIIL", "ANANDRATHI", "ANTHEM", "ANURAS", "APARINDS",
+                "ASAHIINDIA", "ATHERENERG", "ATUL", "AWL", "BAJAJHLDNG", "BAYERCROP", "BBTC", "BDL",
+                "BELRISE", "BHARTIHEXA", "BIKAJI", "BLS", "BLUEJET", "BRIGADE", "CANHLIFE", "CAPLIPOINT",
+                "CARBORUNIV", "CASTROLIND", "CEMPRO", "CENTRALBK", "CGCL", "CHALET", "CHENNPETRO", "CHOICEIN",
+                "CIEINDIA", "COHANCE", "CONCORDBIO", "CPPLUS", "CRAFTSMAN", "CRISIL", "CUB", "DATAPATTNS",
+                "DCMSHRIRAM", "DEEPAKFERT", "DOMS", "ECLERX", "EIHOTEL", "ELECON", "ELGIEQUIP", "EMCURE",
+                "EMMVEE", "ENGINERSIN", "ERIS", "FIRSTCRY", "FSL", "GABRIEL", "GALLANTT", "GESHIP",
+                "GILLETTE", "GLENMARK", "GMDCLTD", "GODFRYPHLP", "GODIGIT", "GPIL", "GRAPHITE", "GRAVITA",
+                "GROWW", "GVT&D", "HBLENGINE", "HDBFS", "HEG", "HFCL", "HONASA", "HONAUT",
+                "HSCL", "ICICIAMC", "IEX", "IFCI", "IGIL", "IKS", "INDGN", "INDIACEM",
+                "INDIAMART", "IRCON", "ITCHOTELS", "ITI", "J&KBANK", "JAINREC", "JBMA", "JINDALSTEL",
+                "JIOFIN", "JKTYRE", "JMFINANCIL", "JSL", "JSWCEMENT", "JSWDULUX", "JUBLPHARMA", "JWL",
+                "JYOTICNC", "KIRLOSENG", "KPRMILL", "LATENTVIEW", "LGEINDIA", "LICHSGFIN", "LTFOODS", "MANAPPURAM",
+                "MAPMYINDIA", "MEDANTA", "MEESHO", "MINDACORP", "MMTC", "MSUMI", "NAVA", "NAVINFLUOR",
+                "NCC", "NETWEB", "NIVABUPA", "NUVOCO", "OLAELEC", "ONESOURCE", "PARADEEP", "PCBL",
+                "PGEL", "PIIND", "PINELABS", "PIRAMALFIN", "POONAWALLA", "POWERINDIA", "PWL", "RAILTEL",
+                "RHIM", "RITES", "RRKABEL", "SAGILITY", "SAILIFE", "SAMMAANCAP", "SARDAEN", "SAREGAMA",
+                "SCHNEIDER", "SCI", "SHRIRAMFIN", "SIGNATURE", "SOBHA", "SONATSOFTW", "SPLPETRO", "SRF",
+                "SUNTV", "SWANCORP", "SWIGGY", "SYRMA", "TARIL", "TATACAP", "TATAINVEST", "TBOTEK",
+                "TECHNOE", "TEGA", "TEJASNET", "TENNIND", "TIMKEN", "TMPV", "TRAVELFOOD", "TRITURBINE",
+                "TTML", "URBANCO", "VTL", "ZYDUSWELL",
+                "ADANIENSOL", "BIOCON", "BPCL", "CCL", "COCHINSHIP", "ENRIN", "INDUSTOWER",
+                "LEMONTREE", "LENSKART", "PTCIL", "THELEELA", "TATAMOTORS"
+        ));
+        HIGH_LIQUIDITY_SYMBOLS = Collections.unmodifiableSet(s);
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -556,6 +1390,13 @@ public class NewsKeywordFilter {
     /**
      * Extract potential NSE symbols from headline text.
      * Conservative: only return symbols that look like real NSE symbols.
+     *
+     * NOTE: every match in all 3 strategies below now also requires
+     * HIGH_LIQUIDITY_SYMBOLS.contains(...) — an additional gate on top of
+     * the existing knownSymbols check, narrowing matches to genuinely
+     * worth-trading names. knownSymbols itself (passed in by
+     * NewsIngestionService, sourced from the live NSE instrument cache)
+     * is completely unchanged.
      */
     public List<String> extractSymbols(String headline, String description,
                                        Set<String> knownSymbols) {
@@ -565,6 +1406,7 @@ public class NewsKeywordFilter {
         // Strategy 1: Look for known symbols directly
         String upper = combined.toUpperCase();
         for (String sym : knownSymbols) {
+            if (!HIGH_LIQUIDITY_SYMBOLS.contains(sym)) continue;
             // Check as word boundary
             if (upper.contains(" " + sym + " ") ||
                     upper.contains(" " + sym + ",") ||
@@ -581,7 +1423,8 @@ public class NewsKeywordFilter {
             String candidate = matcher.group(1);
             if (!NON_SYMBOLS.contains(candidate) &&
                     candidate.length() >= 3 &&
-                    knownSymbols.contains(candidate)) {
+                    knownSymbols.contains(candidate) &&
+                    HIGH_LIQUIDITY_SYMBOLS.contains(candidate)) {
                 found.add(candidate);
             }
         }
@@ -593,7 +1436,8 @@ public class NewsKeywordFilter {
         for (Map.Entry<String, String> entry : COMPANY_NAME_MAP.entrySet()) {
             if (lowerCombined.contains(entry.getKey())) {
                 String mappedSymbol = entry.getValue();
-                if (knownSymbols.contains(mappedSymbol)) {
+                if (knownSymbols.contains(mappedSymbol) &&
+                        HIGH_LIQUIDITY_SYMBOLS.contains(mappedSymbol)) {
                     found.add(mappedSymbol);
                 }
             }

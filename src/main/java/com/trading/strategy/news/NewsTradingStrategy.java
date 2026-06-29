@@ -1,28 +1,27 @@
 package com.trading.strategy.news;
 
+import com.trading.domain.entity.Trade;
 import com.trading.domain.enums.TradeDirection;
-import com.trading.events.SmartChannelPullbackSignalEvent;
 import com.trading.marketdata.service.InstrumentCacheService;
 import com.trading.marketdata.service.MarketTimingService;
-import com.trading.papertrading.model.PaperAccount;
-import com.trading.position.service.PositionSizerService;
 import com.trading.regime.service.MarketDirectionService;
 import com.trading.risk.service.CircuitBreakerService;
-import com.trading.risk.service.RiskManagementService;
 import com.trading.sector.service.SectorClassificationService;
 import com.trading.sector.service.SectorStrengthService;
 import com.trading.strategy.orb.OrbDataService; // for live tick prices
 import com.zerodhatech.models.Instrument;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.*;
@@ -35,33 +34,43 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * DESIGN PRINCIPLES:
- *   1. Completely independent — zero modifications to any existing strategy
- *   2. Uses the IDENTICAL signal pipeline as all other strategies
- *      (SmartChannelPullbackSignalEvent → SmartChannelSignalHandler →
- *       TradeApprovedEvent → PaperTradeExecutionService)
- *   3. All existing risk gates still apply (symbol dedup, circuit breaker,
- *      daily trade limit, slot allocation)
- *   4. Max 2 signals per session — same constraint as ORB and HighRR
+ *   1. Completely independent — zero modifications to, and zero dependency
+ *      on, any other strategy's classes or shared execution pipeline.
+ *   2. INDEPENDENCE (this session's rework): no longer routes through
+ *      SmartChannelPullbackSignalEvent → SmartChannelSignalHandler →
+ *      TradeApprovedEvent → PaperTradeExecutionService — that pipeline
+ *      belongs to the other strategies being permanently removed. Executes
+ *      directly via NewsTradeManagementEngine (News's own complete position
+ *      manager, replicating the exact same SL/breakeven/ATR-trail/partial-
+ *      exit model previously provided by the shared PaperTradeManagementService)
+ *      and AiLiveOrderExecutionService/AiNewsCapitalLedger (shared with AI,
+ *      both already strategy-agnostic — strategyName="NEWS_CATALYST_V1"
+ *      throughout).
+ *   3. Symbol dedup is now self-contained (firedToday/activeSignals +
+ *      newsTradeManagementEngine's own open-position tracking) — no longer
+ *      depends on the shared RiskManagementService's cross-strategy check.
+ *   4. Max 2 signals per session.
  *
  * EXECUTION CYCLE (every 3 minutes):
  *   1. Fetch scored news items from NewsScoreEngine
  *   2. Apply market regime gates (ATR, window, direction)
  *   3. For top-ranked stocks: compute entry/SL/target from current price
- *   4. Fire SmartChannelPullbackSignalEvent into existing pipeline
+ *   4. Execute directly: PAPER mode registers with NewsTradeManagementEngine
+ *      immediately (simulated fill); LIVE mode places a real order via
+ *      AiLiveOrderExecutionService and registers only once the broker
+ *      confirms the fill.
  *
  * SL / TARGET METHODOLOGY:
  *   News catalyst trades are SHORT-DURATION — the price move happens fast
  *   after news breaks. Strategy uses:
  *     Entry:  current LTP (market order simulation)
- *     SL:     entry ± 0.8% (news trades need room — volatile after news)
- *     T1:     entry ± 1.6% (2:1 RR)
- *     T2:     entry ± 2.4% (3:1 RR)
+ *     SL:     price-tiered % by entry price (see computeSlPct below)
+ *     T1:     1:2 RR minimum
+ *     T2:     1:3 RR
  *   Time stop: DISABLED — exit on SL or T1/T2 target only
  *
  * SLOT BUDGET:
  *   NEWS_CATALYST_V1 gets max 2 slots per session.
- *   Total system budget: ORB(2) + HighRR(2) + MarketPressure(4) + SCPS(2) + NEWS(2) = 12
- *   Circuit breaker max-trades-per-day governs the hard ceiling.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 @Service
@@ -84,8 +93,6 @@ public class NewsTradingStrategy {
     private static final double MIN_ATR_PCT  = 0.20;
     /** T2 as multiple of T1 risk (3R total) */
     private static final double T2_RR        = 3.0;
-    // TIME_STOP_MIN = 0 → DISABLED.
-    private static final int    TIME_STOP_MIN = 0;
     /** Maximum capital risk per trade = 1% of capital */
     private static final double MAX_RISK_PCT  = 0.01;
 
@@ -109,13 +116,9 @@ public class NewsTradingStrategy {
     private final NewsIngestionService      ingestionService;
     private final NewsScoreEngine           scoreEngine;
     private final InstrumentCacheService    instrumentCache;
-    private final ApplicationEventPublisher publisher;
     private final CircuitBreakerService     circuitBreaker;
-    private final PositionSizerService      positionSizer;
-    private final PaperAccount             paperAccount;
     private final MarketDirectionService   marketDirection;
     private final MarketTimingService      timingService;
-    private final RiskManagementService    riskManagement;
     private final SectorClassificationService sectorClassify;
     private final SectorStrengthService    sectorStrength;
     // Live tick price source — OrbDataService.livePrices is updated on every tick
@@ -126,11 +129,22 @@ public class NewsTradingStrategy {
     // Zero coupling: this is a database write only, no AI class imported.
     private final JdbcTemplate             jdbc;
 
+    // INDEPENDENCE: replaces publisher.publishEvent(SmartChannelPullbackSignalEvent)
+    // → SmartChannelSignalHandler → TradeApprovedEvent → PaperTradeExecutionService,
+    // and riskManagement.isSymbolAlreadyActive(), and paperAccount.getCapital() —
+    // all of which belonged to the shared pipeline serving the other strategies
+    // being permanently removed. NewsTradeManagementEngine, AiLiveOrderExecutionService,
+    // and AiNewsCapitalLedger are reused as-is from AI's already-built, already-
+    // validated independent pipeline — strategyName="NEWS_CATALYST_V1" throughout.
+    private final NewsTradeManagementEngine newsTradeManagementEngine;
+    private final com.trading.ai.execution.AiLiveOrderExecutionService liveOrderService;
+    private final com.trading.ai.execution.AiNewsCapitalLedger         capitalLedger;
+
     // ── Config ────────────────────────────────────────────────────────────────
     @Value("${strategy.news.enabled:true}")
     private boolean engineEnabled;
 
-    @Value("${strategy.news.min-score:65}")
+    @Value("${strategy.news.min-score:75}")
     private int minScore;
 
     @Value("${strategy.news.max-signals-per-session:2}")
@@ -146,6 +160,81 @@ public class NewsTradingStrategy {
     private final AtomicInteger     sessionSignalCount = new AtomicInteger(0);  // FIX: volatile int++ is not atomic
     private final Set<String>       firedToday         = ConcurrentHashMap.newKeySet();
     private final Set<String>       activeSignals      = ConcurrentHashMap.newKeySet();
+
+    /**
+     * Holds signal data needed to register a position once a LIVE entry
+     * order's fill is confirmed — mirrors AiTradingSystem's identical pattern.
+     */
+    private record PendingNewsEntryContext(
+            String symbol, long instrumentToken, TradeDirection direction,
+            BigDecimal stopLoss, BigDecimal target1, BigDecimal target2, int quantity) {}
+
+    private final Map<String, PendingNewsEntryContext> pendingEntryContext = new ConcurrentHashMap<>();
+
+    @PostConstruct
+    public void wireLiveCallbacks() {
+        liveOrderService.setOnEntryFilled(STRATEGY_NAME, this::onLiveEntryFilled);
+        liveOrderService.setOnEntryRejected(STRATEGY_NAME, this::onLiveEntryRejected);
+        newsTradeManagementEngine.setOnClosedCallback(this::onSignalClosed);
+        newsTradeManagementEngine.reconcileFromDatabase();
+    }
+
+    /**
+     * Fired once the broker confirms a LIVE entry order is COMPLETE. Registers
+     * the position using the ACTUAL average fill price/quantity — slippage
+     * between signal and fill is real and must be reflected correctly.
+     */
+    private void onLiveEntryFilled(String symbol, com.trading.ai.execution.AiLiveOrderExecutionService.FillResult fill) {
+        PendingNewsEntryContext ctx = null;
+        String matchedOrderId = null;
+        for (Map.Entry<String, PendingNewsEntryContext> e : pendingEntryContext.entrySet()) {
+            if (e.getValue().symbol().equals(symbol)) { ctx = e.getValue(); matchedOrderId = e.getKey(); break; }
+        }
+        if (ctx == null) {
+            log.error("[NEWS] onLiveEntryFilled: no pending context found for {} — cannot " +
+                    "register position. orderId={}", symbol, fill.orderId());
+            return;
+        }
+        pendingEntryContext.remove(matchedOrderId);
+
+        BigDecimal actualEntry = BigDecimal.valueOf(fill.avgFillPrice());
+        Trade trade = Trade.builder()
+                .tradeDate(LocalDate.now())
+                .tradingSymbol(symbol)
+                .instrumentToken(ctx.instrumentToken())
+                .direction(ctx.direction())
+                .status("OPEN")
+                .entryTime(Instant.now())
+                .entryPrice(actualEntry)
+                .quantity(fill.filledQty())
+                .stopLoss(ctx.stopLoss())
+                .target(ctx.target1())
+                .strategyName(STRATEGY_NAME)
+                .createdAt(Instant.now())
+                .updatedAt(Instant.now())
+                .build();
+        newsTradeManagementEngine.register(trade);
+        capitalLedger.debitMargin(symbol, STRATEGY_NAME,
+                actualEntry.multiply(BigDecimal.valueOf(fill.filledQty())));
+
+        log.info("[NEWS] ✅ LIVE entry CONFIRMED: {} {} qty={} actualEntry={}",
+                symbol, ctx.direction(), fill.filledQty(), actualEntry);
+    }
+
+    /**
+     * Fired when a LIVE entry order is REJECTED or CANCELLED. Cleans up
+     * pendingEntryContext and the symbol locks (firedToday/activeSignals)
+     * so the symbol can be reconsidered on a future cycle — no position
+     * was ever opened, so there is nothing else to undo.
+     */
+    private void onLiveEntryRejected(String symbol, String statusMessage) {
+        pendingEntryContext.entrySet().removeIf(e -> e.getValue().symbol().equals(symbol));
+        firedToday.remove(symbol);
+        activeSignals.remove(symbol);
+        log.warn("[NEWS] LIVE entry order rejected/cancelled for {} — reason: {}. " +
+                        "No position was opened; symbol may be reconsidered on a future cycle.",
+                symbol, statusMessage);
+    }
 
     /** Snapshot of recent news events for dashboard display */
     private final List<NewsEventSnapshot> recentEvents = new CopyOnWriteArrayList<>();
@@ -314,12 +403,12 @@ public class NewsTradingStrategy {
             return false;
         }
 
-        // Skip if another strategy holds this symbol
-        if (riskManagement.isSymbolAlreadyActive(symbol)) {
-            log.debug("[NEWS] {} held by {} — skip",
-                    symbol, riskManagement.getActiveStrategyForSymbol(symbol));
-            return false;
-        }
+        // INDEPENDENCE: removed riskManagement.isSymbolAlreadyActive(symbol) —
+        // that checks against OTHER strategies' positions via shared
+        // RiskManagementService, which belongs to the strategies being
+        // permanently removed. News now only needs to check its OWN open
+        // positions, via newsTradeManagementEngine.hasPosition() (checked
+        // alongside firedToday/activeSignals above).
 
         // Resolve instrument token
         Instrument inst = instrumentCache.getEquityInstruments().get(symbol.toUpperCase());
@@ -363,36 +452,44 @@ public class NewsTradingStrategy {
                 : entryPrice.subtract(entryPrice.multiply(BigDecimal.valueOf(t2Pct)))
                 .setScale(2, RoundingMode.HALF_UP);
 
-        // ── Dynamic position sizing — capped at 1% capital monetary risk ─────
-        // Position size = (capital × MAX_RISK_PCT) / (entry × slPct)
-        // This ensures monetary risk never exceeds 1% capital regardless of SL%
+        // ── Dynamic position sizing — capped at 1% capital monetary risk,
+        // AND by available capital (FIX, critical, found before going live:
+        // the risk-only formula can size a position whose total VALUE
+        // exceeds available capital — true even at the original ₹1L
+        // default, becomes the common case at smaller capital amounts) ────
         double capitalAmt   = cap.doubleValue();
-        double maxRiskMoney = capitalAmt * MAX_RISK_PCT;         // e.g. ₹1,000 on ₹1L capital
-        double riskPerShare = entry * slPct;                     // e.g. ₹3.76 for ₹376 stock at 1%
-        int qty = riskPerShare > 0
-                ? (int) Math.floor(maxRiskMoney / riskPerShare)
-                : 0;
+        double maxRiskMoney = capitalAmt * MAX_RISK_PCT;
+        double riskPerShare = entry * slPct;
+        int riskBasedQty  = riskPerShare > 0 ? (int) Math.floor(maxRiskMoney / riskPerShare) : 0;
+        int affordableQty = (int) Math.floor(capitalAmt / entry);
+        int qty = Math.min(riskBasedQty, affordableQty);
 
         if (qty <= 0) {
-            log.debug("[NEWS] {} qty=0 (entry={} slPct={}% riskPerShare={}) — skip",
+            log.debug("[NEWS] {} qty=0 (entry={} slPct={}% riskPerShare={} riskBasedQty={} " +
+                            "affordableQty={}) — skip",
                     symbol,
                     String.format("%.2f", entry),
                     String.format("%.1f", slPct * 100),
-                    String.format("%.2f", riskPerShare));
+                    String.format("%.2f", riskPerShare),
+                    riskBasedQty, affordableQty);
             return false;
+        }
+        if (affordableQty < riskBasedQty) {
+            log.info("[NEWS] {} qty capped by capital: risk-based={} → affordable={} " +
+                            "(entry={} capital={})",
+                    symbol, riskBasedQty, affordableQty,
+                    String.format("%.2f", entry), String.format("%.0f", capitalAmt));
         }
 
         // Compute actual monetary risk for logging
         double actualRisk = qty * riskPerShare;
 
-        // ── PositionSizerService still called for compatibility ───────────────
-        // Provides pos.actualRisk() for signal event. We override qty with our
-        // price-based calculation but keep the service call for pipeline consistency.
-        PositionSizerService.PositionSize pos =
-                positionSizer.calculate(cap, entryPrice, stopLoss, symbol,
-                        score.direction().name());
-        // Use our price-based qty — not pos.quantity() which uses fixed SL logic
-        // pos.actualRisk() used only for signal enrichment below
+        // INDEPENDENCE: removed the PositionSizerService.calculate() call —
+        // it was kept "for pipeline consistency" with the old shared event,
+        // but qty here was already overridden by our own price-based
+        // calculation above, and pos.actualRisk() was never actually used
+        // in the old event construction either (it used the local
+        // actualRisk variable). No longer needed.
 
         // Sector data for signal enrichment
         String sectorName  = score.sectorName();
@@ -401,58 +498,56 @@ public class NewsTradingStrategy {
             sectorChg = sectorStrength.getSector(sectorName).changePercent();
         } catch (Exception ignored) {}
 
-        // Score components for signal
-        int scoreCategory  = score.categoryScore();
-        int scoreSentiment = score.sentimentScore();
-        int scoreRecency   = score.recencyScore();
-        int scoreSource    = score.sourceScore();
-        int scoreKeyword   = score.keywordScore();
-        int totalScore     = score.totalScore();
-
         log.info("[NEWS] 🚀 SIGNAL: {} | dir={} | entry={} | sl={} ({}%) | T1={} | T2={} | " +
                         "score={} | category={} | sentiment={} | age={}min | headline: \"{}\"",
                 symbol, score.direction(), entryPrice, stopLoss,
                 String.format("%.1f", slPct * 100),
                 target1, target2,
-                totalScore, score.primaryCategory(), score.dominantSentiment(),
+                score.totalScore(), score.primaryCategory(), score.dominantSentiment(),
                 score.ageMinutes(), truncate(score.primaryHeadline(), 60));
 
-        // Build and publish the signal event (identical structure to all other strategies)
-        SmartChannelPullbackSignalEvent signal = new SmartChannelPullbackSignalEvent(
-                this,
-                symbol,
-                instrumentToken,
-                score.direction(),
-                entryPrice,
-                stopLoss,
-                target1,
-                target2,
-                qty,                                   // price-based dynamic qty
-                BigDecimal.valueOf(actualRisk).setScale(2, RoundingMode.HALF_UP),
-                STRATEGY_NAME,
-                totalScore,
-                sectorName,
-                sectorChg,
-                score.primaryCategory().name(),       // channelQuality → category
-                "NEWS_CATALYST",                      // signalType
-                (double) totalScore / 100.0,          // pressureRatio → normalized score
-                (double) score.recencyScore() / 20.0, // rvol → recency proxy
-                score.corroborated(),                  // strongTrend → corroborated flag
-                "MARKET",                              // entryMode
-                score.direction() == TradeDirection.LONG
-                        ? "NEWS_" + score.primaryCategory().name() + "_LONG"
-                        : "NEWS_" + score.primaryCategory().name() + "_SHORT",
-                0,                                     // candleCloseDelay
-                scoreCategory,
-                scoreSentiment,
-                scoreRecency,
-                scoreSource,
-                scoreKeyword,
-                totalScore,
-                TIME_STOP_MIN
-        );
+        // INDEPENDENCE: executes directly via newsTradeManagementEngine +
+        // liveOrderService instead of publishing SmartChannelPullbackSignalEvent
+        // into the shared platform pipeline (SmartChannelSignalHandler →
+        // TradeApprovedEvent → PaperTradeExecutionService) — that pipeline
+        // belongs to the other strategies being permanently removed.
+        boolean executed;
+        if (liveOrderService.isLiveMode()) {
+            String orderId = liveOrderService.placeEntryOrder(
+                    symbol, isBuy, qty, entry, STRATEGY_NAME);
+            if (orderId == null) {
+                log.warn("[NEWS] LIVE entry order not placed for {} (blocked or failed) — " +
+                        "no position opened.", symbol);
+                return false;
+            }
+            pendingEntryContext.put(orderId, new PendingNewsEntryContext(
+                    symbol, instrumentToken, score.direction(), stopLoss, target1, target2, qty));
+            log.info("[NEWS] LIVE entry order placed, awaiting fill: {} {} orderId={}",
+                    symbol, score.direction(), orderId);
+            executed = true;
+        } else {
+            Trade trade = Trade.builder()
+                    .tradeDate(LocalDate.now())
+                    .tradingSymbol(symbol)
+                    .instrumentToken(instrumentToken)
+                    .direction(score.direction())
+                    .status("OPEN")
+                    .entryTime(Instant.now())
+                    .entryPrice(entryPrice)
+                    .quantity(qty)
+                    .stopLoss(stopLoss)
+                    .target(target1)
+                    .strategyName(STRATEGY_NAME)
+                    .createdAt(Instant.now())
+                    .updatedAt(Instant.now())
+                    .build();
+            newsTradeManagementEngine.register(trade);
+            capitalLedger.debitMargin(symbol, STRATEGY_NAME,
+                    entryPrice.multiply(BigDecimal.valueOf(qty)));
+            executed = true;
+        }
 
-        publisher.publishEvent(signal);
+        if (!executed) return false;
 
         // Track state
         firedToday.add(symbol);
@@ -462,7 +557,7 @@ public class NewsTradingStrategy {
         // Record for dashboard
         recentEvents.add(0, new NewsEventSnapshot(
                 symbol, score.direction(), score.primaryCategory().name(),
-                score.dominantSentiment().name(), totalScore,
+                score.dominantSentiment().name(), score.totalScore(),
                 score.primaryHeadline(), score.ageMinutes(),
                 java.time.LocalTime.now(IST).toString()
         ));
@@ -560,9 +655,23 @@ public class NewsTradingStrategy {
     }
 
     private BigDecimal resolveCapital() {
-        return "PAPER".equalsIgnoreCase(tradingMode)
-                ? paperAccount.getCapital()
-                : configuredCapital;
+        // INDEPENDENCE: was paperAccount.getCapital() — the shared, cross-
+        // strategy capital pool other (soon-removed) strategies also draw
+        // from. Now reads from the AI/News-only independent ledger.
+        //
+        // FIX (found while adding UI-editable per-strategy capital): this
+        // previously used the ledger ONLY in PAPER mode, falling back to
+        // the static configuredCapital field in LIVE mode — meaning a
+        // capital change made via the dashboard UI would have had ZERO
+        // effect once LIVE mode was active, and LIVE position sizing would
+        // never have reflected margin already committed to open positions
+        // or today's realised P&L. Now uses the ledger in both modes,
+        // matching how AiRiskAssessmentEngine already worked.
+        try {
+            return capitalLedger.getAvailableCapital(STRATEGY_NAME);
+        } catch (Exception e) {
+            return configuredCapital;
+        }
     }
 
     /**

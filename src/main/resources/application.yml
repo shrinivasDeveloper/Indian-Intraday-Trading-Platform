@@ -66,38 +66,39 @@ zerodha:
 # ================================
 # TRADING CORE
 # ================================
+# NOTE: trading.capital is now only a FALLBACK — real per-strategy capital
+# (AI vs News, independently) is set via the dashboard UI / POST
+# /api/dashboard/capital, and persists day to day automatically once set.
+# Set conservatively here: if either strategy is ever touched before
+# you've set its real value via UI, the fallback applies PER STRATEGY
+# independently, so keep this at or below (your total budget / 2) to
+# avoid both strategies defaulting to more than your account holds.
+#
+# trading.risk-per-trade, max-position-pct, trade-window-start/end,
+# exit-on-market-turn, exit-on-sector-turn — REMOVED from this file.
+# None of these are read by AI or News: both use hardcoded 1% risk
+# constants, their own internal trade-window logic, and (for News)
+# market/sector-turn exits were explicitly removed by request — these
+# keys only ever applied to PaperTradeManagementService and the other
+# strategies being deleted (SCPS/HighRR/ORB/SMC/etc).
 trading:
-  mode: ${TRADING_MODE:PAPER}
-  capital: ${TRADING_CAPITAL:100000}
-  risk-per-trade: 0.01
-  # max-position-pct = 1.0 means full capital (₹1,00,000) per trade.
-  # PositionSizerService formula: qty = floor(capital × max_position_pct / entry)
-  # 0.20 → ₹20,000 per trade (old — too small)
-  # 1.00 → ₹1,00,000 per trade (new — full capital allocation per trade)
-  # Risk is still controlled by SL distance — 1% SL on ₹1L = ₹1,000 max loss.
-  max-position-pct: 1.0
-  trade-window-start: "09:30"
-  trade-window-end: "14:40"
-  entry-mode: ${ENTRY_MODE:AGGRESSIVE}
-  strong-trend-risk: 0.01
-  moderate-trend-risk: 0.005
+  mode: ${TRADING_MODE:LIVE}
+  capital: ${TRADING_CAPITAL:5000}
   skip-trail-on-momentum: true
-  exit-on-market-turn: true
-  exit-on-sector-turn: true
-  max-phase1-concurrent: 3
 
 # ================================
 # PAPER TRADING
 # ================================
 paper-trading:
-  initial-capital: ${PAPER_CAPITAL:${TRADING_CAPITAL:100000}}
+  initial-capital: ${PAPER_CAPITAL:${TRADING_CAPITAL:5000}}
   sl-slip-pct: 0.001
   target-slip-pct: 0.0005
   eod-slip-pct: 0.0015
   brokerage: 40.0
 
 # ================================
-# RISK CONTROL
+# RISK CONTROL — still read by CircuitBreakerService, which AI/News
+# both depend on for the daily/weekly/monthly drawdown permission check.
 # ================================
 circuit-breaker:
   max-trades-per-day: 10
@@ -110,7 +111,8 @@ circuit-breaker:
   min-giveback-pct: 0.5
 
 # ================================
-# MARKET FILTERS
+# MARKET FILTERS — vix.* read by VixService (used by AI/News for regime
+# context); market.*/sector.*/scanner.* kept as-is, unchanged from before.
 # ================================
 scanner:
   min-volume: 250000
@@ -123,7 +125,7 @@ scanner:
   entry-mode: ${ENTRY_MODE:AGGRESSIVE}
 
 market:
-  atr-min-pct: 0.2  # FIXED: was 0.3 — blocked Apr-22(0.29%) and Apr-23(0.23%). Lowered to 0.20.
+  atr-min-pct: 0.2
   atr-max-pct: 3.0
   trend-candles: 8
   doji-body-pct: 0.10
@@ -138,226 +140,53 @@ sector:
   min-relative-strength: 0.8
 
 # ================================
-# STRATEGIES (MERGED CLEANLY)
+# STRATEGIES
+#
+# CLEANUP: removed the config blocks for smart-channel-pullback,
+# sideways-scalp, high-rr, market-pressure, orb, best-trade, smc, and the
+# shared strategy.global/strategy.rvol blocks. Confirmed: none of these
+# keys are read by anything in the AI or News module — they were only
+# ever consumed by PaperTradeManagementService and the strategy classes
+# now being permanently deleted (HighRR/SCPS/Sideways/MarketPressure/
+# ORB-engine/BestTrade/SMC). Only strategy.news remains, since News stays.
+#
+# IMPORTANT: strategy.high-rr.enabled and strategy.smc.enabled previously
+# defaulted to TRUE in this file — meaning HighRR and SMC would have been
+# ACTIVE in LIVE mode tomorrow even though every other strategy was
+# correctly disabled. That was the most urgent fix in this revision.
 # ================================
 strategy:
   enabled: true
 
-  global:
-    gravity-exhaustion-pct: 1.5
-    poc-proximity-pct: 1.0
-    rvol-time-slot-enabled: true
-    min-rvol-trend: 1.3
-    min-rvol-reversal: 1.2
-    min-rvol-impulse: 1.5
-    breakeven-r-trigger: 1.5
-    partial-exit-r: 3.0
-    trailing-mode: CANDLE_LOW
-    global-time-stop: 0  # FIX: was 30m — caused TIME_STOP_30MIN on all EOD strategies. Each strategy manages its own exit.
-    trend-trail-trigger-r: 2.0
-
-  rvol:
-    history-days: 5
-    slot-minutes: 5
-    min-rvol-for-impulse: 1.5
-    min-rvol-for-signal: 1.3
-    min-rvol-for-spring: 1.2
-
-  # ================================
-  # SMART CHANNEL PULLBACK
-  # ================================
-  smart-channel-pullback:
-    enabled: ${SCPS_ENABLED:false}  # DISABLED — only HighRR + News active
-    require-high-quality-channel: false
-    time-stop-minutes: 0  # FIXED: was 90. Now uses 3:00 PM EOD stop only.
-    # FIX: was 1.0 (average RVOL = no conviction). Internal floor is 1.1.
-    min-rvol: 1.0
-    max-signals-per-session: 2  # CHANGED: was 3. Hard limit: 2 trades/day per requirements.
-    # FIX: sector must be strictly positive for BUY, strictly negative for SELL
-    sector-buy-threshold: 0.0  # IMPROVED: was 0.05 — rejecting valid +0.03% sectors. Now: any positive = BUY valid
-    sector-sell-threshold: 0.0  # IMPROVED: was -0.05 — any negative = SELL valid
-    min-adjusted-rr: 2.0  # FIX: was 1.8 — now enforces minimum 1:2 RR on every SCPS trade
-    symbol-cooldown-minutes: 60
-    max-channel-width-pct: 5.0
-    t1-rr: 2.0
-    t2-rr: 3.0
-    # FIX: Pullback zone factor (FIX 1): 0.50 = lower 50% of channel accepted
-    # (was 0.30 — too narrow, caused 0 signals on momentum days)
-    pb-zone-factor: 0.30  # FIX: was 0.50 — entry in bottom 30% of channel only (tight SL → better RR)
-    # FIX: Minimum SL distance % (FIX 4)
-    min-sl-pct: 0.004
-    # FIX: Minimum stock price (FIX 2)
-    min-stock-price: 100
-
-  # ================================
-  # SIDEWAYS SCALP
-  # ================================
-  sideways-scalp:
-    enabled: ${SCALP_ENABLED:false}  # DISABLED — only HighRR + News active
-    min-rvol: 1.1
-    max-signals-per-session: 2  # CHANGED: was 5. Hard limit: 2 trades/day per requirements.
-    time-stop-minutes: 0  # FIXED: was 90. Now uses 3:00 PM EOD stop only.
-    # FIX: Strong pressure bypass ratio (see SidewaysScalpStrategy FIX 1)
-    # When market pressure ratio >= this value, strict hammer/shooting-star
-    # pattern is relaxed to any bullish/bearish candle direction.
-    strong-pressure-bypass-ratio: 1.50
-    # FIX: Minimum SL distance as % of entry price (FIX 3)
-    min-sl-pct: 0.0035
-    # FIX: Minimum stock price filter (FIX 2)
-    min-stock-price: 100
-
-  # ================================
-  # HIGH RR INTRADAY STRATEGY
-  # FIX: was incorrectly nested under sideways-scalp due to bad indentation.
-  # Must be a sibling block at the same level as smart-channel-pullback.
-  # ================================
-  high-rr:
-    enabled: ${HIGHRR_ENABLED:true}
-    time-stop-minutes: 0  # FIXED: was 90. Now uses 3:00 PM EOD stop in HighRRTradeManager.
-    risk-per-trade: 0.01
-
-  # ================================
-  # MARKET PRESSURE STRATEGY
-  # ================================
-  market-pressure:
-    enabled: ${PRESSURE_ENABLED:false}  # DISABLED — MARKET_PRESSURE_V1 removed. Set PRESSURE_ENABLED=true to re-enable.
-    time-stop-minutes: 30
-    # IMPROVED: Reduced from 6 → 4 signals/session.
-    # 6 signals consumed all 10 daily slots, starving ORB and HighRR.
-    # Slot priority: ORB(2) + HighRR(2) + MarketPressure(4) + SCPS(2) = 10
-    max-signals-per-session: 4
-
-  # ================================
-  # ORB (OPENING RANGE BREAKOUT) STRATEGY
-  # Added: was previously missing, causing @Value defaults to be used silently.
-  # Explicitly declared here for visibility and easy tuning.
-  # ================================
-  orb:
-    enabled: ${ORB_ENABLED:false}  # DISABLED — only HighRR + News active
-    # Reward:risk multiplier for T1 target.
-    # T1 = entry ± (orbRange × target-rr)
-    # T2 = entry ± (orbRange × target-rr × 1.6)
-    target-rr: 2.5
-    # Auto-cancel breakout watch if no breakout by 11:30 AM.
-    time-stop-minutes: 0  # ORB uses 3:00 PM EOD stop via PaperTradeManagementService.
-
-    # ── High Wave Candle thresholds (spec §2) ──────────────────────────────────
-    # Body must be 20–25% of total candle range (indecision zone, not a doji, not a trend candle)
-    high-wave-body-min: 0.20
-    high-wave-body-max: 0.25
-    # Both wicks (upper and lower) must be ≥ 30% of total range
-    high-wave-wick-min: 0.30
-    # Maximum imbalance between upper and lower wicks (allows 5–10%)
-    high-wave-wick-imbalance-max: 0.10
-
-    # ── Wick Rejection Quality thresholds (spec §4) ────────────────────────────
-    # How far price pierced beyond the ORB level before rejecting:
-    # 0.0–0.3% = PERFECT (+20 score)
-    # 0.3–0.6% = ACCEPTABLE (+10 score)
-    # >0.6%    = WEAK → trade rejected (deep wick = breakout attempt, not rejection)
-    wick-perfect-max-pct: 0.003
-    wick-accept-max-pct:  0.006
-
-    # ── Sector alignment thresholds (spec §6 — STRICT) ────────────────────────
-    # BUY requires sector ≥ +0.4% change on the day
-    # SELL requires sector ≤ -0.4% change on the day
-    sector-buy-min-pct:  0.40
-    sector-sell-max-pct: -0.40
-
-    # Minimum traded volume at 9:15 for a stock to qualify for ORB tracking.
-    min-premarket-volume: 200000
-
-
-
-  # ================================
-  # BEST TRADE V1 — SMC 1-trade-per-day strategy
-  # 5 hard rules: HTF(4H) trend + MTF(1H) structure + FVG(15m) + ADX + liquidity sweep
-  # Scoring 0-9, min 4 to qualify. Picks single best setup per day.
-  # ================================
-  best-trade:
-    enabled: ${BEST_TRADE_ENABLED:false}  # DISABLED
-    # Minimum composite score (0-9) to qualify for trade execution
-    # 4 = two strong scoring factors (VWAP+FVG) or four minor factors
-    # 6 = high conviction setups only
-    min-score: 4
-    # Skip stocks below this price (avoids illiquid penny stocks)
-    min-stock-price: 100.0
-
-  # ================================
-  # NEWS CATALYST STRATEGY (NEW — independent module)
-  # Fetches real-time news from NewsAPI + BSE announcements + ET RSS
-  # Fires at most 2 signals/session — runs alongside all existing strategies.
-  # ================================
   news:
     enabled: ${NEWS_ENABLED:true}
-    # Minimum composite score (0-100) for a news item to trigger trade evaluation
-    # 65 = balanced (earnings beat, clear sentiment, < 30 min old)
-    # 80 = high conviction only (confirmed earnings/M&A, strongly positive/negative)
-    min-score: 50  # TUNED: was 65 — too high for non-results-season news. At 50: sector+positive+fresh+ET still scores 64 → passes
+    min-score: 75
     max-signals-per-session: 2
-    # GNews.io free API key — 100 requests/day, NO delay (unlike NewsAPI which delays 24h).
-    # Get yours free at https://gnews.io — email only, no credit card required.
-    # We use 72 requests/day (1 per 5 min × 6 hours), well within the 100/day limit.
-    # If blank, GNews is skipped. The other 7 free sources (BSE/NSE/5 RSS) still run.
     gnews-key: ${GNEWS_KEY:}
-    # NewsAPI has been REMOVED — its free tier has a 24-hour news delay (useless for intraday).
-    # Time-stop for news catalyst trades: 20 minutes (news impact fades fast)
     time-stop-minutes: 0   # No time-stop — exit only on SL or target
-
-  # ================================
-  # SMC INSTITUTIONAL V1
-  # Fires at most 2 signals/session via SmartChannelPullbackSignalEvent pipeline.
-  # Minimum 1:3 RR required. Bootstrap fetches daily + 15m + 5m candles on startup.
-  # ================================
-  smc:
-    enabled: ${SMC_ENABLED:true}
-    # Bootstrap: wait N seconds after startup before fetching candles from Zerodha.
-    # Allows InstrumentCacheService to finish loading instrument list first.
-    # Increase to 180s if instruments take longer to load in your environment.
-    bootstrap-delay-seconds: 120
-    # Minimum confidence score (0-100) required to fire a signal.
-    # Higher = fewer but higher quality signals.
-    # Recommended: 60-70 for paper trading, raise to 70-80 for live.
-    min-confidence: 60
-    # Minimum 1:N risk-reward ratio. Spec requires 1:3 minimum.
-    # Do not lower below 3.0.
-    min-rr: 3.0
-    # Risk per trade as fraction of capital (1% = 0.01).
-    risk-per-trade: 0.01
-    # Time-stop in minutes. Positions older than this are closed by PaperTradeManagementService.
-    time-stop-minutes: 0  # No time-stop — exit only on SL or T1/T2
-    # Max trades per session: no SMC-specific cap — uses platform circuit-breaker
-    # (circuit-breaker.max-trades-per-day: 10) which applies across all strategies.
-    # Last candle close time to evaluate (HH:mm). Signals after this are not fired.
-    # 14:40 = last 5m candle that can realistically be managed before 15:00 EOD close.
-    trade-end: "14:40"
 
 # ================================
 # AI TRADING MODULE
-# Completely separate module — zero impact on existing strategies when disabled.
-# Enable via Railway env var: AI_TRADING_ENABLED=true
-# When disabled: @ConditionalOnProperty ensures no AI beans are created at all.
+#
+# FIX (critical): was ${AI_TRADING_ENABLED:false} — every AI bean is
+# gated by @ConditionalOnProperty(ai.trading.enabled=true), so AI would
+# not have started at all tomorrow unless AI_TRADING_ENABLED was
+# explicitly set as an environment variable. Default changed to true
+# here so AI runs correctly even if that env var is never set —
+# explicitly setting AI_TRADING_ENABLED=false is now required to turn
+# AI off, the safer default direction given you're going live with AI
+# specifically tomorrow.
 # ================================
 ai:
   trading:
-    enabled: ${AI_TRADING_ENABLED:false}
-    # Maximum trades per day (independent of circuit-breaker.max-trades-per-day)
+    enabled: ${AI_TRADING_ENABLED:true}
     max-trades-per-day: 5
-    # Maximum simultaneously open AI positions
     max-concurrent: 2
-    # Minimum model confidence to execute (0.0–1.0). Raise to 0.70 for live.
     min-confidence: 0.60
-    # Minimum risk-reward ratio. Hard floor — never lower below 2.0.
     min-rr: 2.0
-    # How many top candidates to evaluate per cycle (balance: quality vs speed)
     ranking-top-n: 20
-    # Risk per trade as fraction of capital (1% = 0.01)
     risk-per-trade: 0.01
-    # Show AI candidates in /scanner.html
     scanner-enabled: true
-  btst:
-    enabled: true      # false = completely disabled (default)
-    risk-pct: 0.01     # 1% capital per BTST trade
 
 # ================================
 # WARMUP CONFIG
@@ -415,7 +244,6 @@ logging:
   level:
     root: INFO
     com.trading: DEBUG
-    com.trading.strategy.channel: DEBUG  # FIX: was TRACE — caused 500+ logs/sec on Railway
     com.zerodhatech: DEBUG
     org.springframework: WARN
     org.hibernate: WARN

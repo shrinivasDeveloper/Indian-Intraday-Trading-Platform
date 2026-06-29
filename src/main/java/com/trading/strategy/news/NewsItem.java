@@ -38,6 +38,8 @@ public record NewsItem(
 ) {
 
     private static final ZoneId   IST                      = ZoneId.of("Asia/Kolkata");
+    // No longer used as a hard cutoff (see isActionable() below) — kept for
+    // reference only in case the 60-minute gate needs to be restored later.
     private static final int      NORMAL_ACTIONABLE_MINUTES = 60;
     private static final int      MONDAY_WALL_CLOCK_MINUTES = 4320; // 72h covers Fri-Mon
     private static final LocalTime MARKET_OPEN             = LocalTime.of(9, 0);
@@ -105,7 +107,16 @@ public record NewsItem(
      * so these correctly appear "fresh" at 9:35 AM Monday.
      */
     public boolean isActionable() {
-        return ageMinutes() < NORMAL_ACTIONABLE_MINUTES;
+        // FIX: removed the 60-minute hard cutoff (NORMAL_ACTIONABLE_MINUTES).
+        // Previously, any news older than 60 minutes was excluded from scoring
+        // entirely, regardless of category/sentiment strength. Now all news
+        // remains eligible for scoring; the exponential recency decay in
+        // NewsScoreEngine.computeRecencyScore() still naturally reduces older
+        // news' score contribution toward zero — this is a soft de-prioritization,
+        // not a hard exclusion. minScore was raised to 75 (application.yml) to
+        // compensate, so only strong category+sentiment combinations can still
+        // cross the threshold once recency contributes little or nothing.
+        return true;
     }
 
     /**
@@ -120,6 +131,23 @@ public record NewsItem(
             return rawAgeMinutes() < MONDAY_WALL_CLOCK_MINUTES;
         }
         return isActionable();
+    }
+
+    /**
+     * NEW — dedicated check used ONLY by NewsIngestionService.purgeStaleItems()
+     * to decide whether to exempt a Monday weekend filing from the 2-hour
+     * memory purge. Deliberately does NOT fall back to isActionable() (which
+     * now always returns true after the 60-min cutoff removal) — that fallback
+     * would make purgeStaleItems() never purge anything, leaking memory all day.
+     * This method only ever returns true for the narrow, genuine weekend-filing
+     * case; everything else returns false so the 2-hour purge still applies.
+     */
+    public boolean isMondayWeekendException() {
+        if (!isMondayNow()) return false;
+        if (isOfficialSource() && isWeekendPublished()) {
+            return rawAgeMinutes() < MONDAY_WALL_CLOCK_MINUTES;
+        }
+        return false;
     }
 
     /** Raw wall-clock age in minutes from publishedAt. Used by NewsScoreEngine recency decay. */
