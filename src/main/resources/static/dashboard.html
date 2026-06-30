@@ -159,6 +159,7 @@
     <div class="tab" onclick="switchTab('sectors',this)">Sectors</div>
     <div class="tab" onclick="switchTab('news',this)">News 📰</div>
     <div class="tab" onclick="switchTab('ai',this)" id="tab-ai">AI Engine 🤖</div>
+    <div class="tab" onclick="switchTab('swing',this); swLoadTrades();" id="tab-swing">Swing 📈</div>
 </div>
 
 <!-- OVERVIEW -->
@@ -281,6 +282,58 @@
     <div id="ai-perf-grid"></div>
     <div id="ai-today"></div>
     <div id="ai-decisions"></div>
+</div>
+
+<!-- MANUAL SWING TRADING TAB -->
+<div id="tc-swing" class="tc">
+    <div class="g g2" style="margin-bottom:14px">
+        <div class="card">
+            <div class="ct">🔍 Place Manual Swing Buy (CNC only)</div>
+            <input type="text" id="sw-search-input" placeholder="Search symbol or company name…"
+                   style="width:100%;padding:7px;margin-bottom:6px;background:#0d1117;border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px"
+                   oninput="swSearchInstruments(this.value)">
+            <div id="sw-search-results" style="max-height:160px;overflow-y:auto;margin-bottom:8px"></div>
+            <div id="sw-selected" style="display:none;border-top:1px solid var(--border);padding-top:8px;margin-top:4px">
+                <div class="sub" style="margin-bottom:6px">Selected: <b id="sw-sel-symbol">—</b> @ ₹<span id="sw-sel-ltp">—</span></div>
+                <input type="number" id="sw-qty" placeholder="Quantity" style="width:100%;padding:6px;margin-bottom:6px;background:#0d1117;border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px">
+                <div style="display:flex;gap:6px;margin-bottom:6px;font-size:11px">
+                    <label style="flex:1;cursor:pointer"><input type="radio" name="sw-target-mode" value="pct" checked onchange="swToggleTargetMode()"> Target %</label>
+                    <label style="flex:1;cursor:pointer"><input type="radio" name="sw-target-mode" value="price" onchange="swToggleTargetMode()"> Target Price ₹</label>
+                </div>
+                <input type="number" id="sw-target-pct" placeholder="Target % (e.g. 8)" style="width:100%;padding:6px;margin-bottom:6px;background:#0d1117;border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px">
+                <input type="number" id="sw-target-price" placeholder="Target Price ₹" style="width:100%;padding:6px;margin-bottom:6px;background:#0d1117;border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px;display:none">
+                <button class="btn" style="width:100%;background:var(--green)" onclick="swPlaceBuy()">BUY (CNC)</button>
+                <div id="sw-buy-status" class="sub" style="margin-top:6px;min-height:14px"></div>
+            </div>
+        </div>
+        <div class="card">
+            <div class="ct">📊 Quick Summary</div>
+            <div class="ir"><span class="il">Active Trades</span><span class="iv" id="sw-active-count">—</span></div>
+            <div class="ir"><span class="il">Closed Today</span><span class="iv" id="sw-closed-today">—</span></div>
+            <div class="ir"><span class="il">Total Invested (Active)</span><span class="iv" id="sw-invested">—</span></div>
+            <div class="ir"><span class="il">Unrealized P&L</span><span class="iv" id="sw-unrealized">—</span></div>
+        </div>
+    </div>
+
+    <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+        <button class="btn sw-filter-btn active" onclick="swSetFilter('ALL', this)">All</button>
+        <button class="btn sw-filter-btn" onclick="swSetFilter('ACTIVE', this)">Active</button>
+        <button class="btn sw-filter-btn" onclick="swSetFilter('CLOSED', this)">Closed</button>
+        <button class="btn sw-filter-btn" onclick="swSetFilter('TODAY', this)">Today's Buys</button>
+        <button class="btn sw-filter-btn" onclick="swSetFilter('PROFIT', this)">Profit</button>
+        <button class="btn sw-filter-btn" onclick="swSetFilter('LOSS', this)">Loss</button>
+        <input type="text" id="sw-table-search" placeholder="Search symbol…" style="margin-left:auto;padding:5px 8px;background:#0d1117;border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px" oninput="swRenderTrades()">
+    </div>
+
+    <table style="width:100%;font-size:12px">
+        <thead><tr style="color:var(--muted);text-align:left">
+            <th>Symbol</th><th>Company</th><th>Buy ₹</th><th>Current ₹</th><th>Target ₹</th>
+            <th>Qty</th><th>Invested</th><th>P&L</th><th>Buy Date</th>
+            <th>Status</th><th>Sell Status</th>
+        </tr></thead>
+        <tbody id="sw-trades-body"></tbody>
+    </table>
+    <div id="sw-trades-empty" class="sub" style="display:none;padding:20px;text-align:center">No trades found</div>
 </div>
 
 <script>
@@ -709,8 +762,8 @@
             </div>
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px">
-            <div style="padding:4px 10px;border-radius:12px;font-size:10px;font-weight:700;background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)">TRENDING: Score ≥ 70 + direction match</div>
-            <div style="padding:4px 10px;border-radius:12px;font-size:10px;font-weight:700;background:rgba(88,166,255,.15);color:var(--blue);border:1px solid rgba(88,166,255,.3)">RANGING: Score ≥ 80 (both directions)</div>
+            <div style="padding:4px 10px;border-radius:12px;font-size:10px;font-weight:700;background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)">TRENDING: Score ≥ ${ai.trendingThreshold||70} + direction match</div>
+            <div style="padding:4px 10px;border-radius:12px;font-size:10px;font-weight:700;background:rgba(88,166,255,.15);color:var(--blue);border:1px solid rgba(88,166,255,.3)">RANGING: Score ≥ ${ai.rangingThreshold||80} (both directions)</div>
             <div style="padding:4px 10px;border-radius:12px;font-size:10px;font-weight:700;background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)">CHOPPY: Watchlist only — no execution</div>
           </div>
           ${watchlist.length ? `
@@ -722,7 +775,15 @@
             <div style="display:flex;flex-wrap:wrap;gap:6px">
               ${watchlist.map(item=>{
                 const sym    = typeof item==='object'?(item.symbol||item):item;
-                const pat    = typeof item==='object'?(item.pattern||'Pattern'):'Pattern';
+                const patRaw = typeof item==='object'?(item.pattern||'Pattern'):'Pattern';
+                // NOTE: backend should never produce pattern="NONE" together
+                // with this stock being in the watchlist at all (the
+                // watchlist gate requires at least one confirmed pattern) —
+                // if this shows up, it indicates a stale entry (the
+                // watchlist map only clears once daily, never mid-cycle) or
+                // a genuine backend inconsistency worth investigating, not
+                // a frontend display issue. Shown as-is, not hidden.
+                const pat    = patRaw;
                 const reason = typeof item==='object'?(item.skipReason||'ELIGIBLE'):'ELIGIBLE';
                 const score  = typeof item==='object'?(item.score||0):0;
                 const thr    = typeof item==='object'?(item.threshold||70):70;
@@ -732,24 +793,37 @@
                     reason==='ELIGIBLE'  ? 'rgba(63,185,80,.5)'  :   // green — ready to trade
                     reason==='NO_CANDLE' ? 'rgba(88,166,255,.4)' :   // blue — waiting for candle
                     reason==='SCORE_LOW' ? 'rgba(240,192,64,.4)' :   // gold — score too low
+                    reason==='RECENTLY_TRADED' ? 'rgba(240,192,64,.4)' :   // gold — recency penalty
                     reason==='DIRECTION' ? 'rgba(255,100,100,.4)':   // red — counter-trend
                     reason==='CHOPPY'    ? 'rgba(120,120,120,.4)':   // grey — choppy market
+                    reason==='TOO_EXTENDED' ? 'rgba(255,100,100,.4)':  // red — extended >1.5%
                     'rgba(88,166,255,.35)';
 
                 const reasonLabel =
                     reason==='ELIGIBLE'  ? '⚡ Eligible'           :
                     reason==='NO_CANDLE' ? '⏳ No candle'          :
                     reason==='SCORE_LOW' ? `${score}/${thr}`        :
+                    reason==='RECENTLY_TRADED' ? `${score}/${thr} (recent)` :
                     reason==='DIRECTION' ? '↔ Direction'            :
                     reason==='CHOPPY'    ? '〜 Choppy'              :
-                    '—';
+                    reason==='TOO_EXTENDED' ? '⚠ Extended'          :
+                    reason; // FIX: was a bare '—' for any unhandled reason,
+                            // silently hiding the actual skip reason (this is
+                            // exactly what produced the "-" for
+                            // RECENTLY_TRADED, a real backend value this
+                            // chain never checked for). Now shows the raw
+                            // reason text rather than hiding it, so any
+                            // FUTURE new backend reason is still visible
+                            // instead of silently becoming a blank dash again.
 
                 const reasonColor =
                     reason==='ELIGIBLE'  ? 'var(--green)'   :
                     reason==='NO_CANDLE' ? 'var(--blue)'    :
                     reason==='SCORE_LOW' ? 'var(--gold)'    :
+                    reason==='RECENTLY_TRADED' ? 'var(--gold)' :
                     reason==='DIRECTION' ? 'var(--red)'     :
                     reason==='CHOPPY'    ? 'var(--muted)'   :
+                    reason==='TOO_EXTENDED' ? 'var(--red)'  :
                     'var(--muted)';
 
                 const pc2 =
@@ -905,7 +979,160 @@
         html('ai-decisions', dHtml);
     }
 
-    window.addEventListener('DOMContentLoaded', () => { load(); setInterval(load, 3000); });
+    // ═══════════════════════════════════════════════════════════════════
+    // MANUAL SWING TRADING — completely isolated module. Own API base
+    // path (/api/swing, not /api/dashboard), own state variables, own
+    // refresh cycle. Touches nothing above this point.
+    // ═══════════════════════════════════════════════════════════════════
+    const SWING_API = '/api/swing';
+    let swSelectedSymbol = null, swSelectedExchange = null, swSelectedLtp = null;
+    let swCurrentFilter = 'ALL';
+    let swTradesCache = [];
+    let swSearchDebounce = null;
+
+    function swSearchInstruments(query) {
+        clearTimeout(swSearchDebounce);
+        if (!query || query.trim().length < 2) { html('sw-search-results', ''); return; }
+        swSearchDebounce = setTimeout(async () => {
+            try {
+                const res = await fetch(SWING_API + '/instruments/search?q=' + encodeURIComponent(query));
+                const list = await res.json();
+                if (!list.length) { html('sw-search-results', '<div class="sub" style="padding:6px">No matches</div>'); return; }
+                html('sw-search-results', list.map(i => `
+                    <div onclick='swSelectInstrument(${JSON.stringify(i.symbol)}, ${JSON.stringify(i.exchange)}, ${i.ltp || 0})'
+                         style="padding:6px 8px;cursor:pointer;border-bottom:1px solid var(--border);font-size:12px"
+                         onmouseover="this.style.background='#21262d'" onmouseout="this.style.background='transparent'">
+                        <b>${i.symbol}</b> <span class="sub">${i.companyName||''}</span>
+                        <span style="float:right">${i.exchange} ${i.ltp?('₹'+parseFloat(i.ltp).toFixed(2)):''} ${i.changePct!=null?`<span style="color:${i.changePct>=0?'var(--green)':'var(--red)'}">(${i.changePct>=0?'+':''}${parseFloat(i.changePct).toFixed(2)}%)</span>`:''}</span>
+                    </div>`).join(''));
+            } catch (e) { console.error('[SWING] search failed', e); }
+        }, 300);
+    }
+
+    function swSelectInstrument(symbol, exchange, ltp) {
+        swSelectedSymbol = symbol; swSelectedExchange = exchange; swSelectedLtp = ltp;
+        set('sw-sel-symbol', symbol + ' (' + exchange + ')');
+        set('sw-sel-ltp', ltp ? ltp.toFixed(2) : '—');
+        q('sw-selected').style.display = 'block';
+        html('sw-search-results', '');
+        q('sw-search-input').value = '';
+        set('sw-buy-status', '');
+    }
+
+    function swToggleTargetMode() {
+        const mode = document.querySelector('input[name="sw-target-mode"]:checked').value;
+        q('sw-target-pct').style.display = mode === 'pct' ? 'block' : 'none';
+        q('sw-target-price').style.display = mode === 'price' ? 'block' : 'none';
+    }
+
+    async function swPlaceBuy() {
+        const qty = parseInt(q('sw-qty').value);
+        const mode = document.querySelector('input[name="sw-target-mode"]:checked').value;
+        const targetPct = mode === 'pct' ? parseFloat(q('sw-target-pct').value) : null;
+        const targetPrice = mode === 'price' ? parseFloat(q('sw-target-price').value) : null;
+        const status = q('sw-buy-status');
+
+        if (!swSelectedSymbol) { status.textContent = 'Select a stock first'; status.style.color = 'var(--red)'; return; }
+        if (!qty || qty <= 0) { status.textContent = 'Enter a valid quantity'; status.style.color = 'var(--red)'; return; }
+        if (mode === 'pct' && (!targetPct || targetPct <= 0)) { status.textContent = 'Enter a valid target %'; status.style.color = 'var(--red)'; return; }
+        if (mode === 'price' && (!targetPrice || targetPrice <= 0)) { status.textContent = 'Enter a valid target price'; status.style.color = 'var(--red)'; return; }
+
+        status.textContent = 'Placing CNC buy order…'; status.style.color = 'var(--muted)';
+        try {
+            const res = await fetch(SWING_API + '/buy', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    symbol: swSelectedSymbol, exchange: swSelectedExchange,
+                    quantity: qty, targetPct: targetPct, targetPrice: targetPrice
+                })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                status.textContent = `✅ Bought ${data.quantity} ${data.symbol} @ ₹${parseFloat(data.buyPrice).toFixed(2)}`;
+                status.style.color = 'var(--green)';
+                q('sw-qty').value = ''; q('sw-target-pct').value = ''; q('sw-target-price').value = '';
+                swLoadTrades();
+            } else {
+                status.textContent = '❌ ' + (data.error || 'Buy failed');
+                status.style.color = 'var(--red)';
+            }
+        } catch (e) {
+            status.textContent = '❌ ' + e.message;
+            status.style.color = 'var(--red)';
+        }
+    }
+
+    function swSetFilter(filter, btnEl) {
+        swCurrentFilter = filter;
+        document.querySelectorAll('.sw-filter-btn').forEach(b => b.classList.remove('active'));
+        btnEl.classList.add('active');
+        swLoadTrades();
+    }
+
+    async function swLoadTrades() {
+        try {
+            const res = await fetch(SWING_API + '/trades?filter=' + swCurrentFilter);
+            swTradesCache = await res.json();
+            swRenderTrades();
+            swRenderSummary();
+        } catch (e) { console.error('[SWING] loadTrades failed', e); }
+    }
+
+    function swRenderSummary() {
+        const active = swTradesCache.filter(t => t.tradeStatus === 'ACTIVE');
+        const closedToday = swTradesCache.filter(t => t.tradeStatus === 'CLOSED' &&
+                t.buyDate === new Date().toISOString().slice(0,10));
+        const invested = active.reduce((s,t) => s + (parseFloat(t.investedAmount)||0), 0);
+        const unrealized = active.reduce((s,t) => s + (parseFloat(t.pnl)||0), 0);
+
+        set('sw-active-count', active.length);
+        set('sw-closed-today', closedToday.length);
+        set('sw-invested', '₹' + invested.toLocaleString(undefined,{maximumFractionDigits:0}));
+        const ue = q('sw-unrealized');
+        if (ue) { ue.textContent = (unrealized>=0?'+':'') + '₹' + unrealized.toFixed(0);
+                  ue.style.color = unrealized>=0 ? 'var(--green)' : 'var(--red)'; }
+    }
+
+    function swRenderTrades() {
+        const searchTerm = (q('sw-table-search')?.value || '').toUpperCase();
+        const filtered = swTradesCache.filter(t => !searchTerm || t.symbol.includes(searchTerm));
+
+        if (!filtered.length) {
+            q('sw-trades-empty').style.display = 'block';
+            html('sw-trades-body', '');
+            return;
+        }
+        q('sw-trades-empty').style.display = 'none';
+
+        html('sw-trades-body', filtered.map(t => {
+            const pnl = parseFloat(t.pnl);
+            const pnlColor = isNaN(pnl) ? 'var(--muted)' : (pnl >= 0 ? 'var(--green)' : 'var(--red)');
+            const pnlText = isNaN(pnl) ? '—' : ((pnl>=0?'+':'') + '₹' + pnl.toFixed(0) +
+                    (t.pnlPct!=null ? ` (${t.pnlPct>=0?'+':''}${parseFloat(t.pnlPct).toFixed(1)}%)` : ''));
+            const statusColor = t.tradeStatus === 'ACTIVE' ? 'var(--blue)' : 'var(--muted)';
+            return `<tr style="border-bottom:1px solid var(--border)">
+                <td><b>${t.symbol}</b></td>
+                <td class="sub">${t.companyName||'—'}</td>
+                <td>₹${parseFloat(t.buyPrice).toFixed(2)}</td>
+                <td>₹${t.currentPrice ? parseFloat(t.currentPrice).toFixed(2) : '—'}</td>
+                <td>₹${parseFloat(t.targetPrice).toFixed(2)}</td>
+                <td>${t.quantity}</td>
+                <td>₹${parseFloat(t.investedAmount).toFixed(0)}</td>
+                <td style="color:${pnlColor};font-weight:600">${pnlText}</td>
+                <td>${t.buyDate}</td>
+                <td><span class="pill" style="color:${statusColor}">${t.tradeStatus}</span></td>
+                <td class="sub">${t.sellStatus}${t.exitReason ? ' ('+t.exitReason+')' : ''}</td>
+            </tr>`;
+        }).join(''));
+    }
+
+    // Own independent refresh cycle — 10s, swing-trade granularity, not
+    // tied to the main dashboard's 3s poll at all.
+    window.addEventListener('DOMContentLoaded', () => {
+        load(); setInterval(load, 3000);
+        swLoadTrades(); setInterval(swLoadTrades, 10000);
+    });
 </script>
 </body>
 </html>

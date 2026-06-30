@@ -68,6 +68,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Slf4j
 public class AiTradingSystem {
 
+    // ── Execution score thresholds — single source of truth, used both
+    // for the actual gate AND the dashboard status export below, so the
+    // two can never silently drift apart again (the exact bug found via
+    // real dashboard data: the dashboard's legend text was a separate
+    // hardcoded "70"/"80" string that went stale after this constant was
+    // last raised, while individual watchlist items — which read the
+    // live threshold value passed through per-candidate — correctly
+    // showed 85, creating a confusing mismatch on screen).
+    private static final int TRENDING_EXECUTION_THRESHOLD = 75;
+    private static final int RANGING_EXECUTION_THRESHOLD  = 85;
+
     // ── The 9 engines — all owned by AI module ────────────────────────────
     private final AiMarketUnderstandingEngine   marketEngine;
     private final AiOpportunityDiscoveryEngine  discoveryEngine;
@@ -385,7 +396,8 @@ public class AiTradingSystem {
         // RANGING  → 85+ score executes (raised from 80 — stricter, since
         //            ranging moves are inherently less reliable)
         // CHOPPY   → NO execution, watchlist monitoring only
-        int executionThreshold = trending ? 75 : ranging ? 85 : 999; // 999 = never executes
+        int executionThreshold = trending ? TRENDING_EXECUTION_THRESHOLD
+                : ranging ? RANGING_EXECUTION_THRESHOLD : 999; // 999 = never executes
 
         log.debug("[AI-SYSTEM] Regime={} threshold={}", currentRegime, executionThreshold);
 
@@ -1018,6 +1030,30 @@ public class AiTradingSystem {
     public Map<String, Object> getStatus() {
         Map<String, Object> status = new LinkedHashMap<>();
         status.put("regime",         currentRegime);
+        // FIX, found via real dashboard data: TRENDING/RANGING badge text
+        // was hardcoded as static strings "70"/"80" in dashboard.html,
+        // left stale after this session's threshold raise to 75/85. Each
+        // individual watchlist item already showed the REAL live
+        // threshold (85) correctly, since that flows dynamically from
+        // here — but the legend banner above it showed the old, wrong
+        // numbers, creating a confusing mismatch (e.g. "RANGING: Score
+        // ≥ 80" next to a watchlist item showing "83/85"). Exposing the
+        // real constants here so the dashboard can render them dynamically
+        // instead of hardcoding numbers that silently go stale on the
+        // next threshold change.
+        status.put("trendingThreshold", TRENDING_EXECUTION_THRESHOLD);
+        status.put("rangingThreshold",  RANGING_EXECUTION_THRESHOLD);
+        // FIX: dashboard reads ai.thresholdLabel for the small label under
+        // the regime card, but this was never actually populated by the
+        // backend — always silently fell back to a bare "—". Now shows
+        // the real, currently-applicable threshold for whatever regime is
+        // actually active right now.
+        String activeThresholdLabel = "TRENDING".equals(currentRegime)
+                ? "Score ≥ " + TRENDING_EXECUTION_THRESHOLD + " required"
+                : "RANGING".equals(currentRegime)
+                ? "Score ≥ " + RANGING_EXECUTION_THRESHOLD + " required"
+                : "No execution — choppy regime";
+        status.put("thresholdLabel", activeThresholdLabel);
         status.put("phase",          probabilityEngine.getPhaseLabel());
         status.put("tradesToday",    tradesToday.get());
         status.put("watchlistCount", watchlist.size());
