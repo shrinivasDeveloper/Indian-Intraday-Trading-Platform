@@ -30,24 +30,24 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * NewsTradingStrategy (NEWS_CATALYST_V1) — independent news-driven strategy.
+ * NewsTradingStrategy (NEWS_CATALYST_V1) - independent news-driven strategy.
  *
- * ─────────────────────────────────────────────────────────────────────────────
+ * -----------------------------------------------------------------------------
  * DESIGN PRINCIPLES:
- *   1. Completely independent — zero modifications to, and zero dependency
+ *   1. Completely independent - zero modifications to, and zero dependency
  *      on, any other strategy's classes or shared execution pipeline.
  *   2. INDEPENDENCE (this session's rework): no longer routes through
- *      SmartChannelPullbackSignalEvent → SmartChannelSignalHandler →
- *      TradeApprovedEvent → PaperTradeExecutionService — that pipeline
+ *      SmartChannelPullbackSignalEvent -> SmartChannelSignalHandler ->
+ *      TradeApprovedEvent -> PaperTradeExecutionService - that pipeline
  *      belongs to the other strategies being permanently removed. Executes
  *      directly via NewsTradeManagementEngine (News's own complete position
  *      manager, replicating the exact same SL/breakeven/ATR-trail/partial-
  *      exit model previously provided by the shared PaperTradeManagementService)
  *      and AiLiveOrderExecutionService/AiNewsCapitalLedger (shared with AI,
- *      both already strategy-agnostic — strategyName="NEWS_CATALYST_V1"
+ *      both already strategy-agnostic - strategyName="NEWS_CATALYST_V1"
  *      throughout).
  *   3. Symbol dedup is now self-contained (firedToday/activeSignals +
- *      newsTradeManagementEngine's own open-position tracking) — no longer
+ *      newsTradeManagementEngine's own open-position tracking) - no longer
  *      depends on the shared RiskManagementService's cross-strategy check.
  *   4. Max 2 signals per session.
  *
@@ -61,17 +61,17 @@ import java.util.concurrent.CopyOnWriteArrayList;
  *      confirms the fill.
  *
  * SL / TARGET METHODOLOGY:
- *   News catalyst trades are SHORT-DURATION — the price move happens fast
+ *   News catalyst trades are SHORT-DURATION - the price move happens fast
  *   after news breaks. Strategy uses:
  *     Entry:  current LTP (market order simulation)
  *     SL:     price-tiered % by entry price (see computeSlPct below)
  *     T1:     1:2 RR minimum
  *     T2:     1:3 RR
- *   Time stop: DISABLED — exit on SL or T1/T2 target only
+ *   Time stop: DISABLED - exit on SL or T1/T2 target only
  *
  * SLOT BUDGET:
  *   NEWS_CATALYST_V1 gets max 2 slots per session.
- * ─────────────────────────────────────────────────────────────────────────────
+ * -----------------------------------------------------------------------------
  */
 @Service
 @Slf4j
@@ -81,14 +81,14 @@ public class NewsTradingStrategy {
     private static final ZoneId   IST           = ZoneId.of("Asia/Kolkata");
     private static final String   STRATEGY_NAME = "NEWS_CATALYST_V1";
 
-    // ── Time gates ─────────────────────────────────────────────────────────────
+    // -- Time gates -------------------------------------------------------------
     private static final LocalTime TRADE_START  = LocalTime.of(9, 35);
-    // FIXED: was 14:00 — extended to 14:30 to capture afternoon RBI/policy announcements
+    // FIXED: was 14:00 - extended to 14:30 to capture afternoon RBI/policy announcements
     private static final LocalTime TRADE_END    = LocalTime.of(14, 30);
     private static final LocalTime LUNCH_START  = LocalTime.of(11, 0);
     private static final LocalTime LUNCH_END    = LocalTime.of(12, 30);
 
-    // ── Trade sizing for news catalyst ────────────────────────────────────────
+    // -- Trade sizing for news catalyst ----------------------------------------
     /** Minimum ATR for market to be tradeable */
     private static final double MIN_ATR_PCT  = 0.20;
     /** T2 as multiple of T1 risk (3R total) */
@@ -96,23 +96,23 @@ public class NewsTradingStrategy {
     /** Maximum capital risk per trade = 1% of capital */
     private static final double MAX_RISK_PCT  = 0.01;
 
-    // ── Price-based SL table (replaces fixed SL_PCT_EARNINGS / SL_PCT_DEFAULT) ──
+    // -- Price-based SL table (replaces fixed SL_PCT_EARNINGS / SL_PCT_DEFAULT) --
     // SL is determined by stock price range, not news category.
     // Position size is dynamically calculated so total monetary risk = 1% capital.
     //
     // Price range     SL%    T1 (2R)   T2 (3R)
-    // ₹100–₹130       2.0%   4.0%      6.0%
-    // ₹131–₹170       1.7%   3.4%      5.1%
-    // ₹171–₹200       1.3%   2.6%      3.9%
-    // ₹201–₹400       1.0%   2.0%      3.0%
-    // ₹401–₹700       0.7%   1.4%      2.1%
-    // ₹701–₹1,200     0.6%   1.2%      1.8%
-    // ₹1,201+         0.5%   1.0%      1.5%
+    // Rs.100-Rs.130       2.0%   4.0%      6.0%
+    // Rs.131-Rs.170       1.7%   3.4%      5.1%
+    // Rs.171-Rs.200       1.3%   2.6%      3.9%
+    // Rs.201-Rs.400       1.0%   2.0%      3.0%
+    // Rs.401-Rs.700       0.7%   1.4%      2.1%
+    // Rs.701-Rs.1,200     0.6%   1.2%      1.8%
+    // Rs.1,201+         0.5%   1.0%      1.5%
     //
-    // Trailing SL activates AFTER T1 hit (not before) — protects profit,
+    // Trailing SL activates AFTER T1 hit (not before) - protects profit,
     // does not interfere with the initial 1:2 RR trade.
 
-    // ── Dependencies ──────────────────────────────────────────────────────────
+    // -- Dependencies ----------------------------------------------------------
     private final NewsIngestionService      ingestionService;
     private final NewsScoreEngine           scoreEngine;
     private final InstrumentCacheService    instrumentCache;
@@ -121,26 +121,26 @@ public class NewsTradingStrategy {
     private final MarketTimingService      timingService;
     private final SectorClassificationService sectorClassify;
     private final SectorStrengthService    sectorStrength;
-    // Live tick price source — OrbDataService.livePrices is updated on every tick
+    // Live tick price source - OrbDataService.livePrices is updated on every tick
     // for all 295 subscribed symbols. This is the correct source for entry price.
-    // Zero overhead — pure ConcurrentHashMap read.
+    // Zero overhead - pure ConcurrentHashMap read.
     private final OrbDataService           orbDataService;
-    // Shared MySQL write — AI module reads news_scored_items for reasoning.
+    // Shared MySQL write - AI module reads news_scored_items for reasoning.
     // Zero coupling: this is a database write only, no AI class imported.
     private final JdbcTemplate             jdbc;
 
     // INDEPENDENCE: replaces publisher.publishEvent(SmartChannelPullbackSignalEvent)
-    // → SmartChannelSignalHandler → TradeApprovedEvent → PaperTradeExecutionService,
-    // and riskManagement.isSymbolAlreadyActive(), and paperAccount.getCapital() —
+    // -> SmartChannelSignalHandler -> TradeApprovedEvent -> PaperTradeExecutionService,
+    // and riskManagement.isSymbolAlreadyActive(), and paperAccount.getCapital() -
     // all of which belonged to the shared pipeline serving the other strategies
     // being permanently removed. NewsTradeManagementEngine, AiLiveOrderExecutionService,
     // and AiNewsCapitalLedger are reused as-is from AI's already-built, already-
-    // validated independent pipeline — strategyName="NEWS_CATALYST_V1" throughout.
+    // validated independent pipeline - strategyName="NEWS_CATALYST_V1" throughout.
     private final NewsTradeManagementEngine newsTradeManagementEngine;
     private final com.trading.ai.execution.AiLiveOrderExecutionService liveOrderService;
     private final com.trading.ai.execution.AiNewsCapitalLedger         capitalLedger;
 
-    // ── Config ────────────────────────────────────────────────────────────────
+    // -- Config ----------------------------------------------------------------
     @Value("${strategy.news.enabled:true}")
     private boolean engineEnabled;
 
@@ -156,21 +156,21 @@ public class NewsTradingStrategy {
     @Value("${trading.capital:100000}")
     private BigDecimal configuredCapital;
 
-    // ── Per-session state ──────────────────────────────────────────────────────
+    // -- Per-session state ------------------------------------------------------
     private final AtomicInteger     sessionSignalCount = new AtomicInteger(0);  // FIX: volatile int++ is not atomic
     private final Set<String>       firedToday         = ConcurrentHashMap.newKeySet();
     private final Set<String>       activeSignals      = ConcurrentHashMap.newKeySet();
-    // Pure observability — mirrors AiTradingSystem's blockReasons fix.
+    // Pure observability - mirrors AiTradingSystem's blockReasons fix.
     // Records WHY a scored, eligible candidate didn't actually fire
     // (session cap, regime/direction mismatch, lost top-N ranking to a
-    // higher scorer, duplicate lock, capital, or order failure) — never
+    // higher scorer, duplicate lock, capital, or order failure) - never
     // influences any actual trading decision, read-only for dashboard.
     private final Map<String, String> blockReasons = new ConcurrentHashMap<>();
     private volatile boolean sessionCapReachedThisCycle = false;
 
     /**
      * Holds signal data needed to register a position once a LIVE entry
-     * order's fill is confirmed — mirrors AiTradingSystem's identical pattern.
+     * order's fill is confirmed - mirrors AiTradingSystem's identical pattern.
      */
     private record PendingNewsEntryContext(
             String symbol, long instrumentToken, TradeDirection direction,
@@ -188,7 +188,7 @@ public class NewsTradingStrategy {
 
     /**
      * Fired once the broker confirms a LIVE entry order is COMPLETE. Registers
-     * the position using the ACTUAL average fill price/quantity — slippage
+     * the position using the ACTUAL average fill price/quantity - slippage
      * between signal and fill is real and must be reflected correctly.
      */
     private void onLiveEntryFilled(String symbol, com.trading.ai.execution.AiLiveOrderExecutionService.FillResult fill) {
@@ -198,7 +198,7 @@ public class NewsTradingStrategy {
             if (e.getValue().symbol().equals(symbol)) { ctx = e.getValue(); matchedOrderId = e.getKey(); break; }
         }
         if (ctx == null) {
-            log.error("[NEWS] onLiveEntryFilled: no pending context found for {} — cannot " +
+            log.error("[NEWS] onLiveEntryFilled: no pending context found for {} - cannot " +
                     "register position. orderId={}", symbol, fill.orderId());
             return;
         }
@@ -224,33 +224,33 @@ public class NewsTradingStrategy {
         capitalLedger.debitMargin(symbol, STRATEGY_NAME,
                 actualEntry.multiply(BigDecimal.valueOf(fill.filledQty())));
 
-        log.info("[NEWS] ✅ LIVE entry CONFIRMED: {} {} qty={} actualEntry={}",
+        log.info("[NEWS] [OK] LIVE entry CONFIRMED: {} {} qty={} actualEntry={}",
                 symbol, ctx.direction(), fill.filledQty(), actualEntry);
     }
 
     /**
      * Fired when a LIVE entry order is REJECTED or CANCELLED. Cleans up
      * pendingEntryContext and the symbol locks (firedToday/activeSignals)
-     * so the symbol can be reconsidered on a future cycle — no position
+     * so the symbol can be reconsidered on a future cycle - no position
      * was ever opened, so there is nothing else to undo.
      */
     private void onLiveEntryRejected(String symbol, String statusMessage) {
         pendingEntryContext.entrySet().removeIf(e -> e.getValue().symbol().equals(symbol));
         firedToday.remove(symbol);
         activeSignals.remove(symbol);
-        log.warn("[NEWS] LIVE entry order rejected/cancelled for {} — reason: {}. " +
+        log.warn("[NEWS] LIVE entry order rejected/cancelled for {} - reason: {}. " +
                         "No position was opened; symbol may be reconsidered on a future cycle.",
                 symbol, statusMessage);
     }
 
     /** Snapshot of recent news events for dashboard display */
     private final List<NewsEventSnapshot> recentEvents = new CopyOnWriteArrayList<>();
-    /** All scores from the last evaluation cycle — for dashboard scored-items table. */
+    /** All scores from the last evaluation cycle - for dashboard scored-items table. */
     private volatile List<NewsScore> lastCycleScores = Collections.emptyList();
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // MAIN EXECUTION CYCLE — every 3 minutes
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
+    // MAIN EXECUTION CYCLE - every 3 minutes
+    // ==========================================================================
 
     @Scheduled(fixedRate = 180_000)
     public void runCycle() {
@@ -259,7 +259,7 @@ public class NewsTradingStrategy {
         LocalTime now = LocalTime.now(IST);
         if (now.isBefore(TRADE_START) || now.isAfter(TRADE_END)) return;
 
-        // ── Gate 1: Frozen market (ATR < 0.20%) ───────────────────────────────
+        // -- Gate 1: Frozen market (ATR < 0.20%) -------------------------------
         // EXCEPTION: EARNINGS and M&A news bypass this gate entirely.
         // A company announcing +80% profit moves 5-8% regardless of Nifty ATR.
         // The ATR gate protects against trading macro/sector news in a dead market,
@@ -268,34 +268,34 @@ public class NewsTradingStrategy {
         MarketDirectionService.MarketDirectionResult dir = marketDirection.getCurrentDirection();
         final boolean marketFrozen = dir.niftyAtrPct() < MIN_ATR_PCT;
         // NOTE: marketFrozen is applied PER-SIGNAL in the scoring loop below,
-        // not as a blanket early return — so company events can still pass.
+        // not as a blanket early return - so company events can still pass.
 
-        // ── Gate 2: Lunch window — NOT applied to news strategy ─────────────
+        // -- Gate 2: Lunch window - NOT applied to news strategy -------------
         // News events (RBI policy, earnings, M&A) happen at any time including lunch.
         // Blocking 11:00-12:30 would miss RBI policy announcements (typically 10-12 AM)
         // and corporate results declared during market hours.
         // Lunch spread-risk affects technical channel strategies (SCPS/Sideways), not news.
 
-        // Skip LATE window (14:00–14:40)
+        // Skip LATE window (14:00-14:40)
         MarketTimingService.TimeWindow window = timingService.getCurrentWindow();
         if (window == MarketTimingService.TimeWindow.LATE ||
                 window == MarketTimingService.TimeWindow.OBSERVATION) return;
 
-        // ── Gate 3: SIDEWAYS market — relaxed for high-conviction news ─────────
+        // -- Gate 3: SIDEWAYS market - relaxed for high-conviction news ---------
         // Company-specific events (EARNINGS, M&A) move the stock independently of Nifty.
         // A merger announcement or 50% profit beat trades regardless of Nifty direction.
-        // MACRO news (RBI, GDP, global events) remains gated on SIDEWAYS — those ARE market events.
-        // CHANGE: was 80 → now 72 (more news opportunities in SIDEWAYS markets)
+        // MACRO news (RBI, GDP, global events) remains gated on SIDEWAYS - those ARE market events.
+        // CHANGE: was 80 -> now 72 (more news opportunities in SIDEWAYS markets)
         final int SIDEWAYS_BYPASS_SCORE = 72;
         boolean isSideways = dir.direction() == MarketDirectionService.Direction.SIDEWAYS;
-        // For now, continue scoring — SIDEWAYS check applied per-signal in fireSignal()
-        // based on category and score. Do not block here — let scoring decide.
+        // For now, continue scoring - SIDEWAYS check applied per-signal in fireSignal()
+        // based on category and score. Do not block here - let scoring decide.
 
-        // ── Session cap ────────────────────────────────────────────────────────
+        // -- Session cap --------------------------------------------------------
         if (sessionSignalCount.get() >= maxSignalsPerSession) {
             log.debug("[NEWS] Session cap reached {}/{}", sessionSignalCount.get(), maxSignalsPerSession);
             // Pure observability: this blocks the ENTIRE cycle before any
-            // scoring happens — no specific symbol to attach a reason to
+            // scoring happens - no specific symbol to attach a reason to
             // yet, so this is exposed as its own top-level status flag
             // instead (see getStatus()/sessionCapReached below).
             sessionCapReachedThisCycle = true;
@@ -303,17 +303,17 @@ public class NewsTradingStrategy {
         }
         sessionCapReachedThisCycle = false;
 
-        // ── Circuit breaker ────────────────────────────────────────────────────
+        // -- Circuit breaker ----------------------------------------------------
         BigDecimal cap = resolveCapital();
         if (!circuitBreaker.checkPermission(cap).isAllowed()) {
             log.debug("[NEWS] Circuit breaker blocked");
             return;
         }
 
-        // ── Score all active news ──────────────────────────────────────────────
+        // -- Score all active news ----------------------------------------------
         List<NewsItem> activeItems = ingestionService.getActiveItems();
         if (activeItems.isEmpty()) {
-            log.debug("[NEWS] No active news items — cycle idle");
+            log.debug("[NEWS] No active news items - cycle idle");
             return;
         }
 
@@ -321,18 +321,18 @@ public class NewsTradingStrategy {
         List<NewsScore> scores = scoreEngine.scoreAll(activeItems, tradableSymbols, minScore);
         // For dashboard: score ALL symbols with no direction filter and no threshold.
         // scoreAllForDashboard() keeps direction-unclear items (shown as SKIPPED)
-        // and below-threshold items (shown as BELOW 65) — full visibility in News tab.
+        // and below-threshold items (shown as BELOW 65) - full visibility in News tab.
         // Trading still uses the filtered 'scores' list above (minScore=65, direction required).
         lastCycleScores = scoreEngine.scoreAllForDashboard(activeItems, tradableSymbols);
 
-        // ── Write scored items to shared MySQL table for AI reasoning engine ───
-        // AiReasoningEngine reads news_scored_items via JdbcTemplate — zero Java coupling.
+        // -- Write scored items to shared MySQL table for AI reasoning engine ---
+        // AiReasoningEngine reads news_scored_items via JdbcTemplate - zero Java coupling.
         // This write happens regardless of whether scores pass the trading threshold.
         // AI module uses this data as Layer 3 (fundamental catalyst) in its reasoning.
         writeNewsScoresToSharedTable(lastCycleScores);
 
         if (scores.isEmpty()) {
-            log.debug("[NEWS] No news scores above threshold {} — cycle idle", minScore);
+            log.debug("[NEWS] No news scores above threshold {} - cycle idle", minScore);
             return;
         }
 
@@ -340,12 +340,12 @@ public class NewsTradingStrategy {
                 now, dir.niftyAtrPct(), dir.direction(),
                 scores.size(), scores.get(0).symbol());
 
-        // ── Gate 4: Regime match — smart bypass for company-specific events ────
+        // -- Gate 4: Regime match - smart bypass for company-specific events ----
         // RULE: Company events (EARNINGS, M&A) bypass regime alignment AND ATR gate.
-        //       The individual stock moves on its own news — Nifty ATR is irrelevant.
+        //       The individual stock moves on its own news - Nifty ATR is irrelevant.
         // RULE: Macro events (RBI, GDP, GLOBAL) respect regime alignment + ATR gate.
-        // RULE: SIDEWAYS market + score >= SIDEWAYS_BYPASS_SCORE → allow company-specific news.
-        // CHANGE: was 75 → now 65 (EARNINGS/M&A at score 65+ bypass ATR+regime gate)
+        // RULE: SIDEWAYS market + score >= SIDEWAYS_BYPASS_SCORE -> allow company-specific news.
+        // CHANGE: was 75 -> now 65 (EARNINGS/M&A at score 65+ bypass ATR+regime gate)
         final int ATR_BYPASS_MIN_SCORE = 65;
         List<NewsScore> aligned = scores.stream()
                 .filter(s -> {
@@ -354,22 +354,22 @@ public class NewsTradingStrategy {
 
                     // Company events bypass BOTH regime check AND ATR gate
                     if (isCompanyEvent && s.totalScore() >= ATR_BYPASS_MIN_SCORE) {
-                        log.info("[NEWS] {} bypassing ATR+regime gate — company event ({}) score={}",
+                        log.info("[NEWS] {} bypassing ATR+regime gate - company event ({}) score={}",
                                 s.symbol(), s.primaryCategory(), s.totalScore());
                         blockReasons.remove(s.symbol());
                         return true;
                     }
-                    // Company event but score < 65 — still bypass regime, but needs normal ATR
+                    // Company event but score < 65 - still bypass regime, but needs normal ATR
                     if (isCompanyEvent) {
                         if (marketFrozen) {
-                            log.debug("[NEWS] {} company event blocked — ATR frozen and score {} < {}",
+                            log.debug("[NEWS] {} company event blocked - ATR frozen and score {} < {}",
                                     s.symbol(), s.totalScore(), ATR_BYPASS_MIN_SCORE);
                             blockReasons.put(s.symbol(), String.format(
                                     "Scored %d, but company-event ATR gate is frozen (needs >= %d to bypass)",
                                     s.totalScore(), ATR_BYPASS_MIN_SCORE));
                             return false;
                         }
-                        log.debug("[NEWS] {} bypassing regime gate — company event ({})",
+                        log.debug("[NEWS] {} bypassing regime gate - company event ({})",
                                 s.symbol(), s.primaryCategory());
                         blockReasons.remove(s.symbol());
                         return true;
@@ -382,12 +382,12 @@ public class NewsTradingStrategy {
                     }
                     // SIDEWAYS bypass: only for very high conviction non-company news
                     if (isSideways && s.totalScore() >= SIDEWAYS_BYPASS_SCORE) {
-                        log.info("[NEWS] {} bypassing SIDEWAYS gate — score={} >= {}",
+                        log.info("[NEWS] {} bypassing SIDEWAYS gate - score={} >= {}",
                                 s.symbol(), s.totalScore(), SIDEWAYS_BYPASS_SCORE);
                         blockReasons.remove(s.symbol());
                         return true;
                     }
-                    // SIDEWAYS with normal score → block macro/sector news
+                    // SIDEWAYS with normal score -> block macro/sector news
                     if (isSideways) {
                         blockReasons.put(s.symbol(), String.format(
                                 "Scored %d, but market is SIDEWAYS and this needs >= %d to bypass " +
@@ -395,11 +395,11 @@ public class NewsTradingStrategy {
                                 s.totalScore(), SIDEWAYS_BYPASS_SCORE));
                         return false;
                     }
-                    // Bullish/Bearish: REMOVED per explicit instruction —
+                    // Bullish/Bearish: REMOVED per explicit instruction -
                     // this was rejecting a stock-specific news catalyst
                     // purely because NIFTY's broad index direction (tide/
                     // wave/ripple EMA20/50/200 alignment, computed by
-                    // MarketDirectionService — confirmed NOT specific to
+                    // MarketDirectionService - confirmed NOT specific to
                     // this symbol or even to News) happened to disagree.
                     // A sufficiently-scored, independently-verified
                     // company-specific signal should fire on its own
@@ -413,12 +413,12 @@ public class NewsTradingStrategy {
                 .toList();
 
         if (aligned.isEmpty()) {
-            log.debug("[NEWS] Gate 4 BLOCKED — No regime-aligned signals (regime={} sideways={})",
+            log.debug("[NEWS] Gate 4 BLOCKED - No regime-aligned signals (regime={} sideways={})",
                     dir.direction(), isSideways);
             return;
         }
 
-        // ── Fire top-N signals ─────────────────────────────────────────────────
+        // -- Fire top-N signals -------------------------------------------------
         int slotsLeft = maxSignalsPerSession - sessionSignalCount.get();
         int toFire    = Math.min(slotsLeft, aligned.size());
 
@@ -435,14 +435,14 @@ public class NewsTradingStrategy {
         for (int i = 0; i < toFire; i++) {
             NewsScore candidate = aligned.get(i);
             if (!fireSignal(candidate, cap, dir)) {
-                log.debug("[NEWS] Signal not fired for {} — gate check failed", candidate.symbol());
+                log.debug("[NEWS] Signal not fired for {} - gate check failed", candidate.symbol());
             }
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
     // SIGNAL FIRING
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
     private boolean fireSignal(NewsScore score, BigDecimal cap,
                                MarketDirectionService.MarketDirectionResult dir) {
@@ -450,13 +450,13 @@ public class NewsTradingStrategy {
 
         // Skip if already traded today or currently active
         if (firedToday.contains(symbol) || activeSignals.contains(symbol)) {
-            log.debug("[NEWS] {} already fired/active today — skip", symbol);
-            blockReasons.put(symbol, "Already fired or is currently an active position today — " +
+            log.debug("[NEWS] {} already fired/active today - skip", symbol);
+            blockReasons.put(symbol, "Already fired or is currently an active position today - " +
                     "duplicate-prevention lock");
             return false;
         }
 
-        // INDEPENDENCE: removed riskManagement.isSymbolAlreadyActive(symbol) —
+        // INDEPENDENCE: removed riskManagement.isSymbolAlreadyActive(symbol) -
         // that checks against OTHER strategies' positions via shared
         // RiskManagementService, which belongs to the strategies being
         // permanently removed. News now only needs to check its OWN open
@@ -466,28 +466,35 @@ public class NewsTradingStrategy {
         // Resolve instrument token
         Instrument inst = instrumentCache.getEquityInstruments().get(symbol.toUpperCase());
         if (inst == null) {
-            log.debug("[NEWS] {} not in instrument cache — skip", symbol);
+            log.debug("[NEWS] {} not in instrument cache - skip", symbol);
+            blockReasons.put(symbol, "Scored above threshold but symbol not found in " +
+                    "instrument cache (delisted, suspended, or not an EQ series instrument)");
             return false;
         }
         long instrumentToken = inst.getInstrument_token();
 
         // Estimate current price from instrument or use last known
-        // In paper mode we use a reasonable estimate — PaperTradeExecutionService
+        // In paper mode we use a reasonable estimate - PaperTradeExecutionService
         // will apply actual slippage on fill. We derive entry from the last tick
         // price cached in InstrumentCacheService if available, else skip.
         BigDecimal entryPrice = resolveCurrentPrice(symbol, inst);
         if (entryPrice == null || entryPrice.compareTo(BigDecimal.valueOf(100)) < 0) {
-            log.debug("[NEWS] {} price unavailable or below ₹100 — skip", symbol);
+            log.debug("[NEWS] {} price unavailable or below Rs.100 - skip", symbol);
+            blockReasons.put(symbol, entryPrice == null
+                    ? "Scored above threshold but live price unavailable (not in WebSocket feed)"
+                    : String.format("Scored above threshold but price Rs.%.2f is below " +
+                            "the Rs.100 minimum (too illiquid/low-priced for safe position sizing)",
+                    entryPrice.doubleValue()));
             return false;
         }
 
         boolean isBuy = score.direction() == TradeDirection.LONG;
 
-        // ── NEW: intraday extension hard-lock (>1.5%), added per explicit
-        // request — News previously had NO equivalent of AI's extension
+        // -- NEW: intraday extension hard-lock (>1.5%), added per explicit
+        // request - News previously had NO equivalent of AI's extension
         // gate at all (confirmed: zero matches for any such check before
         // this addition). Deliberately measured on a genuine INTRADAY
-        // basis — from TODAY's actual open price (OrbData.openPrice) —
+        // basis - from TODAY's actual open price (OrbData.openPrice) -
         // not from yesterday's close, since a close-to-now comparison
         // conflates any overnight gap with real intraday movement and
         // would unfairly penalize a stock that simply gapped up/down
@@ -495,7 +502,7 @@ public class NewsTradingStrategy {
         // correction explicitly requested.
         //
         // Fails OPEN, not closed: OrbDataService only tracks its own
-        // curated symbol subset, not every stock News can trade — when
+        // curated symbol subset, not every stock News can trade - when
         // today's open isn't available for this symbol, the check is
         // skipped entirely rather than guessing or wrongly blocking a
         // signal this gate was never able to genuinely evaluate.
@@ -504,17 +511,17 @@ public class NewsTradingStrategy {
             double intradayMovePct = Math.abs(entryPrice.doubleValue() - orbData.openPrice)
                     / orbData.openPrice;
             if (intradayMovePct > 0.015) {
-                log.debug("[NEWS] {} TOO_EXTENDED — already moved {}% intraday from today's " +
-                                "open {} (max 1.5%) — hard skip", symbol,
+                log.debug("[NEWS] {} TOO_EXTENDED - already moved {}% intraday from today's " +
+                                "open {} (max 1.5%) - hard skip", symbol,
                         String.format("%.2f", intradayMovePct * 100), orbData.openPrice);
                 blockReasons.put(symbol, String.format(
-                        "Already moved %.2f%% intraday from today's open ₹%.2f (max 1.5%%) — " +
+                        "Already moved %.2f%% intraday from today's open Rs.%.2f (max 1.5%%) - " +
                                 "extension hard-lock", intradayMovePct * 100, orbData.openPrice));
                 return false;
             }
         }
 
-        // ── Price-based SL: determined by stock price range ───────────────────
+        // -- Price-based SL: determined by stock price range -------------------
         double entry      = entryPrice.doubleValue();
         double slPct      = computeSlPct(entry);
         double t1Pct      = slPct * 2.0;  // 1:2 RR minimum
@@ -536,11 +543,11 @@ public class NewsTradingStrategy {
                 : entryPrice.subtract(entryPrice.multiply(BigDecimal.valueOf(t2Pct)))
                 .setScale(2, RoundingMode.HALF_UP);
 
-        // ── Dynamic position sizing — capped at 1% capital monetary risk,
+        // -- Dynamic position sizing - capped at 1% capital monetary risk,
         // AND by available capital (FIX, critical, found before going live:
         // the risk-only formula can size a position whose total VALUE
-        // exceeds available capital — true even at the original ₹1L
-        // default, becomes the common case at smaller capital amounts) ────
+        // exceeds available capital - true even at the original Rs.1L
+        // default, becomes the common case at smaller capital amounts) ----
         double capitalAmt   = cap.doubleValue();
         double maxRiskMoney = capitalAmt * MAX_RISK_PCT;
         double riskPerShare = entry * slPct;
@@ -550,19 +557,19 @@ public class NewsTradingStrategy {
 
         if (qty <= 0) {
             log.debug("[NEWS] {} qty=0 (entry={} slPct={}% riskPerShare={} riskBasedQty={} " +
-                            "affordableQty={}) — skip",
+                            "affordableQty={}) - skip",
                     symbol,
                     String.format("%.2f", entry),
                     String.format("%.1f", slPct * 100),
                     String.format("%.2f", riskPerShare),
                     riskBasedQty, affordableQty);
             blockReasons.put(symbol, String.format(
-                    "Passed all gates, but computed quantity is 0 — capital ₹%.0f is " +
-                            "insufficient for even 1 share at entry ₹%.2f", capitalAmt, entry));
+                    "Passed all gates, but computed quantity is 0 - capital Rs.%.0f is " +
+                            "insufficient for even 1 share at entry Rs.%.2f", capitalAmt, entry));
             return false;
         }
         if (affordableQty < riskBasedQty) {
-            log.info("[NEWS] {} qty capped by capital: risk-based={} → affordable={} " +
+            log.info("[NEWS] {} qty capped by capital: risk-based={} -> affordable={} " +
                             "(entry={} capital={})",
                     symbol, riskBasedQty, affordableQty,
                     String.format("%.2f", entry), String.format("%.0f", capitalAmt));
@@ -571,7 +578,7 @@ public class NewsTradingStrategy {
         // Compute actual monetary risk for logging
         double actualRisk = qty * riskPerShare;
 
-        // INDEPENDENCE: removed the PositionSizerService.calculate() call —
+        // INDEPENDENCE: removed the PositionSizerService.calculate() call -
         // it was kept "for pipeline consistency" with the old shared event,
         // but qty here was already overridden by our own price-based
         // calculation above, and pos.actualRisk() was never actually used
@@ -585,7 +592,7 @@ public class NewsTradingStrategy {
             sectorChg = sectorStrength.getSector(sectorName).changePercent();
         } catch (Exception ignored) {}
 
-        log.info("[NEWS] 🚀 SIGNAL: {} | dir={} | entry={} | sl={} ({}%) | T1={} | T2={} | " +
+        log.info("[NEWS] [LAUNCH] SIGNAL: {} | dir={} | entry={} | sl={} ({}%) | T1={} | T2={} | " +
                         "score={} | category={} | sentiment={} | age={}min | headline: \"{}\"",
                 symbol, score.direction(), entryPrice, stopLoss,
                 String.format("%.1f", slPct * 100),
@@ -595,16 +602,18 @@ public class NewsTradingStrategy {
 
         // INDEPENDENCE: executes directly via newsTradeManagementEngine +
         // liveOrderService instead of publishing SmartChannelPullbackSignalEvent
-        // into the shared platform pipeline (SmartChannelSignalHandler →
-        // TradeApprovedEvent → PaperTradeExecutionService) — that pipeline
+        // into the shared platform pipeline (SmartChannelSignalHandler ->
+        // TradeApprovedEvent -> PaperTradeExecutionService) - that pipeline
         // belongs to the other strategies being permanently removed.
         boolean executed;
         if (liveOrderService.isLiveMode()) {
             String orderId = liveOrderService.placeEntryOrder(
                     symbol, isBuy, qty, entry, STRATEGY_NAME);
             if (orderId == null) {
-                log.warn("[NEWS] LIVE entry order not placed for {} (blocked or failed) — " +
+                log.warn("[NEWS] LIVE entry order not placed for {} (blocked or failed) - " +
                         "no position opened.", symbol);
+                blockReasons.put(symbol, "Passed all gates, live order placement returned " +
+                        "null (broker rejected, rate-limited, or network error - check logs)");
                 return false;
             }
             pendingEntryContext.put(orderId, new PendingNewsEntryContext(
@@ -641,7 +650,7 @@ public class NewsTradingStrategy {
         }
 
         // Track state
-        blockReasons.remove(symbol); // genuinely traded — clear any stale reason
+        blockReasons.remove(symbol); // genuinely traded - clear any stale reason
         firedToday.add(symbol);
         activeSignals.add(symbol);
         sessionSignalCount.incrementAndGet();
@@ -660,11 +669,11 @@ public class NewsTradingStrategy {
         return true;
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // SHARED MySQL WRITE — for AI Reasoning Engine (Layer 3 fundamental)
+    // ==========================================================================
+    // SHARED MySQL WRITE - for AI Reasoning Engine (Layer 3 fundamental)
     // Zero coupling: writes to database only. AiReasoningEngine reads via
     // JdbcTemplate independently. No AI class imported here.
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
     private void writeNewsScoresToSharedTable(List<NewsScore> scores) {
         if (scores == null || scores.isEmpty()) return;
@@ -697,35 +706,35 @@ public class NewsTradingStrategy {
             log.debug("[NEWS] Wrote {} scored items to news_scored_items for AI reasoning",
                     scores.size());
         } catch (Exception e) {
-            // Table may not exist yet on first deploy — silently skip
+            // Table may not exist yet on first deploy - silently skip
             // AiMarketUnderstandingEngine creates the table on startup
             log.trace("[NEWS] news_scored_items write skipped: {}", e.getMessage());
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
     // HELPERS
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
     // PRICE-BASED SL COMPUTATION
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
     /**
      * Returns stop-loss % based on stock price range.
      *
      * Price range     SL%
-     * ₹100–₹130       2.0%
-     * ₹131–₹170       1.7%
-     * ₹171–₹200       1.3%
-     * ₹201–₹400       1.0%
-     * ₹401–₹700       0.7%
-     * ₹701–₹1,200     0.6%
-     * ₹1,201+         0.5%
+     * Rs.100-Rs.130       2.0%
+     * Rs.131-Rs.170       1.7%
+     * Rs.171-Rs.200       1.3%
+     * Rs.201-Rs.400       1.0%
+     * Rs.401-Rs.700       0.7%
+     * Rs.701-Rs.1,200     0.6%
+     * Rs.1,201+         0.5%
      *
-     * T1 = SL × 2 (1:2 RR minimum always maintained)
-     * T2 = SL × 3 (1:3 RR)
-     * Position size = (capital × 1%) / (entry × SL%) — always caps monetary risk at 1%
+     * T1 = SL x 2 (1:2 RR minimum always maintained)
+     * T2 = SL x 3 (1:3 RR)
+     * Position size = (capital x 1%) / (entry x SL%) - always caps monetary risk at 1%
      */
     private double computeSlPct(double price) {
         if      (price <= 130)  return 0.020;
@@ -738,7 +747,7 @@ public class NewsTradingStrategy {
     }
 
     /**
-     * UNUSED as of this change — the direction-alignment gate that called
+     * UNUSED as of this change - the direction-alignment gate that called
      * this was removed per explicit instruction (see Gate 4 in the main
      * scan loop). Kept here, not deleted, purely so the prior logic
      * remains visible/restorable without re-deriving it from scratch.
@@ -753,13 +762,13 @@ public class NewsTradingStrategy {
     }
 
     private BigDecimal resolveCapital() {
-        // INDEPENDENCE: was paperAccount.getCapital() — the shared, cross-
+        // INDEPENDENCE: was paperAccount.getCapital() - the shared, cross-
         // strategy capital pool other (soon-removed) strategies also draw
         // from. Now reads from the AI/News-only independent ledger.
         //
         // FIX (found while adding UI-editable per-strategy capital): this
         // previously used the ledger ONLY in PAPER mode, falling back to
-        // the static configuredCapital field in LIVE mode — meaning a
+        // the static configuredCapital field in LIVE mode - meaning a
         // capital change made via the dashboard UI would have had ZERO
         // effect once LIVE mode was active, and LIVE position sizing would
         // never have reflected margin already committed to open positions
@@ -783,16 +792,16 @@ public class NewsTradingStrategy {
         // WHY inst.getLast_price() WAS WRONG:
         //   Zerodha's getInstruments() API returns an instrument file downloaded at
         //   app startup (~9:00 AM). The last_price field = yesterday's closing price.
-        //   At 9:48 AM on earnings day, HDFCBANK inst.last_price = ₹1,820 (yesterday's close)
-        //   but the live market price = ₹1,840 (already moved +1.1% on earnings).
-        //   Entry at ₹1,820, SL at ₹1,805, T1 at ₹1,849 — all anchored to stale price.
+        //   At 9:48 AM on earnings day, HDFCBANK inst.last_price = Rs.1,820 (yesterday's close)
+        //   but the live market price = Rs.1,840 (already moved +1.1% on earnings).
+        //   Entry at Rs.1,820, SL at Rs.1,805, T1 at Rs.1,849 - all anchored to stale price.
         //   PaperTradeExecutionService then adds 0.05% slippage on top of stale price.
         //   Result: the trade is simulated at a price that no longer exists in the market.
         //
         // FIX: OrbDataService.livePrices is a ConcurrentHashMap updated on EVERY tick
         //   for all 295 subscribed symbols via onTick(TickReceivedEvent).
-        //   At 9:48 AM, livePrices.get("HDFCBANK") = ₹1,840 — the actual current price.
-        //   Zero I/O, zero blocking — pure in-memory read.
+        //   At 9:48 AM, livePrices.get("HDFCBANK") = Rs.1,840 - the actual current price.
+        //   Zero I/O, zero blocking - pure in-memory read.
         //
         // FALLBACK: If livePrices has no entry (symbol not yet subscribed or before 9:15),
         //   fall back to inst.getLast_price(). This preserves existing behaviour
@@ -804,11 +813,11 @@ public class NewsTradingStrategy {
             return BigDecimal.valueOf(livePrice).setScale(2, RoundingMode.HALF_UP);
         }
 
-        // Priority 2: instrument file price (stale fallback — only if live unavailable)
+        // Priority 2: instrument file price (stale fallback - only if live unavailable)
         try {
             double instPrice = inst.getLast_price();
             if (instPrice > 0) {
-                log.debug("[NEWS] {} using stale instrument price ₹{} (live price unavailable)",
+                log.debug("[NEWS] {} using stale instrument price Rs.{} (live price unavailable)",
                         symbol, String.format("%.2f", instPrice));
                 return BigDecimal.valueOf(instPrice).setScale(2, RoundingMode.HALF_UP);
             }
@@ -817,21 +826,21 @@ public class NewsTradingStrategy {
     }
 
     private String truncate(String s, int len) {
-        return s == null ? "" : (s.length() > len ? s.substring(0, len) + "…" : s);
+        return s == null ? "" : (s.length() > len ? s.substring(0, len) + "..." : s);
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // SIGNAL LIFECYCLE — called back from SmartChannelSignalHandler
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
+    // SIGNAL LIFECYCLE - called back from SmartChannelSignalHandler
+    // ==========================================================================
 
     public void onSignalClosed(String symbol) {
         activeSignals.remove(symbol);
         log.debug("[NEWS] Signal lock released for {}", symbol);
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
     // DAILY RESET
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
@@ -839,16 +848,25 @@ public class NewsTradingStrategy {
         activeSignals.clear();
         sessionSignalCount.set(0);
         recentEvents.clear();
+        blockReasons.clear();
+        sessionCapReachedThisCycle = false;
+        // NOTE: newsTradeManagementEngine positions are NOT cleared here -
+        // the management engine has its own reconcileFromDatabase() on restart,
+        // and its EOD exit at 3:15 PM is the correct close mechanism. If EOD
+        // exit ever fails, the ghost position will still show in activeTrades
+        // but activeSignals.clear() above means the same symbol CAN fire again
+        // today (not blocked by the duplicate lock). The management engine's
+        // own position tracking handles the actual P&L correctly regardless.
         log.info("[NEWS] Daily reset complete");
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
     // DASHBOARD API (read-only)
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
     public int     getSessionSignalCount()    { return sessionSignalCount.get(); }
     public int     getMaxSignalsPerSession()  { return maxSignalsPerSession; }
-    /** Pure observability — see blockReasons field docstring. Read-only. */
+    /** Pure observability - see blockReasons field docstring. Read-only. */
     public Map<String, String> getBlockReasons() { return new java.util.LinkedHashMap<>(blockReasons); }
     public boolean isSessionCapReachedThisCycle() { return sessionCapReachedThisCycle; }
     public boolean isEnabled()               { return engineEnabled; }
@@ -860,11 +878,11 @@ public class NewsTradingStrategy {
     public Set<String> getFiredToday()       { return Collections.unmodifiableSet(firedToday); }
     public List<NewsScore> getLastCycleScores() { return lastCycleScores; }
 
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
     // DASHBOARD SNAPSHOT RECORD
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
-    /** Read-only snapshot of a fired news signal — for dashboard display only */
+    /** Read-only snapshot of a fired news signal - for dashboard display only */
     public record NewsEventSnapshot(
             String symbol,
             TradeDirection direction,

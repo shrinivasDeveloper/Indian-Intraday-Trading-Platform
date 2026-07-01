@@ -561,6 +561,18 @@ public class AiTradingSystem {
                     candidate, prediction, currentRegime);
             if (decision == null) {
                 log.debug("[AI-SYSTEM] {} risk assessment null - skip", candidate.getSymbol());
+                // FIX: this was a completely silent continue - no blockReasons entry,
+                // so "Eligible" stocks blocked here had zero explanation on the
+                // dashboard. Now records exactly why. riskEngine.assess() returns
+                // null when it cannot compute a valid SL/T1/T2 for this candidate
+                // (e.g. ATR too small, price action too compressed for a clean
+                // risk:reward setup, or the risk parameters fall outside the
+                // engine's configured bounds) - a legitimate, real gate, just
+                // previously invisible.
+                blockReasons.put(candidate.getSymbol(),
+                        "Pattern scored OK and cleared all gates, but risk engine could not " +
+                                "compute a valid SL/T1/T2 setup (ATR too compressed, risk:reward " +
+                                "outside bounds, or price action not clean enough for a safe entry)");
                 continue;
             }
 
@@ -1009,6 +1021,10 @@ public class AiTradingSystem {
         // surviving midnight and blocking the next trading session
         tradeManager.clearPositions();
         watchlist.clear();
+        blockReasons.clear(); // FIX: was not cleared, so stale "why didn't it
+        // trade" reasons from yesterday persisted into
+        // today's dashboard card - now cleared at midnight
+        // with everything else
         learningEngine.dailyReset();
         // Clear stale fired-trades rows so they're never reconciled into a
         // future day by mistake.
@@ -1100,9 +1116,9 @@ public class AiTradingSystem {
         // the real, currently-applicable threshold for whatever regime is
         // actually active right now.
         String activeThresholdLabel = "TRENDING".equals(currentRegime)
-                ? "Score >= " + TRENDING_EXECUTION_THRESHOLD + " required"
+                ? "Score >= " + TRENDING_EXECUTION_THRESHOLD + " + direction match"
                 : "RANGING".equals(currentRegime)
-                ? "Score >= " + RANGING_EXECUTION_THRESHOLD + " required"
+                ? "Score >= " + RANGING_EXECUTION_THRESHOLD + " (both directions)"
                 : "No execution - choppy regime";
         status.put("thresholdLabel", activeThresholdLabel);
         // Pure observability for the dashboard - see blockReasons field

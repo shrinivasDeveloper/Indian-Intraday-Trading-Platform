@@ -177,6 +177,39 @@ strategy:
 # AI off, the safer default direction given you're going live with AI
 # specifically tomorrow.
 # ================================
+# ================================
+# MANUAL SWING TRADING MODULE
+# Completely independent module — manual CNC swing trades initiated from
+# the UI. Zero shared config keys with AI/News; own dedicated namespace.
+# ================================
+manual-swing:
+  profit-target-pct: 5.0           # quick-exit threshold, see service docstring
+  force-exit-time: "09:20"         # unconditional exit time, day after purchase
+  market-open-time: "09:15"
+  market-close-time: "15:30"
+  monitoring-interval-ms: 60000    # scheduler tick — 1 min, swing-trade granularity
+  order-poll-interval-ms: 3000     # fill-confirmation poll, same cadence as rest of app
+  order-poll-max-attempts: 10
+
+  # ── Auto Stock Selection & Auto Buy (small-cap focused) — DISABLED by
+  # default. Per spec: scans full NSE+BSE universe, ranks sectors (Rule 1),
+  # qualifies them against daily/weekly/monthly/yearly thresholds (Rule 2),
+  # applies mandatory momentum (Rule 3) and promoter-holding (Rule 4)
+  # gates, scores survivors by fundamentals, buys the highest-confidence
+  # pick at 3pm with fixed capital — ONLY if no manual trade exists today.
+  auto-trade-enabled: false
+  auto-trade-check-time: "15:00"
+  auto-trade-capital: 10000
+  backfill-target-days: 252
+  backfill-delay-ms: 2000
+  top-sectors-to-evaluate: 4
+  sector-daily-min-pct: 5.0
+  sector-daily-max-pct: 6.0
+  sector-weekly-min-pct: 15.0
+  sector-monthly-over-weekly-margin-pct: 5.0
+  sector-yearly-min-pct: 60.0
+  min-promoter-holding-pct: 60.0
+
 ai:
   trading:
     enabled: ${AI_TRADING_ENABLED:true}
