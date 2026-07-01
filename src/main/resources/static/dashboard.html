@@ -272,6 +272,7 @@
     </div>
     <!-- All scored items — populated by renderNews() from nc.scoredItems -->
     <div id="news-scored-section"></div>
+    <div id="news-block-reasons"></div>
     <!-- Global macro news — always visible regardless of scored items -->
     <div id="news-global-section"></div>
 </div>
@@ -281,6 +282,7 @@
     <div id="ai-status-bar"></div>
     <div id="ai-perf-grid"></div>
     <div id="ai-today"></div>
+    <div id="ai-block-reasons"></div>
     <div id="ai-decisions"></div>
 </div>
 
@@ -699,6 +701,34 @@
                 }).join('')}
                </div>`}
         </div>`);
+
+        // ── "Why didn't it trade?" card — same pure-observability fix
+        // already applied to AI, mirrored here for News. Read-only
+        // display of nc.blockReasons / nc.sessionCapReached — never
+        // affects any trading logic.
+        if (nc.sessionCapReached) {
+            html('news-block-reasons', `
+              <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;margin:9px 0;border-left:3px solid var(--gold)">
+                <div style="font-size:12px;font-weight:700">🏁 Session cap reached (${signals}/${maxSig})</div>
+                <div style="font-size:10px;color:var(--muted);margin-top:3px">No new signals are being scored or fired this session — both slots are used. This resets next trading day.</div>
+              </div>`);
+        } else {
+            const newsBlockReasons = nc.blockReasons || {};
+            const newsReasonEntries = Object.entries(newsBlockReasons);
+            if (newsReasonEntries.length === 0) {
+                html('news-block-reasons', '');
+            } else {
+                html('news-block-reasons', `
+                  <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;margin:9px 0">
+                    <div style="font-size:12px;font-weight:700;margin-bottom:8px">🔍 Why didn't it trade? <span style="font-weight:400;color:var(--muted);font-size:10px">(scored above threshold, but blocked downstream)</span></div>
+                    ${newsReasonEntries.map(([sym, reason]) => `
+                      <div style="padding:7px 9px;margin-bottom:5px;background:rgba(240,192,64,.06);border-left:2px solid var(--gold);border-radius:4px">
+                        <div style="font-size:11px;font-weight:700;margin-bottom:2px">${sym}</div>
+                        <div style="font-size:10px;color:var(--muted)">${reason}</div>
+                      </div>`).join('')}
+                  </div>`);
+            }
+        }
     }
 
     // ── AI ENGINE TAB ─────────────────────────────────────────────────────────────
@@ -716,7 +746,7 @@
         // Disabled
         if (!ai.enabled) {
             html('ai-status-bar', `<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:20px;text-align:center;margin:9px"><div style="font-size:28px;margin-bottom:8px">🤖</div><div style="font-size:14px;font-weight:700;margin-bottom:6px">AI Module Disabled</div><div style="font-size:12px;color:var(--muted)">Set <code style="background:#1a1a2e;padding:2px 6px;border-radius:3px">AI_TRADING_ENABLED=true</code> in Railway</div></div>`);
-            html('ai-perf-grid',''); html('ai-today',''); html('ai-decisions','');
+            html('ai-perf-grid',''); html('ai-today',''); html('ai-decisions',''); html('ai-block-reasons','');
             return;
         }
 
@@ -977,6 +1007,27 @@
 
         dHtml += '</div>';
         html('ai-decisions', dHtml);
+
+        // ── "Why didn't it trade?" card — pure observability, added per
+        // direct user request after HINDUNILVR showed "⚡ Eligible" with
+        // no trade taken and no way to see why without server logs
+        // (not reliably retained on a free hosting tier). Read-only
+        // display of ai.blockReasons — never affects any trading logic.
+        const blockReasons = ai.blockReasons || {};
+        const reasonEntries = Object.entries(blockReasons);
+        if (reasonEntries.length === 0) {
+            html('ai-block-reasons', '');
+        } else {
+            html('ai-block-reasons', `
+              <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;margin:9px 0">
+                <div style="font-size:12px;font-weight:700;margin-bottom:8px">🔍 Why didn't it trade? <span style="font-weight:400;color:var(--muted);font-size:10px">(cleared the score threshold, but blocked downstream)</span></div>
+                ${reasonEntries.map(([sym, reason]) => `
+                  <div style="padding:7px 9px;margin-bottom:5px;background:rgba(240,192,64,.06);border-left:2px solid var(--gold);border-radius:4px">
+                    <div style="font-size:11px;font-weight:700;margin-bottom:2px">${sym}</div>
+                    <div style="font-size:10px;color:var(--muted)">${reason}</div>
+                  </div>`).join('')}
+              </div>`);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════

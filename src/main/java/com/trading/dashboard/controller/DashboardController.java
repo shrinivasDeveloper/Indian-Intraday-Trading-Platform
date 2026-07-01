@@ -453,6 +453,10 @@ public class DashboardController {
             out.put("activeNewsItems",     newsTradingStrategy.getActiveItemCount());
             out.put("totalIngested",       newsTradingStrategy.getTotalIngested());
             out.put("firedToday",          newsTradingStrategy.getFiredToday());
+            // Pure observability, mirrors the same fix already applied to
+            // AI — see NewsTradingStrategy.blockReasons docstring.
+            out.put("blockReasons",        newsTradingStrategy.getBlockReasons());
+            out.put("sessionCapReached",   newsTradingStrategy.isSessionCapReachedThisCycle());
 
             // Recent news events that triggered signals
             List<Map<String, Object>> events = new ArrayList<>();

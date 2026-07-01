@@ -160,6 +160,13 @@ public class NewsTradingStrategy {
     private final AtomicInteger     sessionSignalCount = new AtomicInteger(0);  // FIX: volatile int++ is not atomic
     private final Set<String>       firedToday         = ConcurrentHashMap.newKeySet();
     private final Set<String>       activeSignals      = ConcurrentHashMap.newKeySet();
+    // Pure observability — mirrors AiTradingSystem's blockReasons fix.
+    // Records WHY a scored, eligible candidate didn't actually fire
+    // (session cap, regime/direction mismatch, lost top-N ranking to a
+    // higher scorer, duplicate lock, capital, or order failure) — never
+    // influences any actual trading decision, read-only for dashboard.
+    private final Map<String, String> blockReasons = new ConcurrentHashMap<>();
+    private volatile boolean sessionCapReachedThisCycle = false;
 
     /**
      * Holds signal data needed to register a position once a LIVE entry
@@ -287,8 +294,14 @@ public class NewsTradingStrategy {
         // ── Session cap ────────────────────────────────────────────────────────
         if (sessionSignalCount.get() >= maxSignalsPerSession) {
             log.debug("[NEWS] Session cap reached {}/{}", sessionSignalCount.get(), maxSignalsPerSession);
+            // Pure observability: this blocks the ENTIRE cycle before any
+            // scoring happens — no specific symbol to attach a reason to
+            // yet, so this is exposed as its own top-level status flag
+            // instead (see getStatus()/sessionCapReached below).
+            sessionCapReachedThisCycle = true;
             return;
         }
+        sessionCapReachedThisCycle = false;
 
         // ── Circuit breaker ────────────────────────────────────────────────────
         BigDecimal cap = resolveCapital();
@@ -343,6 +356,7 @@ public class NewsTradingStrategy {
                     if (isCompanyEvent && s.totalScore() >= ATR_BYPASS_MIN_SCORE) {
                         log.info("[NEWS] {} bypassing ATR+regime gate — company event ({}) score={}",
                                 s.symbol(), s.primaryCategory(), s.totalScore());
+                        blockReasons.remove(s.symbol());
                         return true;
                     }
                     // Company event but score < 65 — still bypass regime, but needs normal ATR
@@ -350,24 +364,51 @@ public class NewsTradingStrategy {
                         if (marketFrozen) {
                             log.debug("[NEWS] {} company event blocked — ATR frozen and score {} < {}",
                                     s.symbol(), s.totalScore(), ATR_BYPASS_MIN_SCORE);
+                            blockReasons.put(s.symbol(), String.format(
+                                    "Scored %d, but company-event ATR gate is frozen (needs >= %d to bypass)",
+                                    s.totalScore(), ATR_BYPASS_MIN_SCORE));
                             return false;
                         }
                         log.debug("[NEWS] {} bypassing regime gate — company event ({})",
                                 s.symbol(), s.primaryCategory());
+                        blockReasons.remove(s.symbol());
                         return true;
                     }
                     // Non-company event: ATR gate applies
-                    if (marketFrozen) return false;
+                    if (marketFrozen) {
+                        blockReasons.put(s.symbol(), "Scored " + s.totalScore() +
+                                ", but ATR is frozen (market volatility gate) and this isn't an EARNINGS/M&A event");
+                        return false;
+                    }
                     // SIDEWAYS bypass: only for very high conviction non-company news
                     if (isSideways && s.totalScore() >= SIDEWAYS_BYPASS_SCORE) {
                         log.info("[NEWS] {} bypassing SIDEWAYS gate — score={} >= {}",
                                 s.symbol(), s.totalScore(), SIDEWAYS_BYPASS_SCORE);
+                        blockReasons.remove(s.symbol());
                         return true;
                     }
                     // SIDEWAYS with normal score → block macro/sector news
-                    if (isSideways) return false;
-                    // Bullish/Bearish: check direction alignment
-                    return isDirectionAligned(s.direction(), dir.direction());
+                    if (isSideways) {
+                        blockReasons.put(s.symbol(), String.format(
+                                "Scored %d, but market is SIDEWAYS and this needs >= %d to bypass " +
+                                        "(only EARNINGS/M&A events skip this check)",
+                                s.totalScore(), SIDEWAYS_BYPASS_SCORE));
+                        return false;
+                    }
+                    // Bullish/Bearish: REMOVED per explicit instruction —
+                    // this was rejecting a stock-specific news catalyst
+                    // purely because NIFTY's broad index direction (tide/
+                    // wave/ripple EMA20/50/200 alignment, computed by
+                    // MarketDirectionService — confirmed NOT specific to
+                    // this symbol or even to News) happened to disagree.
+                    // A sufficiently-scored, independently-verified
+                    // company-specific signal should fire on its own
+                    // merit, not be vetoed by the wider index's mood.
+                    // isDirectionAligned() is kept defined below (now
+                    // unused) rather than deleted, so this change is
+                    // visible/reversible without re-deriving the logic.
+                    blockReasons.remove(s.symbol());
+                    return true;
                 })
                 .toList();
 
@@ -380,6 +421,16 @@ public class NewsTradingStrategy {
         // ── Fire top-N signals ─────────────────────────────────────────────────
         int slotsLeft = maxSignalsPerSession - sessionSignalCount.get();
         int toFire    = Math.min(slotsLeft, aligned.size());
+
+        // Pure observability: anyone who passed Gate 4 but didn't make the
+        // cut purely due to limited slots / lower rank this cycle.
+        for (int i = toFire; i < aligned.size(); i++) {
+            NewsScore missed = aligned.get(i);
+            blockReasons.put(missed.symbol(), String.format(
+                    "Scored %d and passed all gates, but only %d slot(s) available this " +
+                            "cycle and %d higher/equal-ranked candidate(s) took them",
+                    missed.totalScore(), slotsLeft, toFire));
+        }
 
         for (int i = 0; i < toFire; i++) {
             NewsScore candidate = aligned.get(i);
@@ -400,6 +451,8 @@ public class NewsTradingStrategy {
         // Skip if already traded today or currently active
         if (firedToday.contains(symbol) || activeSignals.contains(symbol)) {
             log.debug("[NEWS] {} already fired/active today — skip", symbol);
+            blockReasons.put(symbol, "Already fired or is currently an active position today — " +
+                    "duplicate-prevention lock");
             return false;
         }
 
@@ -429,6 +482,37 @@ public class NewsTradingStrategy {
         }
 
         boolean isBuy = score.direction() == TradeDirection.LONG;
+
+        // ── NEW: intraday extension hard-lock (>1.5%), added per explicit
+        // request — News previously had NO equivalent of AI's extension
+        // gate at all (confirmed: zero matches for any such check before
+        // this addition). Deliberately measured on a genuine INTRADAY
+        // basis — from TODAY's actual open price (OrbData.openPrice) —
+        // not from yesterday's close, since a close-to-now comparison
+        // conflates any overnight gap with real intraday movement and
+        // would unfairly penalize a stock that simply gapped up/down
+        // cleanly at open with little intraday move since. This is the
+        // correction explicitly requested.
+        //
+        // Fails OPEN, not closed: OrbDataService only tracks its own
+        // curated symbol subset, not every stock News can trade — when
+        // today's open isn't available for this symbol, the check is
+        // skipped entirely rather than guessing or wrongly blocking a
+        // signal this gate was never able to genuinely evaluate.
+        OrbDataService.OrbData orbData = orbDataService.getOrbData(symbol);
+        if (orbData != null && orbData.openPrice > 0) {
+            double intradayMovePct = Math.abs(entryPrice.doubleValue() - orbData.openPrice)
+                    / orbData.openPrice;
+            if (intradayMovePct > 0.015) {
+                log.debug("[NEWS] {} TOO_EXTENDED — already moved {}% intraday from today's " +
+                                "open {} (max 1.5%) — hard skip", symbol,
+                        String.format("%.2f", intradayMovePct * 100), orbData.openPrice);
+                blockReasons.put(symbol, String.format(
+                        "Already moved %.2f%% intraday from today's open ₹%.2f (max 1.5%%) — " +
+                                "extension hard-lock", intradayMovePct * 100, orbData.openPrice));
+                return false;
+            }
+        }
 
         // ── Price-based SL: determined by stock price range ───────────────────
         double entry      = entryPrice.doubleValue();
@@ -472,6 +556,9 @@ public class NewsTradingStrategy {
                     String.format("%.1f", slPct * 100),
                     String.format("%.2f", riskPerShare),
                     riskBasedQty, affordableQty);
+            blockReasons.put(symbol, String.format(
+                    "Passed all gates, but computed quantity is 0 — capital ₹%.0f is " +
+                            "insufficient for even 1 share at entry ₹%.2f", capitalAmt, entry));
             return false;
         }
         if (affordableQty < riskBasedQty) {
@@ -547,9 +634,14 @@ public class NewsTradingStrategy {
             executed = true;
         }
 
-        if (!executed) return false;
+        if (!executed) {
+            blockReasons.put(symbol, "Passed all gates, order placement was attempted but " +
+                    "failed (see logs for the broker/network error)");
+            return false;
+        }
 
         // Track state
+        blockReasons.remove(symbol); // genuinely traded — clear any stale reason
         firedToday.add(symbol);
         activeSignals.add(symbol);
         sessionSignalCount.incrementAndGet();
@@ -645,6 +737,12 @@ public class NewsTradingStrategy {
         else                    return 0.005;
     }
 
+    /**
+     * UNUSED as of this change — the direction-alignment gate that called
+     * this was removed per explicit instruction (see Gate 4 in the main
+     * scan loop). Kept here, not deleted, purely so the prior logic
+     * remains visible/restorable without re-deriving it from scratch.
+     */
     private boolean isDirectionAligned(TradeDirection signalDir,
                                        MarketDirectionService.Direction marketDir) {
         if (marketDir == MarketDirectionService.Direction.BULLISH &&
@@ -750,6 +848,9 @@ public class NewsTradingStrategy {
 
     public int     getSessionSignalCount()    { return sessionSignalCount.get(); }
     public int     getMaxSignalsPerSession()  { return maxSignalsPerSession; }
+    /** Pure observability — see blockReasons field docstring. Read-only. */
+    public Map<String, String> getBlockReasons() { return new java.util.LinkedHashMap<>(blockReasons); }
+    public boolean isSessionCapReachedThisCycle() { return sessionCapReachedThisCycle; }
     public boolean isEnabled()               { return engineEnabled; }
     public int     getActiveItemCount()       { return ingestionService.getActiveItems().size(); }
     public int     getTotalIngested()         { return ingestionService.getTotalIngested(); }

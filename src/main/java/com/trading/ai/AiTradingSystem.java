@@ -36,15 +36,15 @@ import java.util.concurrent.atomic.AtomicInteger;
  * The AI module's master orchestrator.
  * Wires all 9 engines required by the original prompt:
  *
- *   1. AiMarketUnderstandingEngine  — regime, trend, breadth, sector rotation
- *   2. AiOpportunityDiscoveryEngine — universe scan, 60-feature vectors
- *   3. AiProbabilityEngine          — LR + GBM ML probability scoring
- *   4. AiConfidenceScoringEngine    — contradiction detection, confidence
- *   5. AiTradeQualityScoringEngine  — setup quality 0–100
- *   6. AiRiskAssessmentEngine       — position sizing, SL/T1/T2 placement
- *   7. AiTradeManagementEngine      — 1m monitoring, SL/T1/T2/trailing/EOD
- *   8. AiLearningEngine             — outcome recording, symbol history
- *   9. AiContinuousImprovementEngine — nightly adaptation, threshold tuning
+ *   1. AiMarketUnderstandingEngine  - regime, trend, breadth, sector rotation
+ *   2. AiOpportunityDiscoveryEngine - universe scan, 60-feature vectors
+ *   3. AiProbabilityEngine          - LR + GBM ML probability scoring
+ *   4. AiConfidenceScoringEngine    - contradiction detection, confidence
+ *   5. AiTradeQualityScoringEngine  - setup quality 0-100
+ *   6. AiRiskAssessmentEngine       - position sizing, SL/T1/T2 placement
+ *   7. AiTradeManagementEngine      - 1m monitoring, SL/T1/T2/trailing/EOD
+ *   8. AiLearningEngine             - outcome recording, symbol history
+ *   9. AiContinuousImprovementEngine - nightly adaptation, threshold tuning
  *
  * INDEPENDENCE GUARANTEE:
  *   This file and ALL engines import ONLY from:
@@ -68,18 +68,31 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Slf4j
 public class AiTradingSystem {
 
-    // ── Execution score thresholds — single source of truth, used both
+    // -- Execution score thresholds - single source of truth, used both
     // for the actual gate AND the dashboard status export below, so the
     // two can never silently drift apart again (the exact bug found via
     // real dashboard data: the dashboard's legend text was a separate
     // hardcoded "70"/"80" string that went stale after this constant was
-    // last raised, while individual watchlist items — which read the
-    // live threshold value passed through per-candidate — correctly
+    // last raised, while individual watchlist items - which read the
+    // live threshold value passed through per-candidate - correctly
     // showed 85, creating a confusing mismatch on screen).
     private static final int TRENDING_EXECUTION_THRESHOLD = 75;
     private static final int RANGING_EXECUTION_THRESHOLD  = 85;
 
-    // ── The 9 engines — all owned by AI module ────────────────────────────
+    // -- Pure observability: WHY didn't an eligible-or-close candidate
+    // actually execute? Pipeline has several gates AFTER the pattern-
+    // score threshold (ML confidence floor, extension hard-lock, and a
+    // final "pick ONE best candidate" reasoning step that can reject
+    // everyone) - none of which were ever visible on the dashboard,
+    // confirmed by direct user report (HINDUNILVR showed "[FAST] Eligible"
+    // with no trade taken, and there was no way to see why without
+    // server logs, which aren't reliably retained on a free hosting
+    // tier). This map is written to at each gate, purely additive - it
+    // NEVER changes any actual control-flow decision, only records what
+    // already happened, for dashboard display.
+    private final Map<String, String> blockReasons = new ConcurrentHashMap<>();
+
+    // -- The 9 engines - all owned by AI module ----------------------------
     private final AiMarketUnderstandingEngine   marketEngine;
     private final AiOpportunityDiscoveryEngine  discoveryEngine;
     private final AiProbabilityEngine           probabilityEngine;
@@ -89,27 +102,27 @@ public class AiTradingSystem {
     private final AiContinuousImprovementEngine improvementEngine;
     private final AiReasoningEngine             reasoningEngine;
 
-    // ── AI's own data service ─────────────────────────────────────────────
+    // -- AI's own data service ---------------------------------------------
     private final AiMarketDataService           aiData;
 
-    // ── Shared read-only infrastructure ──────────────────────────────────
+    // -- Shared read-only infrastructure ----------------------------------
     private final MarketDataService             marketData;
     private final CircuitBreakerService         circuitBreaker;
     private final com.trading.papertrading.model.PaperAccount paperAccountCB;
     private final AiPatternConfidenceEngine     confidenceEngine;
     private final JdbcTemplate                  jdbc;
 
-    // ── Independent AI/News-only execution + capital tracking ────────────
-    // INDEPENDENCE: replaces the old SmartChannelPullbackSignalEvent →
-    // SmartChannelSignalHandler → TradeApprovedEvent → PaperTradeExecutionService
+    // -- Independent AI/News-only execution + capital tracking ------------
+    // INDEPENDENCE: replaces the old SmartChannelPullbackSignalEvent ->
+    // SmartChannelSignalHandler -> TradeApprovedEvent -> PaperTradeExecutionService
     // chain entirely. No dependency on any other strategy's pipeline.
     private final com.trading.ai.execution.AiLiveOrderExecutionService liveOrderService;
     private final com.trading.ai.execution.AiNewsCapitalLedger         capitalLedger;
 
 
-    // ── State ─────────────────────────────────────────────────────────────
+    // -- State -------------------------------------------------------------
     private final Set<String>      firedToday     = ConcurrentHashMap.newKeySet();
-    // symbol → dominant pattern name (e.g. "BANDHANBNK" → "Liq. Sweep")
+    // symbol -> dominant pattern name (e.g. "BANDHANBNK" -> "Liq. Sweep")
     private final Map<String, String> watchlist   = new ConcurrentHashMap<>();
     private final AtomicInteger    tradesToday     = new AtomicInteger(0);
     private final AtomicBoolean    cycleRunning    = new AtomicBoolean(false);
@@ -118,7 +131,7 @@ public class AiTradingSystem {
     private volatile long          lastCycleMs     = 0;
     private volatile String        lastCycleSlot   = "";
 
-    // ── Window trade tracking — max 2 trades per time window ──────────────
+    // -- Window trade tracking - max 2 trades per time window --------------
     // Keys: "PRIME", "GOOD", "MODERATE", "ACCEPTABLE"
     private final Map<String, AtomicInteger> tradesPerWindow = new ConcurrentHashMap<>(
             java.util.Map.of(
@@ -130,14 +143,14 @@ public class AiTradingSystem {
     );
     private static final int MAX_TRADES_PER_WINDOW = 2;
 
-    // ── Configuration ─────────────────────────────────────────────────────
+    // -- Configuration -----------------------------------------------------
     @Value("${ai.trading.max-trades-per-day:5}")
     private int maxTradesPerDay;
 
     @Value("${ai.trading.max-concurrent:4}")
-    private int maxConcurrent;  // max 4 open positions — when any closes, next fires immediately
+    private int maxConcurrent;  // max 4 open positions - when any closes, next fires immediately
 
-    // ── Trade window ──────────────────────────────────────────────────────
+    // -- Trade window ------------------------------------------------------
     private static final LocalTime WINDOW_OPEN  = LocalTime.of(9,  30);
     private static final LocalTime WINDOW_CLOSE = LocalTime.of(14, 40);
     private static final long      CYCLE_COOLDOWN_MS = 200;
@@ -179,7 +192,7 @@ public class AiTradingSystem {
         ensureFiredTradesTableExists();
         // INDEPENDENCE: wire entry-fill and entry-rejection handling here.
         // Uses the purpose-specific setters (setOnEntryFilled/setOnEntryRejected)
-        // — AiTradeManagementEngine separately wires setOnExitFilled/
+        // - AiTradeManagementEngine separately wires setOnExitFilled/
         // setOnExitRejected in its own constructor. Both registrations
         // coexist safely; see AiLiveOrderExecutionService for why this had
         // to be split into purpose-specific slots.
@@ -187,9 +200,9 @@ public class AiTradingSystem {
         liveOrderService.setOnEntryRejected("AI_TRADING_V2", this::onLiveEntryRejected);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // PERSISTENCE — fired-today / trades-today survive a mid-market restart
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // PERSISTENCE - fired-today / trades-today survive a mid-market restart
+    // =======================================================================
 
     private void ensureFiredTradesTableExists() {
         try {
@@ -203,7 +216,7 @@ public class AiTradingSystem {
                 )
                 """);
         } catch (Exception e) {
-            log.warn("[AI-SYSTEM] Could not create ai_fired_trades_today table — " +
+            log.warn("[AI-SYSTEM] Could not create ai_fired_trades_today table - " +
                     "persistence disabled this session: {}", e.getMessage());
         }
     }
@@ -247,17 +260,17 @@ public class AiTradingSystem {
                     tradesPerWindow.get(window).incrementAndGet();
                 }
             }
-            log.info("[AI-SYSTEM] ✅ Reconciled {} fired trade(s) from database — " +
+            log.info("[AI-SYSTEM] [OK] Reconciled {} fired trade(s) from database - " +
                     "tradesToday={}", rows.size(), tradesToday.get());
         } catch (Exception e) {
-            log.warn("[AI-SYSTEM] reconcileFiredTradesFromDatabase failed — starting " +
+            log.warn("[AI-SYSTEM] reconcileFiredTradesFromDatabase failed - starting " +
                     "with empty firedToday as before this fix existed: {}", e.getMessage());
         }
     }
 
     @PostConstruct
     public void init() {
-        // Wire learning callback — every trade close feeds into learning engine
+        // Wire learning callback - every trade close feeds into learning engine
         tradeManager.setOnClosedCallback(outcome -> {
             outcome = AiTradeOutcome.builder()
                     .symbol(outcome.getSymbol())
@@ -281,10 +294,10 @@ public class AiTradingSystem {
             learningEngine.recordOutcome(outcome);
         });
 
-        log.info("[AI-SYSTEM] ✅ Initialised — 9 engines wired. Learning loop active.");
+        log.info("[AI-SYSTEM] [OK] Initialised - 9 engines wired. Learning loop active.");
         log.info("[AI-SYSTEM] Independence confirmed: zero imports from HighRR, SMC, News strategies.");
 
-        // RESTART RECOVERY — rebuild today's state from the database so a
+        // RESTART RECOVERY - rebuild today's state from the database so a
         // mid-market-hours redeploy resumes exactly where it left off,
         // instead of silently forgetting open positions and fired trades.
         // Both calls are individually best-effort and never block startup.
@@ -292,9 +305,9 @@ public class AiTradingSystem {
         reconcileFiredTradesFromDatabase();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // MAIN CYCLE — fires on every 5-minute candle close
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // MAIN CYCLE - fires on every 5-minute candle close
+    // =======================================================================
 
     @EventListener
     @Async("tradingExecutor")
@@ -302,9 +315,9 @@ public class AiTradingSystem {
         if (!"5minute".equals(event.getCandle().getTimeframe())) return;
         if (!event.getCandle().isComplete()) return;
 
-        // ── Cycle guard — run ONCE per 5-minute slot ─────────────────────
+        // -- Cycle guard - run ONCE per 5-minute slot ---------------------
         LocalTime nowTime = LocalTime.now(ZoneId.of("Asia/Kolkata"));
-        // Round down to nearest 5-minute slot: e.g. 10:07 → "10:05"
+        // Round down to nearest 5-minute slot: e.g. 10:07 -> "10:05"
         int slotMin = (nowTime.getHour() * 60 + nowTime.getMinute()) / 5 * 5;
         String slot = String.format("%02d:%02d", slotMin / 60, slotMin % 60);
         if (slot.equals(lastCycleSlot)) return;  // already processed this slot
@@ -319,15 +332,15 @@ public class AiTradingSystem {
     }
 
     /**
-     * Full AI decision cycle — 9 steps matching the 9 engines.
+     * Full AI decision cycle - 9 steps matching the 9 engines.
      */
     private void runCycle(CandleCompleteEvent event) {
         long t0 = System.currentTimeMillis();
 
-        // ── PRE-FLIGHT GATES ──────────────────────────────────────────────
+        // -- PRE-FLIGHT GATES ----------------------------------------------
         // Gate 1: Bootstrap complete
         if (!aiData.isBootstrapComplete()) {
-            log.debug("[AI-SYSTEM] Bootstrap not complete — skip cycle");
+            log.debug("[AI-SYSTEM] Bootstrap not complete - skip cycle");
             return;
         }
 
@@ -341,7 +354,7 @@ public class AiTradingSystem {
             return;
         }
 
-        // Gate 3.5: Window trade cap — max 2 trades per time window
+        // Gate 3.5: Window trade cap - max 2 trades per time window
         // Each window (PRIME/GOOD/MODERATE/ACCEPTABLE) allows max 2 trades.
         // Prevents clustering all 5 trades into one window.
         // When window changes, counter resets and 2 more trades allowed.
@@ -349,13 +362,13 @@ public class AiTradingSystem {
         if (currentWindow != null) {
             AtomicInteger windowCount = tradesPerWindow.get(currentWindow);
             if (windowCount != null && windowCount.get() >= MAX_TRADES_PER_WINDOW) {
-                log.debug("[AI-SYSTEM] Window cap reached — {}: {}/{} trades. Waiting for next window.",
+                log.debug("[AI-SYSTEM] Window cap reached - {}: {}/{} trades. Waiting for next window.",
                         currentWindow, windowCount.get(), MAX_TRADES_PER_WINDOW);
                 return;
             }
         }
 
-        // Gate 4: Concurrent position cap — checks BOTH AI internal + platform
+        // Gate 4: Concurrent position cap - checks BOTH AI internal + platform
         // AI internal: tradeManager tracks AI positions for learning/history
         // Platform: riskManagement tracks ALL active positions across all strategies
         int aiOpenCount = tradeManager.getOpenCount();
@@ -368,21 +381,21 @@ public class AiTradingSystem {
         // Gate 5: Circuit breaker
         try { BigDecimal _cap = paperAccountCB.getCapital();
             if (!circuitBreaker.checkPermission(_cap).isAllowed()) {
-                log.debug("[AI-SYSTEM] Circuit breaker active — skip cycle");
+                log.debug("[AI-SYSTEM] Circuit breaker active - skip cycle");
                 return;
             }} catch (Exception _cbEx) {}
 
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         // ENGINE 1: MARKET UNDERSTANDING
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         AiMarketUnderstandingEngine.MarketSnapshot snapshot = marketEngine.classify();
 
         // FIX: notify improvement engine of phase changes so threshold auto-adjusts
         int samples = probabilityEngine.getSamplesCount();
         improvementEngine.onPhaseChange(samples);
 
-        // Gate 6: Regime awareness — only CHOPPY blocks scanning/watchlist
-        // RANGING and TRENDING both allow scanning — execution depends on score threshold
+        // Gate 6: Regime awareness - only CHOPPY blocks scanning/watchlist
+        // RANGING and TRENDING both allow scanning - execution depends on score threshold
         // Per design: no Nifty/BankNifty/sector hard gates
         currentRegime = snapshot.regime();
         boolean choppy   = snapshot.isChoppy();
@@ -390,20 +403,20 @@ public class AiTradingSystem {
         boolean trending = "TRENDING".equals(currentRegime);
 
         // Determine execution threshold based on regime
-        // TRENDING → 75+ score executes (raised from 70, given 500+ stock
+        // TRENDING -> 75+ score executes (raised from 70, given 500+ stock
         //            universe surfaces more adequate-but-not-excellent
         //            candidates per cycle than the original smaller pool)
-        // RANGING  → 85+ score executes (raised from 80 — stricter, since
+        // RANGING  -> 85+ score executes (raised from 80 - stricter, since
         //            ranging moves are inherently less reliable)
-        // CHOPPY   → NO execution, watchlist monitoring only
+        // CHOPPY   -> NO execution, watchlist monitoring only
         int executionThreshold = trending ? TRENDING_EXECUTION_THRESHOLD
                 : ranging ? RANGING_EXECUTION_THRESHOLD : 999; // 999 = never executes
 
         log.debug("[AI-SYSTEM] Regime={} threshold={}", currentRegime, executionThreshold);
 
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         // ENGINE 2: OPPORTUNITY DISCOVERY
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         Set<String> openSymbols = tradeManager.getOpenPositions().keySet();
         List<AiCandidate> candidates = discoveryEngine.discover(snapshot, openSymbols, firedToday);
 
@@ -412,19 +425,19 @@ public class AiTradingSystem {
             return;
         }
 
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         // ENGINES 3 + 4 + 5: PROBABILITY + RISK ASSESSMENT
-        // NO rule filters here — confidence, RR, quality are INPUTS to
+        // NO rule filters here - confidence, RR, quality are INPUTS to
         // AiReasoningEngine, not gates. The reasoning engine decides.
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         List<AiCandidate>    scoredCandidates = new ArrayList<>();
         List<AiTradeDecision> allDecisions    = new ArrayList<>();
         List<AiPatternConfidenceEngine.ConfidenceResult> confidenceResults = new ArrayList<>();
 
         for (AiCandidate candidate : candidates) {
 
-            // ── STEP A: Pattern Confidence Score (100-point model) ───────────
-            // PRIMARY scoring mechanism — stock-specific, no market bias
+            // -- STEP A: Pattern Confidence Score (100-point model) -----------
+            // PRIMARY scoring mechanism - stock-specific, no market bias
             List<com.trading.domain.Candle> dailyCandles =
                     aiData.getDailyCandles(candidate.getSymbol());
             List<com.trading.domain.Candle> candles5m =
@@ -432,11 +445,11 @@ public class AiTradingSystem {
             AiPatternConfidenceEngine.ConfidenceResult conf =
                     confidenceEngine.score(candidate, dailyCandles, candles5m);
 
-            // ── FIX 1 (hard lock): reject if price already moved >1.5% from
+            // -- FIX 1 (hard lock): reject if price already moved >1.5% from
             // the prior close before we got a chance to enter. Placed here,
             // BEFORE risk assessment, so an over-extended candidate never
             // reaches SL/T1/T2 computation or execution at all. Uses
-            // dailyCandles already fetched above — no new data source, no
+            // dailyCandles already fetched above - no new data source, no
             // change to any existing gate's logic, purely an additional
             // early-exit check.
             if (!dailyCandles.isEmpty()) {
@@ -445,8 +458,8 @@ public class AiTradingSystem {
                 if (prevClose > 0) {
                     double movePct = Math.abs(candidate.getLtp() - prevClose) / prevClose;
                     if (movePct > 0.015) {
-                        log.debug("[AI-SYSTEM] {} TOO_EXTENDED — already moved {}% from prior " +
-                                        "close (max 1.5%) — hard skip", candidate.getSymbol(),
+                        log.debug("[AI-SYSTEM] {} TOO_EXTENDED - already moved {}% from prior " +
+                                        "close (max 1.5%) - hard skip", candidate.getSymbol(),
                                 String.format("%.2f", movePct * 100));
                         String dpExt = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
                         watchlist.put(candidate.getSymbol(),
@@ -456,15 +469,15 @@ public class AiTradingSystem {
                 }
             }
 
-            // ── FIX 2 (soft penalty): recently-traded symbols need a higher
+            // -- FIX 2 (soft penalty): recently-traded symbols need a higher
             // score to qualify again, instead of being excluded outright. A
             // genuinely strong fresh setup elsewhere still wins on a level
             // playing field; a repeat needs to be noticeably better.
-            // IMPORTANT — scope is deliberately narrow: this ONLY affects the
+            // IMPORTANT - scope is deliberately narrow: this ONLY affects the
             // eligibility-gate comparisons below (effectiveScore vs
             // executionThreshold). conf.totalScore() itself, confidenceResults,
             // and the reasoning engine's own selection logic are completely
-            // untouched — so once a candidate clears this gate, everything
+            // untouched - so once a candidate clears this gate, everything
             // downstream behaves exactly as it did before this change.
             boolean recentlyTraded = isRecentlyTraded(candidate.getSymbol());
             int     recencyPenalty = recentlyTraded ? 10 : 0;
@@ -477,11 +490,11 @@ public class AiTradingSystem {
                 String dp = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
                 String skipReason;
                 if (conf.totalScore() == 0) {
-                    skipReason = "NO_CANDLE";          // Gate 2 failed — no confirming 5m candle
+                    skipReason = "NO_CANDLE";          // Gate 2 failed - no confirming 5m candle
                 } else if (effectiveScore < executionThreshold) {
                     skipReason = recentlyTraded ? "RECENTLY_TRADED" : "SCORE_LOW";
                 } else if (choppy) {
-                    skipReason = "CHOPPY";             // choppy market — no execution
+                    skipReason = "CHOPPY";             // choppy market - no execution
                 } else {
                     skipReason = "ELIGIBLE";           // passes score, waiting direction/window check
                 }
@@ -491,28 +504,28 @@ public class AiTradingSystem {
 
             // Log watchlist entry
             if (effectiveScore >= 50 && effectiveScore < executionThreshold) {
-                log.info("[AI-SYSTEM] 👀 WATCHLIST: {} score={}/100{} [{}] threshold={}",
+                log.info("[AI-SYSTEM] [WATCH] WATCHLIST: {} score={}/100{} [{}] threshold={}",
                         candidate.getSymbol(), effectiveScore,
                         recentlyTraded ? " (raw=" + conf.totalScore() + ", -10 recently traded)" : "",
                         conf.dominantPattern(), executionThreshold);
             }
 
-            // CHOPPY market: scan and watchlist only — never execute
+            // CHOPPY market: scan and watchlist only - never execute
             if (choppy) continue;
 
             // Below execution threshold: watchlist monitoring only
             if (effectiveScore < executionThreshold) {
-                log.debug("[AI-SYSTEM] {} score={}/{}{} — below threshold, on watchlist",
+                log.debug("[AI-SYSTEM] {} score={}/{}{} - below threshold, on watchlist",
                         candidate.getSymbol(), effectiveScore, executionThreshold,
                         recentlyTraded ? " (recently traded penalty applied)" : "");
                 continue;
             }
 
-            // ── TRENDING: market direction alignment required ──────────────
-            // Rule: TRENDING → Score ≥ 70 + Market Direction + Stock Direction in sync
+            // -- TRENDING: market direction alignment required --------------
+            // Rule: TRENDING -> Score >= 70 + Market Direction + Stock Direction in sync
             // Only LONG trades when market is BULLISH trending.
             // Only SHORT trades when market is BEARISH trending.
-            // RANGING has no direction requirement — both sides valid.
+            // RANGING has no direction requirement - both sides valid.
             if (trending) {
                 double marketDir = snapshot.niftyDirection(); // +1=BULLISH, -1=BEARISH, 0=SIDEWAYS
                 String stockDir  = candidate.getSuggestedDirection();
@@ -520,14 +533,14 @@ public class AiTradingSystem {
                 boolean marketBear = marketDir < -0.3;
 
                 if (marketBull && "SHORT".equals(stockDir)) {
-                    log.debug("[AI-SYSTEM] {} SHORT skipped — TRENDING market is BULLISH, no counter-trend",
+                    log.debug("[AI-SYSTEM] {} SHORT skipped - TRENDING market is BULLISH, no counter-trend",
                             candidate.getSymbol());
                     String dp = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
                     watchlist.put(candidate.getSymbol(), dp + "|DIRECTION|" + conf.totalScore() + "|" + executionThreshold);
                     continue;
                 }
                 if (marketBear && "LONG".equals(stockDir)) {
-                    log.debug("[AI-SYSTEM] {} LONG skipped — TRENDING market is BEARISH, no counter-trend",
+                    log.debug("[AI-SYSTEM] {} LONG skipped - TRENDING market is BEARISH, no counter-trend",
                             candidate.getSymbol());
                     String dp = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
                     watchlist.put(candidate.getSymbol(), dp + "|DIRECTION|" + conf.totalScore() + "|" + executionThreshold);
@@ -535,19 +548,19 @@ public class AiTradingSystem {
                 }
                 if (!marketBull && !marketBear) {
                     // Market direction unclear (SIDEWAYS nifty in TRENDING regime)
-                    // Allow trade — stock direction is the primary signal
-                    log.debug("[AI-SYSTEM] {} — TRENDING but Nifty SIDEWAYS, stock direction leads",
+                    // Allow trade - stock direction is the primary signal
+                    log.debug("[AI-SYSTEM] {} - TRENDING but Nifty SIDEWAYS, stock direction leads",
                             candidate.getSymbol());
                 }
             }
 
-            // ── STEP B: Risk Assessment — compute SL/T1/T2 ──────────────────
+            // -- STEP B: Risk Assessment - compute SL/T1/T2 ------------------
             AiPrediction prediction = probabilityEngine.predict(
                     candidate.getFeatureVector().getFeatures(), currentRegime);
             AiTradeDecision decision = riskEngine.assess(
                     candidate, prediction, currentRegime);
             if (decision == null) {
-                log.debug("[AI-SYSTEM] {} risk assessment null — skip", candidate.getSymbol());
+                log.debug("[AI-SYSTEM] {} risk assessment null - skip", candidate.getSymbol());
                 continue;
             }
 
@@ -555,22 +568,26 @@ public class AiTradingSystem {
             // computes a sophisticated, win-rate-adaptive confidence floor
             // (starts at 0.40 for a fresh system, tightens toward 0.75 as
             // losing trades accumulate, loosens toward 0.55 if win rate is
-            // strong) — but this value was NEVER actually applied anywhere;
+            // strong) - but this value was NEVER actually applied anywhere;
             // it was only ever read for dashboard display
             // (status.put("minConfidence", ...)). The self-correction signal
             // existed but never fed back into trade selection. Wiring it in
             // here as a genuine gate, alongside the existing pattern-score
-            // executionThreshold — these are two different, complementary
+            // executionThreshold - these are two different, complementary
             // confidence concepts (pattern-based 0-100 vs. ML-prediction-
             // based 0-1) and both should hold for a trade to qualify.
             double minConf = improvementEngine.getMinConfidenceThreshold();
             if (decision.getConfidence() < minConf) {
-                log.debug("[AI-SYSTEM] {} confidence {} below adaptive floor {} — skip",
+                log.debug("[AI-SYSTEM] {} confidence {} below adaptive floor {} - skip",
                         candidate.getSymbol(),
                         String.format("%.2f", decision.getConfidence()),
                         String.format("%.2f", minConf));
+                blockReasons.put(candidate.getSymbol(), String.format(
+                        "ML confidence %.2f below adaptive floor %.2f (pattern score was OK)",
+                        decision.getConfidence(), minConf));
                 continue;
             }
+            blockReasons.remove(candidate.getSymbol()); // cleared this gate - wasn't the blocker
 
             scoredCandidates.add(candidate);
             allDecisions.add(decision);
@@ -578,7 +595,7 @@ public class AiTradingSystem {
         }
 
         if (choppy) {
-            log.info("[AI-SYSTEM] CHOPPY — {} stocks on watchlist, no execution",
+            log.info("[AI-SYSTEM] CHOPPY - {} stocks on watchlist, no execution",
                     watchlist.size());
             return;
         }
@@ -592,18 +609,38 @@ public class AiTradingSystem {
         log.debug("[AI-SYSTEM] {} candidates met threshold={} | regime={}",
                 scoredCandidates.size(), executionThreshold, currentRegime);
 
-        // ═══════════════════════════════════════════════════════════════════
-        // ENGINE 7: REASONING — picks the single best candidate
+        // ===================================================================
+        // ENGINE 7: REASONING - picks the single best candidate
         // Pattern confidence already filtered above.
         // Reasoning provides additional comparative ranking and narrative.
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
         AiReasoningEngine.AiReasoningResult reasoned = reasoningEngine.selectBest(
                 scoredCandidates, allDecisions, snapshot);
 
         if (reasoned == null) {
             log.debug("[AI-SYSTEM] Reasoning engine: no trade | regime={}", currentRegime);
+            // Pure observability: every candidate that made it this far
+            // (passed pattern score, confidence floor, and hard-lock) but
+            // still didn't get picked because reasoningEngine rejected
+            // ALL of them this cycle - record that, distinctly from a
+            // candidate that lost out to a single better one (handled below).
+            for (AiCandidate c : scoredCandidates) {
+                blockReasons.put(c.getSymbol(),
+                        "Cleared all individual gates, but reasoning engine selected " +
+                                "no trade at all this cycle (regime/market-context check failed)");
+            }
             return;
         }
+        // Pure observability: everyone who cleared all individual gates
+        // but wasn't the ONE candidate reasoningEngine actually picked.
+        for (AiCandidate c : scoredCandidates) {
+            if (!c.getSymbol().equals(reasoned.decision().getSymbol())) {
+                blockReasons.put(c.getSymbol(), "Cleared all individual gates, but " +
+                        reasoned.decision().getSymbol() + " was selected instead this cycle " +
+                        "(only one trade fires per cycle)");
+            }
+        }
+        blockReasons.remove(reasoned.decision().getSymbol()); // this one's actually proceeding
 
         // Attach confidence score to the reasoned decision
         int confScore = confidenceResults.stream()
@@ -611,9 +648,18 @@ public class AiTradingSystem {
                 .mapToInt(AiPatternConfidenceEngine.ConfidenceResult::totalScore)
                 .max().orElse(executionThreshold);
 
-        // ═══════════════════════════════════════════════════════════════════
-        // ENGINE 8: EXECUTION — only the reasoned best candidate
-        // ═══════════════════════════════════════════════════════════════════
+        // ===================================================================
+        // ENGINE 8: EXECUTION - only the reasoned best candidate
+        // ===================================================================
+        if (tradesToday.get() >= maxTradesPerDay) {
+            blockReasons.put(reasoned.decision().getSymbol(), String.format(
+                    "Selected as best candidate, but daily trade cap reached (%d/%d)",
+                    tradesToday.get(), maxTradesPerDay));
+        } else if (tradeManager.getOpenCount() >= maxConcurrent) {
+            blockReasons.put(reasoned.decision().getSymbol(), String.format(
+                    "Selected as best candidate, but max concurrent positions reached (%d/%d)",
+                    tradeManager.getOpenCount(), maxConcurrent));
+        }
         if (tradesToday.get() < maxTradesPerDay && tradeManager.getOpenCount() < maxConcurrent) {
             // Enrich decision with reasoning narrative
             AiTradeDecision enriched = AiTradeDecision.builder()
@@ -649,6 +695,7 @@ public class AiTradingSystem {
 
             boolean executed = executeTrade(enriched);
             if (executed) {
+                blockReasons.remove(enriched.getSymbol()); // genuinely traded - clear any stale reason
                 tradesToday.incrementAndGet();
                 firedToday.add(enriched.getSymbol());
                 todayDecisions.add(enriched);
@@ -661,7 +708,7 @@ public class AiTradingSystem {
                 }
                 persistFiredTrade(enriched.getSymbol(), w);
 
-                log.info("[AI-SYSTEM] ✅ TRADE #{} | {} {} | composite={} " +
+                log.info("[AI-SYSTEM] [OK] TRADE #{} | {} {} | composite={} " +
                                 "env={} move={} fund={} time={} pattern={} rr={} " +
                                 "| entry={} sl={} t1={}",
                         tradesToday.get(),
@@ -676,6 +723,10 @@ public class AiTradingSystem {
                         enriched.getEntryPrice(),
                         enriched.getStopLoss(),
                         enriched.getTarget1());
+            } else {
+                blockReasons.put(enriched.getSymbol(),
+                        "Selected as best candidate, order placement was attempted but failed " +
+                                "(see logs for the broker/network error)");
             }
         }
 
@@ -684,10 +735,10 @@ public class AiTradingSystem {
                 currentRegime, candidates.size(), allDecisions.size(), elapsed);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // 1-MINUTE CANDLE — trade management for all open AI positions
+    // =======================================================================
+    // 1-MINUTE CANDLE - trade management for all open AI positions
     // ENGINE 7: TRADE MANAGEMENT
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     @EventListener
     @Async("tradingExecutor")
@@ -698,14 +749,14 @@ public class AiTradingSystem {
                 .forEach(tradeManager::onCandle);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // EXECUTION — direct Trade creation, no external service
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // EXECUTION - direct Trade creation, no external service
+    // =======================================================================
 
     private boolean executeTrade(AiTradeDecision decision) {
         // INDEPENDENCE (this session's rework): no longer routes through
         // SmartChannelPullbackSignalEvent / SmartChannelSignalHandler /
-        // TradeApprovedEvent / PaperTradeExecutionService — that shared
+        // TradeApprovedEvent / PaperTradeExecutionService - that shared
         // platform pipeline belongs to the other strategies being
         // permanently removed. AI now executes directly and independently:
         //
@@ -714,11 +765,11 @@ public class AiTradingSystem {
         //
         //   LIVE mode: places a real order via AiLiveOrderExecutionService,
         //     and only registers the position once the broker confirms the
-        //     fill (onLiveEntryFilled() below) — using the actual fill
+        //     fill (onLiveEntryFilled() below) - using the actual fill
         //     price, not the original signal price.
         //
         // AiTradeManagementEngine remains the sole position/SL/T1/T2
-        // authority either way — it now also drives LIVE exit orders
+        // authority either way - it now also drives LIVE exit orders
         // directly (see this session's changes there), with zero
         // dependency on any other strategy's classes or event pipeline.
         synchronized (this) {
@@ -727,21 +778,21 @@ public class AiTradingSystem {
             // fill-confirmed wouldn't be counted here, creating a brief window
             // where more entries than maxConcurrent could be placed before the
             // first one's fill confirmation arrives. Counting pendingEntryContext
-            // too closes that gap — reserves the slot the moment an order is
+            // too closes that gap - reserves the slot the moment an order is
             // placed, not only once it's confirmed filled.
             int effectiveOpenCount = tradeManager.getOpenCount() + pendingEntryContext.size();
             if (effectiveOpenCount >= maxConcurrent) {
                 log.debug("[AI-SYSTEM] executeTrade: concurrent limit reached " +
-                                "(open={} pending={}) — skip {}",
+                                "(open={} pending={}) - skip {}",
                         tradeManager.getOpenCount(), pendingEntryContext.size(), decision.getSymbol());
                 return false;
             }
             if (tradesToday.get() >= maxTradesPerDay) {
-                log.debug("[AI-SYSTEM] executeTrade: daily limit reached — skip {}",
+                log.debug("[AI-SYSTEM] executeTrade: daily limit reached - skip {}",
                         decision.getSymbol());
                 return false;
             }
-            // INDEPENDENCE FIX: removed riskManagement.isSymbolAlreadyActive() —
+            // INDEPENDENCE FIX: removed riskManagement.isSymbolAlreadyActive() -
             // that checks against OTHER strategies' open positions via shared
             // RiskManagementService. AI/News now only need to check their OWN
             // open positions, which tradeManager.getOpenCount()/hasPosition()
@@ -759,7 +810,7 @@ public class AiTradingSystem {
 
                 if (symbol == null || direction == null || entry == null
                         || sl == null || t1 == null || qty <= 0) {
-                    log.warn("[AI-SYSTEM] Invalid decision fields for {} — skip", symbol);
+                    log.warn("[AI-SYSTEM] Invalid decision fields for {} - skip", symbol);
                     return false;
                 }
 
@@ -768,20 +819,20 @@ public class AiTradingSystem {
                 boolean   isBuy       = dir == TradeDirection.LONG;
                 BigDecimal marginReq  = entry.multiply(BigDecimal.valueOf(qty));
 
-                // ── LIVE MODE: place a real order, wait for broker fill ──────
+                // -- LIVE MODE: place a real order, wait for broker fill ------
                 // confirmation before registering anything. PAPER mode below
-                // continues to simulate an instant fill, exactly as before —
+                // continues to simulate an instant fill, exactly as before -
                 // zero change to paper behaviour.
                 if (liveOrderService.isLiveMode()) {
                     String orderId = liveOrderService.placeEntryOrder(
                             symbol, isBuy, qty, entry.doubleValue(), "AI_TRADING_V2");
                     if (orderId == null) {
                         log.warn("[AI-SYSTEM] LIVE entry order not placed for {} " +
-                                "(blocked or failed) — no position opened.", symbol);
+                                "(blocked or failed) - no position opened.", symbol);
                         return false;
                     }
                     // Fill confirmation arrives asynchronously via
-                    // onLiveEntryFilled() below — registerTrade() and the
+                    // onLiveEntryFilled() below - registerTrade() and the
                     // ledger debit happen there, using the ACTUAL fill price,
                     // not this signal price.
                     pendingEntryContext.put(orderId, new PendingEntryContext(
@@ -791,7 +842,7 @@ public class AiTradingSystem {
                     return true;
                 }
 
-                // ── PAPER MODE — unchanged simulated instant fill ───────────
+                // -- PAPER MODE - unchanged simulated instant fill -----------
                 Trade trade = Trade.builder()
                         .tradeDate(LocalDate.now())
                         .tradingSymbol(symbol)
@@ -812,7 +863,7 @@ public class AiTradingSystem {
                 tradeManager.registerTrade(trade, decision);
                 capitalLedger.debitMargin(symbol, "AI_TRADING_V2", marginReq);
 
-                log.info("[AI-SYSTEM] ✅ Signal fired (PAPER): {} {} | token={} entry={} sl={} t1={}",
+                log.info("[AI-SYSTEM] [OK] Signal fired (PAPER): {} {} | token={} entry={} sl={} t1={}",
                         symbol, direction, token, entry, sl, t1);
                 return true;
 
@@ -826,7 +877,7 @@ public class AiTradingSystem {
 
     /**
      * Holds the data needed to register a position once a LIVE entry order's
-     * fill is confirmed — the signal-time decision details, keyed by orderId
+     * fill is confirmed - the signal-time decision details, keyed by orderId
      * so onLiveEntryFilled() can reconstruct the full Trade/position.
      */
     private record PendingEntryContext(
@@ -840,7 +891,7 @@ public class AiTradingSystem {
      * Wired to liveOrderService.setOnEntryFilled() in init(). Fires once the
      * broker confirms a LIVE entry order is COMPLETE. Registers the position
      * using the ACTUAL average fill price/quantity, not the original signal
-     * price — slippage between signal and fill is real and must be reflected
+     * price - slippage between signal and fill is real and must be reflected
      * in the position's true entry price for correct P&L/R-multiple math.
      */
     private void onLiveEntryFilled(String symbol,
@@ -850,7 +901,7 @@ public class AiTradingSystem {
             if (e.getValue().symbol().equals(symbol)) { ctx = e.getValue(); break; }
         }
         if (ctx == null) {
-            log.error("[AI-SYSTEM] onLiveEntryFilled: no pending context found for {} — " +
+            log.error("[AI-SYSTEM] onLiveEntryFilled: no pending context found for {} - " +
                     "cannot register position. orderId={}", symbol, fill.orderId());
             return;
         }
@@ -878,7 +929,7 @@ public class AiTradingSystem {
         capitalLedger.debitMargin(symbol, "AI_TRADING_V2",
                 actualEntry.multiply(BigDecimal.valueOf(fill.filledQty())));
 
-        log.info("[AI-SYSTEM] ✅ LIVE entry CONFIRMED: {} {} qty={} actualEntry={} " +
+        log.info("[AI-SYSTEM] [OK] LIVE entry CONFIRMED: {} {} qty={} actualEntry={} " +
                         "(signal price was {})", symbol, ctx.direction(), fill.filledQty(),
                 actualEntry, ctx.decision().getEntryPrice());
     }
@@ -886,19 +937,19 @@ public class AiTradingSystem {
     /**
      * Fired when a LIVE entry order is REJECTED or CANCELLED by the broker.
      * Cleans up pendingEntryContext for this symbol so it doesn't leak in
-     * memory forever — no position was ever opened, so there is nothing
+     * memory forever - no position was ever opened, so there is nothing
      * else to undo (no margin was debited, no Trade was registered; both
      * of those only happen in onLiveEntryFilled() above, after confirmed fill).
      */
     private void onLiveEntryRejected(String symbol, String statusMessage) {
         pendingEntryContext.entrySet().removeIf(e -> e.getValue().symbol().equals(symbol));
-        log.warn("[AI-SYSTEM] LIVE entry order rejected/cancelled for {} — reason: {}. " +
+        log.warn("[AI-SYSTEM] LIVE entry order rejected/cancelled for {} - reason: {}. " +
                 "No position was opened.", symbol, statusMessage);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // DAILY RESET — midnight
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // DAILY RESET - midnight
+    // =======================================================================
 
     private static int safeInt(String s) {
         try { return Integer.parseInt(s.trim()); } catch (Exception e) { return 0; }
@@ -908,11 +959,11 @@ public class AiTradingSystem {
      * Returns the current trade window name based on IST time.
      * Returns null if outside trading hours.
      *
-     *  9:30 – 11:00 → PRIME      (highest momentum, patterns fresh)
-     * 11:00 – 12:30 → GOOD       (trend established, volume active)
-     * 12:30 – 13:30 → MODERATE   (lunch zone, spreads widen)
-     * 13:30 – 14:40 → ACCEPTABLE (late session, closing momentum)
-     * Outside these  → null      (window blocked)
+     *  9:30 - 11:00 -> PRIME      (highest momentum, patterns fresh)
+     * 11:00 - 12:30 -> GOOD       (trend established, volume active)
+     * 12:30 - 13:30 -> MODERATE   (lunch zone, spreads widen)
+     * 13:30 - 14:40 -> ACCEPTABLE (late session, closing momentum)
+     * Outside these  -> null      (window blocked)
      */
     private String getTradeWindow(LocalTime t) {
         int m = t.getHour() * 60 + t.getMinute();
@@ -920,17 +971,17 @@ public class AiTradingSystem {
         if (m >= 660 && m < 750) return "GOOD";        // 11:00-12:30
         if (m >= 750 && m < 810) return "MODERATE";    // 12:30-13:30
         if (m >= 810 && m < 880) return "ACCEPTABLE";  // 13:30-14:40
-        return null; // outside window — Gate 2 already blocks this
+        return null; // outside window - Gate 2 already blocks this
     }
 
     /**
-     * FIX 2 (soft penalty) support — checks whether this symbol appears in
+     * FIX 2 (soft penalty) support - checks whether this symbol appears in
      * ai_trade_outcomes (the existing, already-populated all-time learning
-     * history table — same table AiLearningEngine reads at startup) within
+     * history table - same table AiLearningEngine reads at startup) within
      * the last 2 calendar days. Read-only query against existing data; no
      * new table, no new column, no change to anything that writes to this
      * table. Fails OPEN (returns false / "not recently traded") on any DB
-     * error — a database hiccup must never block the existing, high-
+     * error - a database hiccup must never block the existing, high-
      * performing pipeline from trading; it only means this specific
      * penalty doesn't apply for that one check.
      */
@@ -942,7 +993,7 @@ public class AiTradingSystem {
                     java.sql.Timestamp.from(Instant.now().minusSeconds(2 * 86_400L)));
             return count != null && count > 0;
         } catch (Exception e) {
-            log.debug("[AI-SYSTEM] isRecentlyTraded check failed for {} — treating as " +
+            log.debug("[AI-SYSTEM] isRecentlyTraded check failed for {} - treating as " +
                     "not recently traded (fail-open): {}", symbol, e.getMessage());
             return false;
         }
@@ -954,7 +1005,7 @@ public class AiTradingSystem {
         tradesToday.set(0);
         tradesPerWindow.values().forEach(counter -> counter.set(0)); // reset all window counters
         todayDecisions.clear();
-        // FIX: clear trade manager positions — prevents ghost positions
+        // FIX: clear trade manager positions - prevents ghost positions
         // surviving midnight and blocking the next trading session
         tradeManager.clearPositions();
         watchlist.clear();
@@ -970,9 +1021,9 @@ public class AiTradingSystem {
         log.info("[AI-SYSTEM] Daily reset complete");
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // WEEKLY RESET — Monday 07:00
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // WEEKLY RESET - Monday 07:00
+    // =======================================================================
 
     @Scheduled(cron = "0 0 7 * * MON", zone = "Asia/Kolkata")
     public void weeklyReset() {
@@ -980,16 +1031,16 @@ public class AiTradingSystem {
         log.info("[AI-SYSTEM] Weekly reset complete");
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // BTST READ-ONLY ACCESSORS — used by BtstAiStrategy only
-    // These are purely read-only — zero impact on AI trading system state
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // BTST READ-ONLY ACCESSORS - used by BtstAiStrategy only
+    // These are purely read-only - zero impact on AI trading system state
+    // =======================================================================
 
-    /** Returns map of symbol → confidence score for all watchlist stocks */
+    /** Returns map of symbol -> confidence score for all watchlist stocks */
     public Map<String, Integer> getWatchlistScores() {
-        // watchlist stores symbol → pattern name
-        // scores are not stored — BTST uses pattern presence as proxy
-        // stocks on watchlist passed all gates — score ≥ 1
+        // watchlist stores symbol -> pattern name
+        // scores are not stored - BTST uses pattern presence as proxy
+        // stocks on watchlist passed all gates - score >= 1
         Map<String, Integer> scores = new LinkedHashMap<>();
         for (String sym : watchlist.keySet()) {
             // Use todayDecisions for actual scores if available
@@ -998,7 +1049,7 @@ public class AiTradingSystem {
                     .findFirst()
                     .ifPresentOrElse(
                             d -> scores.put(sym, (int) d.getNumericPreScore()),
-                            () -> scores.put(sym, 80) // on watchlist = ≥ threshold
+                            () -> scores.put(sym, 80) // on watchlist = >= threshold
                     );
         }
         return Collections.unmodifiableMap(scores);
@@ -1023,9 +1074,9 @@ public class AiTradingSystem {
         return tradeManager.getOpenPositions().containsKey(symbol);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // STATUS ACCESSORS — for DashboardController
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // STATUS ACCESSORS - for DashboardController
+    // =======================================================================
 
     public Map<String, Object> getStatus() {
         Map<String, Object> status = new LinkedHashMap<>();
@@ -1035,9 +1086,9 @@ public class AiTradingSystem {
         // left stale after this session's threshold raise to 75/85. Each
         // individual watchlist item already showed the REAL live
         // threshold (85) correctly, since that flows dynamically from
-        // here — but the legend banner above it showed the old, wrong
+        // here - but the legend banner above it showed the old, wrong
         // numbers, creating a confusing mismatch (e.g. "RANGING: Score
-        // ≥ 80" next to a watchlist item showing "83/85"). Exposing the
+        // >= 80" next to a watchlist item showing "83/85"). Exposing the
         // real constants here so the dashboard can render them dynamically
         // instead of hardcoding numbers that silently go stale on the
         // next threshold change.
@@ -1045,15 +1096,18 @@ public class AiTradingSystem {
         status.put("rangingThreshold",  RANGING_EXECUTION_THRESHOLD);
         // FIX: dashboard reads ai.thresholdLabel for the small label under
         // the regime card, but this was never actually populated by the
-        // backend — always silently fell back to a bare "—". Now shows
+        // backend - always silently fell back to a bare "-". Now shows
         // the real, currently-applicable threshold for whatever regime is
         // actually active right now.
         String activeThresholdLabel = "TRENDING".equals(currentRegime)
-                ? "Score ≥ " + TRENDING_EXECUTION_THRESHOLD + " required"
+                ? "Score >= " + TRENDING_EXECUTION_THRESHOLD + " required"
                 : "RANGING".equals(currentRegime)
-                ? "Score ≥ " + RANGING_EXECUTION_THRESHOLD + " required"
-                : "No execution — choppy regime";
+                ? "Score >= " + RANGING_EXECUTION_THRESHOLD + " required"
+                : "No execution - choppy regime";
         status.put("thresholdLabel", activeThresholdLabel);
+        // Pure observability for the dashboard - see blockReasons field
+        // docstring. Read-only export, never influences any decision.
+        status.put("blockReasons", new LinkedHashMap<>(blockReasons));
         status.put("phase",          probabilityEngine.getPhaseLabel());
         status.put("tradesToday",    tradesToday.get());
         status.put("watchlistCount", watchlist.size());
