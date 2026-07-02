@@ -14,32 +14,32 @@ import java.io.IOException;
 import java.util.*;
 
 /**
- * ZerodhaOrderClient — JAR-verified order execution client.
+ * ZerodhaOrderClient - JAR-verified order execution client.
  *
  * JAR-VERIFIED TYPE CORRECTIONS (from javap on kiteconnect.jar):
  *
- *   Order fields — ALL are String public fields (NOT int/double):
- *     orderId          → String
- *     filledQuantity   → String  (parse with Integer.parseInt when needed)
- *     averagePrice     → String  (parse with Double.parseDouble when needed)
- *     quantity         → String  (parse with Integer.parseInt when needed)
- *     pendingQuantity  → String  (parse with Integer.parseInt when needed)
- *     triggerPrice     → String
- *     price            → String
- *     status           → String
+ *   Order fields - ALL are String public fields (NOT int/double):
+ *     orderId          -> String
+ *     filledQuantity   -> String  (parse with Integer.parseInt when needed)
+ *     averagePrice     -> String  (parse with Double.parseDouble when needed)
+ *     quantity         -> String  (parse with Integer.parseInt when needed)
+ *     pendingQuantity  -> String  (parse with Integer.parseInt when needed)
+ *     triggerPrice     -> String
+ *     price            -> String
+ *     status           -> String
  *
- *   OrderParams fields — correct types:
- *     quantity         → Integer  (wrapper, not int)
- *     price            → Double   (wrapper, not double)
- *     triggerPrice     → Double   (wrapper, not double)
- *     stoploss         → Double
- *     squareoff        → Double
+ *   OrderParams fields - correct types:
+ *     quantity         -> Integer  (wrapper, not int)
+ *     price            -> Double   (wrapper, not double)
+ *     triggerPrice     -> Double   (wrapper, not double)
+ *     stoploss         -> Double
+ *     squareoff        -> Double
  *
- *   Margin.available.cash → String (parse with Double.parseDouble)
+ *   Margin.available.cash -> String (parse with Double.parseDouble)
  *
- *   Trade fields — ALL are String:
- *     averagePrice     → String
- *     quantity         → String
+ *   Trade fields - ALL are String:
+ *     averagePrice     -> String
+ *     quantity         -> String
  *
  *   Constants (verified string values):
  *     ORDER_TYPE_MARKET = "MARKET"
@@ -64,7 +64,7 @@ public class ZerodhaOrderClient {
 
     private final KiteConnect kiteConnect;
 
-    // ── Order placement ───────────────────────────────────────────────────
+    // -- Order placement ---------------------------------------------------
 
     @Retryable(maxAttempts = 3, backoff = @Backoff(delay = 500, multiplier = 2))
     public String placeMarketOrder(String symbol, String txType, int qty) {
@@ -84,16 +84,16 @@ public class ZerodhaOrderClient {
                 Constants.VARIETY_REGULAR);
     }
 
-    // ── Order modification ────────────────────────────────────────────────
+    // -- Order modification ------------------------------------------------
 
     @Retryable(maxAttempts = 3, backoff = @Backoff(delay = 500))
     public String modifySlTrigger(String orderId, double newTrigger) {
         try {
             OrderParams p  = new OrderParams();
             // JAR-VERIFIED: triggerPrice is Double (wrapper) in OrderParams
-            p.triggerPrice = newTrigger;          // double autoboxed to Double ✓
+            p.triggerPrice = newTrigger;          // double autoboxed to Double [OK]
             p.orderType    = Constants.ORDER_TYPE_SLM;
-            // JAR-VERIFIED: modifyOrder(String, OrderParams, String) → Order
+            // JAR-VERIFIED: modifyOrder(String, OrderParams, String) -> Order
             Order result   = kiteConnect.modifyOrder(orderId, p, Constants.VARIETY_REGULAR);
             log.info("SL modified orderId={} newTrigger={}", orderId, newTrigger);
             // JAR-VERIFIED: Order.orderId is String public field
@@ -111,7 +111,7 @@ public class ZerodhaOrderClient {
         try {
             OrderParams p = new OrderParams();
             // JAR-VERIFIED: quantity is Integer (wrapper) in OrderParams
-            p.quantity    = newQty;              // int autoboxed to Integer ✓
+            p.quantity    = newQty;              // int autoboxed to Integer [OK]
             Order result  = kiteConnect.modifyOrder(orderId, p, Constants.VARIETY_REGULAR);
             log.info("Qty modified orderId={} newQty={}", orderId, newQty);
             // JAR-VERIFIED: Order.orderId is String
@@ -125,7 +125,7 @@ public class ZerodhaOrderClient {
 
     public boolean cancelOrder(String orderId) {
         try {
-            // JAR-VERIFIED: cancelOrder(String, String) → Order
+            // JAR-VERIFIED: cancelOrder(String, String) -> Order
             kiteConnect.cancelOrder(orderId, Constants.VARIETY_REGULAR);
             log.info("Order cancelled: {}", orderId);
             return true;
@@ -138,7 +138,7 @@ public class ZerodhaOrderClient {
         }
     }
 
-    // ── Query methods ─────────────────────────────────────────────────────
+    // -- Query methods -----------------------------------------------------
 
     public List<Order> getAllOrders() {
         try { return kiteConnect.getOrders(); }
@@ -159,7 +159,7 @@ public class ZerodhaOrderClient {
     }
 
     /**
-     * JAR-VERIFIED: getPositions() → Map<String, List<Position>>
+     * JAR-VERIFIED: getPositions() -> Map<String, List<Position>>
      * Keys are "day" and "net" (lowercase, confirmed).
      */
     public List<Position> getDayPositions() {
@@ -185,12 +185,12 @@ public class ZerodhaOrderClient {
     }
 
     /**
-     * JAR-VERIFIED: Margin.available.cash → String
+     * JAR-VERIFIED: Margin.available.cash -> String
      * Must parse with Double.parseDouble(m.available.cash)
      */
     public double getAvailableCash() {
         try {
-            // JAR-VERIFIED: getMargins(String) → Margin
+            // JAR-VERIFIED: getMargins(String) -> Margin
             // Constants.MARGIN_EQUITY = "equity" (verified)
             Margin m = kiteConnect.getMargins("equity");
 
@@ -199,7 +199,7 @@ public class ZerodhaOrderClient {
                 return 0.0;
             }
 
-            // JAR-VERIFIED: Margin.Available.cash is String — must parse
+            // JAR-VERIFIED: Margin.Available.cash is String - must parse
             return Double.parseDouble(m.available.cash);
 
         } catch (KiteException e) {
@@ -215,7 +215,7 @@ public class ZerodhaOrderClient {
     }
 
     /**
-     * Margin calculation stub — always returns sufficient.
+     * Margin calculation stub - always returns sufficient.
      * Zerodha rejects at execution if short.
      */
     public MarginResult calculateMargin(String symbol, int qty, double price) {
@@ -227,33 +227,51 @@ public class ZerodhaOrderClient {
                                double required, double available,
                                boolean sufficient) {}
 
-    // ── Helpers ───────────────────────────────────────────────────────────
+    // -- Helpers -----------------------------------------------------------
 
     /**
      * Build OrderParams.
      * JAR-VERIFIED field types:
-     *   quantity     → Integer  (autoboxed from int)
-     *   price        → Double   (autoboxed from double; 0.0 for market orders)
-     *   triggerPrice → Double   (autoboxed from double; 0.0 for limit orders)
+     *   quantity     -> Integer  (autoboxed from int)
+     *   price        -> Double   (autoboxed from double; 0.0 for market orders)
+     *   triggerPrice -> Double   (autoboxed from double; 0.0 for limit orders)
      */
     private OrderParams build(String symbol, String txType, int qty,
                               String type, double price, double trigger) {
         OrderParams p      = new OrderParams();
         p.tradingsymbol    = symbol;
-        p.exchange         = Constants.EXCHANGE_NSE;     // "NSE" ✓
+        p.exchange         = Constants.EXCHANGE_NSE;     // "NSE" [OK]
         p.transactionType  = txType;
-        p.quantity         = qty;                        // int → Integer autobox ✓
+        p.quantity         = qty;                        // int -> Integer autobox [OK]
         p.orderType        = type;
-        p.price            = price;                      // double → Double autobox ✓
-        p.triggerPrice     = trigger;                    // double → Double autobox ✓
-        p.product          = Constants.PRODUCT_MIS;      // "MIS" ✓
-        p.validity         = Constants.VALIDITY_DAY;     // "DAY" ✓
+        p.price            = price;                      // double -> Double autobox [OK]
+        p.triggerPrice     = trigger;                    // double -> Double autobox [OK]
+        p.product          = Constants.PRODUCT_MIS;      // "MIS" [OK]
+        p.validity         = Constants.VALIDITY_DAY;     // "DAY" [OK]
+        // FIX (confirmed real, not a guess - verified directly from
+        // Zerodha's own Kite Connect documentation and developer forum):
+        // per SEBI's retail algo regulations, MARKET and SL-M orders
+        // placed via the API now REQUIRE a non-zero market_protection
+        // value, or Zerodha rejects them with 400: "Market orders
+        // without market protection are not allowed via API." This
+        // affects AI/News's real order placement identically to how it
+        // was found affecting Swing's - same root cause, same fix
+        // needed here. -1 applies Zerodha's own automatic protection
+        // range (their documented recommended default) rather than us
+        // guessing a fixed percentage - preserves genuine market-order
+        // fill-immediately behavior while satisfying the new mandatory
+        // requirement. Deliberately NOT set for LIMIT orders, since
+        // Zerodha's docs confirm market_protection only applies to
+        // MARKET and SL-M order types.
+        if (Constants.ORDER_TYPE_MARKET.equals(type) || Constants.ORDER_TYPE_SLM.equals(type)) {
+            p.marketProtection = -1;
+        }
         return p;
     }
 
     private String doPlace(OrderParams p, String variety) {
         try {
-            // JAR-VERIFIED: placeOrder(OrderParams, String) → Order
+            // JAR-VERIFIED: placeOrder(OrderParams, String) -> Order
             Order order = kiteConnect.placeOrder(p, variety);
             log.info("[ORDER] PLACED: symbol={} tx={} type={} qty={} id={}",
                     p.tradingsymbol, p.transactionType,
