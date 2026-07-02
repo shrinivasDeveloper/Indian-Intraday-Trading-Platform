@@ -63,6 +63,21 @@ zerodha:
     max-reconnects: 20
     reconnect-delay-ms: 5000
 
+# FIX: Zerodha now requires order-placement requests to originate from a
+# whitelisted, STABLE IP ("403: No IPs configured for this app"). Railway's
+# default outbound IP is dynamic. Routes KiteConnect through a static-IP
+# proxy (e.g. staticip.in) instead - that proxy's IP is what gets
+# whitelisted on Kite Developer Console, not Railway's own IP.
+# Disabled by default (proxyEnabled=false) - zero effect on local
+# development, where your own IP is already stable and whitelisted.
+kite:
+  proxy:
+    enabled: ${KITE_PROXY_ENABLED:false}
+    host: ${KITE_PROXY_HOST:}
+    port: ${KITE_PROXY_PORT:0}
+    username: ${KITE_PROXY_USERNAME:}
+    password: ${KITE_PROXY_PASSWORD:}
+
 # ================================
 # TRADING CORE
 # ================================
@@ -241,7 +256,7 @@ notifications:
 # SERVER
 # ================================
 server:
-  port: 8081
+  port: ${PORT:8082}
 
 # ================================
 # ACTUATOR

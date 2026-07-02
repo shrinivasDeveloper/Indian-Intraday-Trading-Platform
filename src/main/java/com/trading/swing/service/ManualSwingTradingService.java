@@ -9,6 +9,7 @@ import com.trading.swing.dto.InstrumentSearchResult;
 import com.trading.swing.dto.SwingTradeResponse;
 import com.trading.swing.repository.ManualSwingTradeRepository;
 import com.zerodhatech.kiteconnect.KiteConnect;
+import com.zerodhatech.kiteconnect.kitehttp.exceptions.KiteException;
 import com.zerodhatech.models.Instrument;
 import com.zerodhatech.models.Order;
 import com.zerodhatech.models.Quote;
@@ -17,9 +18,11 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicReference;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.*;
@@ -78,6 +81,23 @@ public class ManualSwingTradingService {
      *  so that log line fires exactly once per trade, not every tick. */
     private final Set<String> monitoringStartedLogged = ConcurrentHashMap.newKeySet();
 
+    // FIX (per explicit request: "add in search bar all the stocks for
+    // manual trading"). instrumentCache.getEquityInstruments() is
+    // confirmed NSE-only (built from a filter in InstrumentCacheService
+    // that excludes BSE entirely) - a stock listed only on BSE could
+    // never be found by manual search before this fix. This is a
+    // dedicated, self-contained full NSE+BSE cache used ONLY for manual
+    // instrument search - deliberately NOT touching or widening the
+    // shared InstrumentCacheService, since that cache backs AI/News
+    // sector classification and other systems that are correctly scoped
+    // to NSE only. Refreshed once daily (new instrument listings/
+    // delistings are rare intraday events); auto-trade's own universe
+    // fetch in AutoStockSelectionEngine already covers full NSE+BSE
+    // separately and is unaffected by this.
+    private final AtomicReference<Map<String, Instrument>> fullUniverseCache =
+            new AtomicReference<>(Collections.emptyMap());
+    private volatile Instant fullUniverseCacheBuiltAt = Instant.EPOCH;
+
     public ManualSwingTradingService(ManualSwingTradeRepository repo,
                                      ManualSwingOrderClient orderClient,
                                      InstrumentCacheService instrumentCache,
@@ -116,7 +136,7 @@ public class ManualSwingTradingService {
         if (query == null || query.isBlank()) return List.of();
         String q = query.trim().toUpperCase();
 
-        List<Instrument> matches = instrumentCache.getEquityInstruments().values().stream()
+        List<Instrument> matches = getFullUniverse().values().stream()
                 .filter(i -> i.getTradingsymbol().toUpperCase().contains(q)
                         || (i.getName() != null && i.getName().toUpperCase().contains(q)))
                 .limit(50) // keep the picker responsive
@@ -144,6 +164,65 @@ public class ManualSwingTradingService {
                             i.getTradingsymbol(), i.getName(), i.getExchange(), ltp, changePct);
                 })
                 .collect(Collectors.toList());
+    }
+
+    // FIX (found during production readiness cross-check): the initial
+    // version had no synchronization and no failure backoff. Without
+    // these, concurrent search requests hitting a stale/empty cache
+    // simultaneously would each fire duplicate kiteConnect.getInstruments()
+    // calls, and a single transient failure (network blip, auth token not
+    // ready yet at startup) would leave the cache permanently empty,
+    // causing EVERY subsequent search keystroke for the rest of the day to
+    // retry the same failing call with zero backoff - a real resource-
+    // hammering risk under load, not just a theoretical one.
+    private volatile Instant lastUniverseFetchAttempt = Instant.EPOCH;
+    private static final long UNIVERSE_FAILURE_COOLDOWN_SECONDS = 300; // 5 min
+
+    /**
+     * Lazily builds/refreshes the full NSE+BSE search universe, once
+     * per day. Falls back to serving the existing (possibly stale)
+     * cache on fetch failure, rather than returning an empty search
+     * result for the rest of the day on a single transient error.
+     * Synchronized to prevent concurrent duplicate Kite API calls when
+     * multiple search requests arrive while the cache is stale/empty.
+     */
+    private synchronized Map<String, Instrument> getFullUniverse() {
+        boolean needsRefresh = fullUniverseCache.get().isEmpty()
+                || Instant.now().isAfter(fullUniverseCacheBuiltAt.plusSeconds(86400));
+        boolean inFailureCooldown = Instant.now().isBefore(
+                lastUniverseFetchAttempt.plusSeconds(UNIVERSE_FAILURE_COOLDOWN_SECONDS));
+
+        if (needsRefresh && !inFailureCooldown) {
+            lastUniverseFetchAttempt = Instant.now();
+            try {
+                Map<String, Instrument> fresh = new LinkedHashMap<>();
+                for (Instrument i : kiteConnect.getInstruments("NSE")) {
+                    if (i.getTradingsymbol() != null
+                            && ("EQ".equals(i.getInstrument_type()) || "BE".equals(i.getInstrument_type()))) {
+                        fresh.putIfAbsent(i.getTradingsymbol().toUpperCase(), i);
+                    }
+                }
+                int nseCount = fresh.size();
+                for (Instrument i : kiteConnect.getInstruments("BSE")) {
+                    if (i.getTradingsymbol() != null
+                            && ("EQ".equals(i.getInstrument_type()) || "BE".equals(i.getInstrument_type()))) {
+                        fresh.putIfAbsent(i.getTradingsymbol().toUpperCase(), i);
+                    }
+                }
+                fullUniverseCache.set(fresh);
+                fullUniverseCacheBuiltAt = Instant.now();
+                log.info("[SWING] Full search universe refreshed: {} NSE + {} BSE-only = {} " +
+                                "unique tradable symbols now searchable", nseCount,
+                        fresh.size() - nseCount, fresh.size());
+            } catch (KiteException | IOException e) {
+                log.warn("[SWING] Failed to refresh full search universe - serving existing " +
+                                "cache ({} symbols) and backing off for {}s rather than retrying on " +
+                                "every subsequent search: {}",
+                        fullUniverseCache.get().size(), UNIVERSE_FAILURE_COOLDOWN_SECONDS,
+                        e.getMessage());
+            }
+        }
+        return fullUniverseCache.get();
     }
 
     private Map<String, Quote> fetchQuotes(List<Instrument> instruments) {
@@ -256,12 +335,17 @@ public class ManualSwingTradingService {
 
         if (preResolvedCompanyName != null) {
             // AUTO path - already resolved by the selection engine against
-            // the full NSE+BSE universe, skip the NSE-only cache entirely.
+            // the full NSE+BSE universe, skip the cache entirely.
             companyName = preResolvedCompanyName;
             exchange = preResolvedExchange != null ? preResolvedExchange : req.exchange();
         } else {
-            Instrument inst = instrumentCache.getEquityInstruments()
-                    .get(req.symbol().toUpperCase());
+            // FIX: was instrumentCache.getEquityInstruments() - NSE-only,
+            // confirmed. A BSE-only stock found via the now-fixed full-
+            // universe searchInstruments() would fail here with "Unknown
+            // or non-tradable symbol" without this matching fix - search
+            // and buy must use the same universe or finding a stock via
+            // search would be misleading (found, but can't actually buy it).
+            Instrument inst = getFullUniverse().get(req.symbol().toUpperCase());
             if (inst == null) {
                 throw new IllegalArgumentException("Unknown or non-tradable symbol: " + req.symbol());
             }

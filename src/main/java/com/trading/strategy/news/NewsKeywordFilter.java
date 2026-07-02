@@ -9,22 +9,22 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * NewsKeywordFilter — stateless keyword-based article classifier.
+ * NewsKeywordFilter - stateless keyword-based article classifier.
  *
- * ─────────────────────────────────────────────────────────────────────────────
+ * -----------------------------------------------------------------------------
  * RESPONSIBILITIES:
  *   1. Determine if an article is relevant to Indian equity markets
  *   2. Classify into NewsCategory based on keyword presence
  *   3. Assign preliminary Sentiment (POSITIVE/NEGATIVE/NEUTRAL)
  *   4. Extract potential NSE symbols from headline text
- *   5. Compute keywordWeight (0–100) based on keyword impact tier
- * ─────────────────────────────────────────────────────────────────────────────
+ *   5. Compute keywordWeight (0-100) based on keyword impact tier
+ * -----------------------------------------------------------------------------
  */
 @Component
 @Slf4j
 public class NewsKeywordFilter {
 
-    // ── Tier 1: Highest-impact keywords (weight 90–100) ───────────────────────
+    // -- Tier 1: Highest-impact keywords (weight 90-100) -----------------------
     private static final Set<String> TIER1_EARNINGS = Set.of(
             "quarterly results", "q1 results", "q2 results", "q3 results", "q4 results",
             "annual results", "earnings", "profit surge", "net profit", "revenue beat",
@@ -39,7 +39,7 @@ public class NewsKeywordFilter {
             "acquires", "acquired by", "merger approved", "board approves merger"
     );
 
-    // ── NEW: Breaking news — sudden company-specific events needing urgent ────
+    // -- NEW: Breaking news - sudden company-specific events needing urgent ----
     // attention. Previously these fell through to OTHER (basePriority 20) since
     // BREAKING_NEWS (basePriority 50) was defined in the enum but never assigned
     // by classify(). This restores the category's intended use.
@@ -59,7 +59,7 @@ public class NewsKeywordFilter {
             "trading halted", "circuit breaker hit", "stock halted"
     );
 
-    // ── Tier 2: High-impact macro/policy keywords (weight 70–89) ─────────────
+    // -- Tier 2: High-impact macro/policy keywords (weight 70-89) -------------
     private static final Set<String> TIER2_RBI = Set.of(
             "rbi", "repo rate", "reverse repo", "crr", "slr", "monetary policy",
             "mpc", "rbi governor", "rate cut", "rate hike", "liquidity",
@@ -86,7 +86,7 @@ public class NewsKeywordFilter {
             "opec", "us jobs", "us inflation", "usd inr"
     );
 
-    // ── Tier 3: Sector-specific keywords (weight 50–69) ───────────────────────
+    // -- Tier 3: Sector-specific keywords (weight 50-69) -----------------------
     private static final Map<String, Set<String>> SECTOR_KEYWORDS = new LinkedHashMap<>();
     static {
         SECTOR_KEYWORDS.put("Banking & Finance", Set.of(
@@ -131,19 +131,19 @@ public class NewsKeywordFilter {
         ));
     }
 
-    // ── Positive / Negative sentiment keywords ────────────────────────────────
+    // -- Positive / Negative sentiment keywords --------------------------------
     private static final Set<String> POSITIVE_WORDS = Set.of(
             "surge", "soar", "jump", "rally", "gain", "profit", "beat", "record",
             "high", "strong", "growth", "rise", "positive", "upgrade", "bullish",
             "outperform", "buy", "dividend", "bonus", "win", "award", "approval",
             "contract win", "new order", "expansion", "launch", "partnership",
             "doubles", "triples", "exceeds", "milestone", "breakthrough", "recovery",
-            // Legal / regulatory outcome words — ADDED (covers tax/court/SEBI orders)
+            // Legal / regulatory outcome words - ADDED (covers tax/court/SEBI orders)
             "favourable", "favorable", "favour of", "favor of", "relief",
             "exonerated", "acquitted", "quashed", "cleared of", "sanctioned",
             "approved by", "resolution plan approved", "no penalty", "withdrawn case",
             "settled in", "ruled in favour", "ruled in favor",
-            // Corporate events — ADDED (orders, stake, FDA, ratings, capacity)
+            // Corporate events - ADDED (orders, stake, FDA, ratings, capacity)
             "wins order", "receives order", "order worth",
             "promoter increases stake", "promoter increases holding",
             "buyback announced", "special dividend", "bonus issue", "stock split",
@@ -157,20 +157,20 @@ public class NewsKeywordFilter {
             "risk", "problem", "issue", "delay", "penalty", "fine", "fraud",
             "scam", "recall", "ban", "halt", "suspend", "withdraw", "disappoint",
             "widens", "narrows to loss", "slump", "crash", "plunge", "probe",
-            // Legal / regulatory outcome words — ADDED (covers tax/court/SEBI orders)
+            // Legal / regulatory outcome words - ADDED (covers tax/court/SEBI orders)
             "unfavourable", "unfavorable", "against the company", "rejected",
             "raid", "raided", "seized", "search and seizure", "insolvency",
             "bankruptcy", "npa rises", "pledge shares", "promoter pledge",
             "qualified opinion", "demand notice", "show cause notice",
             "litigation", "default on", "defaulted", "irregularities found",
-            // Corporate events — ADDED (stake reduction, audits, NCLT, ratings)
+            // Corporate events - ADDED (stake reduction, audits, NCLT, ratings)
             "promoter reduces stake", "promoter reduces holding",
             "forensic audit", "fraud detected", "nclt admits",
             "insolvency proceedings", "default on payment",
             "credit rating downgraded"
     );
 
-    // NSE symbol pattern — 2-10 uppercase letters (common NSE symbol format)
+    // NSE symbol pattern - 2-10 uppercase letters (common NSE symbol format)
     private static final Pattern SYMBOL_PATTERN = Pattern.compile("\\b([A-Z]{2,10})\\b");
 
     // Common false-positive words that look like symbols but aren't
@@ -178,7 +178,7 @@ public class NewsKeywordFilter {
             // Exchange / Regulatory
             "THE", "AND", "FOR", "NSE", "BSE", "RBI", "SEBI", "IRDAI", "GST",
             "NCLT", "NCLAT", "SAT", "NSDL", "CDSL", "MCX", "NCDEX",
-            // Corporate events — these match NSE symbols like CLEAN, BONUS
+            // Corporate events - these match NSE symbols like CLEAN, BONUS
             "DIVIDEND", "BONUS", "RIGHTS", "BUYBACK", "MERGER", "ACQUISITION",
             "SCHEME", "DEMERGER", "SPLIT", "RECORD", "CLOSURE", "NOTICE",
             "HEARING", "ORDER", "APPEAL", "PETITION", "WRIT", "SUIT",
@@ -216,27 +216,27 @@ public class NewsKeywordFilter {
             // These are valid NSE tickers BUT appear too often in generic text
             // Strategy 1 (direct ticker scan) still catches them in headlines
             // Strategy 3 (company name map) handles them via full name
-            "ACC",   // "acc to sources", "acc to reports" — too common
-            "CUB",   // "cub" as in bear cub — rare but risky
-            "FACT",  // "fact of the matter", "in fact" — very common
+            "ACC",   // "acc to sources", "acc to reports" - too common
+            "CUB",   // "cub" as in bear cub - rare but risky
+            "FACT",  // "fact of the matter", "in fact" - very common
             "IOB",   // "iob" rarely appears standalone in news text
             "NLC",   // generic abbreviation risk
             "PEL",   // rarely standalone in news
-            "SAIL",  // "set sail", "sail through" — common in news
+            "SAIL",  // "set sail", "sail through" - common in news
             "UBL"    // rarely standalone
-            // NOTE: ITC, DLF, MRF, SRF, PFC, MTAR kept — they appear
+            // NOTE: ITC, DLF, MRF, SRF, PFC, MTAR kept - they appear
             // as exact tickers in BSE headlines and are worth matching
     );
 
 
-    // ── Company name → NSE symbol lookup table ────────────────────────────────
+    // -- Company name -> NSE symbol lookup table --------------------------------
     // Covers all major Nifty500 stocks with their common news name variations.
     // Keys are LOWERCASE for case-insensitive matching.
     // Built from: BSE full names, common abbreviations, brand names used in press.
     private static final Map<String, String> COMPANY_NAME_MAP;
     static {
         Map<String, String> m = new LinkedHashMap<>();
-        // Large caps — most likely to appear in news
+        // Large caps - most likely to appear in news
         m.put("reliance industries",    "RELIANCE");
         m.put("reliance industry",      "RELIANCE");
         m.put("tata consultancy",       "TCS");
@@ -324,9 +324,9 @@ public class NewsKeywordFilter {
         m.put("vedanta",                "VEDL");
         m.put("jsw steel",              "JSWSTEEL");
         m.put("steel authority",        "SAIL");
-        // REMOVED: m.put("sail", "SAIL") — matching is substring-based, not
+        // REMOVED: m.put("sail", "SAIL") - matching is substring-based, not
         // word-boundary. "sail" falsely matches inside "sailing", "assail",
-        // "unassailable" — real words that can appear in unrelated news.
+        // "unassailable" - real words that can appear in unrelated news.
         // "steel authority" (above) is the safe, unambiguous alternative;
         // Strategy 1 also independently catches a literal "SAIL" ticker
         // mention regardless of this removal.
@@ -346,8 +346,8 @@ public class NewsKeywordFilter {
         m.put("pidilite",               "PIDILITIND");
         m.put("berger paints",          "BERGEPAINT");
         m.put("ambuja cements",         "AMBUJACEM");
-        // REMOVED: m.put("acc", "ACC") — substring match falsely matches
-        // inside "according", "accept", "account", "access", "accurate" —
+        // REMOVED: m.put("acc", "ACC") - substring match falsely matches
+        // inside "according", "accept", "account", "access", "accurate" -
         // all extremely common in business prose. Strategy 1 (direct ticker
         // scan) independently catches a literal "ACC" mention in headlines,
         // so no real coverage is lost by removing this risky key.
@@ -384,7 +384,7 @@ public class NewsKeywordFilter {
         m.put("power finance",          "PFC");
         m.put("pfc",                    "PFC");
         m.put("ireda",                  "IREDA");
-        // ── Missing mappings — identified by systematic audit ─────────────────
+        // -- Missing mappings - identified by systematic audit -----------------
         // Automobiles
         m.put("ashok leyland",          "ASHOKLEY");
         m.put("ashokleyland",           "ASHOKLEY");
@@ -457,7 +457,7 @@ public class NewsKeywordFilter {
         m.put("rail vikas nigam",       "RVNL");
         m.put("hg infra",               "HGINFRA");
         m.put("pnc infratech",          "PNCINFRA");
-        // ── High-liquidity coverage expansion — added to bring all 532
+        // -- High-liquidity coverage expansion - added to bring all 532
         // HIGH_LIQUIDITY_SYMBOLS up to name-recognition coverage, not just
         // ticker-direct matching. Verified against NSE listings; a small
         // number of genuinely uncertain/very-recent-listing symbols were
@@ -857,9 +857,9 @@ public class NewsKeywordFilter {
         m.put("coromandel international", "COROMANDEL");
         m.put("paradeep phosphates", "PARADEEP");
         m.put("rashtriya chemicals", "RCF");
-        // REMOVED: m.put("fact", "FACT") — substring match falsely matches
+        // REMOVED: m.put("fact", "FACT") - substring match falsely matches
         // inside "manufacture", "manufacturing", "manufacturer",
-        // "satisfaction" — all extremely common in Indian business/
+        // "satisfaction" - all extremely common in Indian business/
         // industrial news. The full name below is the safe alternative.
         m.put("fertilisers and chemicals travancore", "FACT");
         m.put("gail india", "GAIL");
@@ -1166,7 +1166,7 @@ public class NewsKeywordFilter {
         m.put("tata teleservices maharashtra", "TTML");
         m.put("zf commercial vehicle control systems", "ZFCVINDIA");
         m.put("piramal enterprises", "PIRAMALFIN");
-        // ── Cross-checked against updated Zerodha-verified symbol list ────────
+        // -- Cross-checked against updated Zerodha-verified symbol list --------
         m.put("biocon", "BIOCON");
         m.put("biocon limited", "BIOCON");
         m.put("ccl products", "CCL");
@@ -1192,18 +1192,18 @@ public class NewsKeywordFilter {
     }
 
     /**
-     * High-liquidity symbol universe — 532 Zerodha-verified, actively
+     * High-liquidity symbol universe - 532 Zerodha-verified, actively
      * traded Nifty500-class stocks. Used as an ADDITIONAL gate inside
-     * extractSymbols() below — on top of the existing knownSymbols
+     * extractSymbols() below - on top of the existing knownSymbols
      * parameter (the live NSE instrument cache, passed in by
      * NewsIngestionService and unchanged), a symbol must ALSO be in this
      * curated list to be accepted. This narrows matching to genuinely
      * worth-trading names without weakening the existing knownSymbols
-     * check — a delisted/suspended symbol is still correctly excluded
+     * check - a delisted/suspended symbol is still correctly excluded
      * even if present in this list.
      *
      * Built via LinkedHashSet + Collections.unmodifiableSet rather than
-     * Set.of(...) — Set.of() throws IllegalArgumentException at startup
+     * Set.of(...) - Set.of() throws IllegalArgumentException at startup
      * if the literal list contains even one duplicate; this construction
      * is duplicate-tolerant by design, so a future edit to this list
      * can never crash the application.
@@ -1284,7 +1284,7 @@ public class NewsKeywordFilter {
         HIGH_LIQUIDITY_SYMBOLS = Collections.unmodifiableSet(s);
     }
 
-    // ── Public API ────────────────────────────────────────────────────────────
+    // -- Public API ------------------------------------------------------------
 
     /**
      * Returns true if the article is relevant to Indian equity markets.
@@ -1302,7 +1302,7 @@ public class NewsKeywordFilter {
                         combined.contains("equity") || combined.contains("rupee") ||
                         combined.contains("rbi") || combined.contains("sebi") ||
                         // Global keywords that directly move Indian markets
-                        // Added for Reuters/RBI sources — FED, crude oil, dollar
+                        // Added for Reuters/RBI sources - FED, crude oil, dollar
                         // always impact NSE through FII flows and commodity prices
                         combined.contains("federal reserve") || combined.contains("fed rate") ||
                         combined.contains("crude oil") || combined.contains("brent crude") ||
@@ -1369,7 +1369,7 @@ public class NewsKeywordFilter {
     }
 
     /**
-     * Compute keyword impact weight (0–100) based on tier and count.
+     * Compute keyword impact weight (0-100) based on tier and count.
      */
     public int computeKeywordWeight(String headline, String description,
                                     NewsItem.NewsCategory category) {
@@ -1392,7 +1392,7 @@ public class NewsKeywordFilter {
      * Conservative: only return symbols that look like real NSE symbols.
      *
      * NOTE: every match in all 3 strategies below now also requires
-     * HIGH_LIQUIDITY_SYMBOLS.contains(...) — an additional gate on top of
+     * HIGH_LIQUIDITY_SYMBOLS.contains(...) - an additional gate on top of
      * the existing knownSymbols check, narrowing matches to genuinely
      * worth-trading names. knownSymbols itself (passed in by
      * NewsIngestionService, sourced from the live NSE instrument cache)
@@ -1401,6 +1401,30 @@ public class NewsKeywordFilter {
     public List<String> extractSymbols(String headline, String description,
                                        Set<String> knownSymbols) {
         String combined = headline + " " + description;
+
+        // FIX (found via dashboard report: MRPL's routine board-meeting
+        // filing notice was showing up as a "BSE" trade signal instead of
+        // "MRPL"). Confirmed real, not a data problem: BSE Limited (the
+        // exchange operator) is ITSELF a genuine, valid NSE-listed stock
+        // trading under ticker "BSE" - so when a completely unrelated
+        // company's routine filing says "...has informed BSE that the
+        // meeting of the Board...", the word "BSE" there refers to which
+        // EXCHANGE was notified, not to BSE Limited's own stock, but the
+        // extractor was matching the literal word regardless of context.
+        // Covers the common real boilerplate variants seen in actual NSE/
+        // BSE corporate filings (informed/notified/reported to, past and
+        // present tense, "the Company" prefix optional) so this closes
+        // the actual bug rather than one specific wording. Genuine BSE
+        // Limited news (e.g. "BSE Limited reported record trading
+        // volumes") is unaffected - only these specific filing-notice
+        // phrasings are stripped, not every mention of the word.
+        combined = combined.replaceAll(
+                "(?i)\\b(has|have)\\s+(informed|notified)\\s+(BSE|NSE)\\s+that\\b",
+                "$1 $2 the exchange that");
+        combined = combined.replaceAll(
+                "(?i)\\b(reported|filed)\\s+(to|with)\\s+(BSE|NSE)\\b",
+                "$1 $2 the exchange");
+
         Set<String> found = new LinkedHashSet<>();
 
         // Strategy 1: Look for known symbols directly
@@ -1429,8 +1453,8 @@ public class NewsKeywordFilter {
             }
         }
 
-        // Strategy 3: Company name → NSE symbol mapping table
-        // Handles "HDFC Bank" → "HDFCBANK", "Infosys" → "INFY" etc.
+        // Strategy 3: Company name -> NSE symbol mapping table
+        // Handles "HDFC Bank" -> "HDFCBANK", "Infosys" -> "INFY" etc.
         // BSE/RSS headlines use company names, not NSE tickers.
         String lowerCombined = combined.toLowerCase();
         for (Map.Entry<String, String> entry : COMPANY_NAME_MAP.entrySet()) {
@@ -1460,7 +1484,7 @@ public class NewsKeywordFilter {
         return sectors;
     }
 
-    // ── Private helpers ────────────────────────────────────────────────────────
+    // -- Private helpers --------------------------------------------------------
 
     private boolean matchesAny(String text, Set<String> keywords) {
         return keywords.stream().anyMatch(text::contains);

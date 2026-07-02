@@ -109,15 +109,17 @@ public class AutoStockSelectionEngine {
         Map<String, Instrument> deduplicated = new java.util.LinkedHashMap<>();
         for (Instrument i : nse) {
             if (i.getTradingsymbol() != null)
-                deduplicated.put(i.getTradingsymbol().toUpperCase(), i);
+                deduplicated.put(SymbolNormalizer.normalize(i.getTradingsymbol()), i);
         }
         int nseCount = deduplicated.size();
         int bseAdded = 0;
         for (Instrument i : bse) {
-            if (i.getTradingsymbol() != null &&
-                    !deduplicated.containsKey(i.getTradingsymbol().toUpperCase())) {
-                deduplicated.put(i.getTradingsymbol().toUpperCase(), i);
-                bseAdded++;
+            if (i.getTradingsymbol() != null) {
+                String norm = SymbolNormalizer.normalize(i.getTradingsymbol());
+                if (!deduplicated.containsKey(norm)) {
+                    deduplicated.put(norm, i);
+                    bseAdded++;
+                }
             }
         }
         List<Instrument> combined = new ArrayList<>(deduplicated.values());
@@ -150,7 +152,12 @@ public class AutoStockSelectionEngine {
         Map<String, Instrument> instrumentBySymbol = new HashMap<>();
         for (Instrument i : universe) {
             if (i.getTradingsymbol() != null) {
-                instrumentBySymbol.putIfAbsent(i.getTradingsymbol().toUpperCase(), i);
+                // FIX: MUST use the same normalization as
+                // SectorPerformanceService.classifyAll() - sector.symbolsInSector()
+                // now returns normalized symbols (suffix-stripped), so this map's
+                // keys must match exactly or every lookup below silently fails.
+                instrumentBySymbol.putIfAbsent(
+                        SymbolNormalizer.normalize(i.getTradingsymbol()), i);
             }
         }
 
