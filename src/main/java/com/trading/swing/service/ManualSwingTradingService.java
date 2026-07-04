@@ -63,6 +63,47 @@ public class ManualSwingTradingService {
     private final MarketDataService marketDataService;
     private final KiteConnect kiteConnect;
     private final ManualSwingConfig config;
+    private final com.trading.swing.auto.repository.DailyBarRepository dailyBarRepo;
+
+    // FIX (per explicit request: "small cap stocks don't trigger order
+    // ... how can we fill that gap"). A genuinely illiquid stock has no
+    // real counter-party to fill against - no amount of code makes it
+    // trade faster, since there's simply nobody on the other side. What
+    // CAN be fixed: catching this BEFORE wasting a real order attempt
+    // and the full 30-second fill-confirmation poll, using volume data
+    // this system already has from bhavcopy. Purely advisory for manual
+    // trades (warns, does not block - your call remains final); a real,
+    // additional filter for auto-selection (skips a candidate that's
+    // unlikely to fill at all, before ever reaching Rule 4).
+    private static final long MIN_AVG_DAILY_VOLUME = 10_000;
+
+    /**
+     * Checks the last 5 trading days' average volume from real bhavcopy
+     * data. Returns null if genuinely liquid enough or if no history is
+     * available (fails open - never blocks a trade purely due to a data
+     * gap); returns a human-readable warning string if the stock's
+     * recent volume is low enough that a fill is genuinely uncertain.
+     */
+    private String checkLiquidityWarning(String symbol) {
+        try {
+            var bars = dailyBarRepo.findBySymbol(symbol, LocalDate.now().minusDays(10));
+            if (bars.size() < 3) return null; // not enough history to judge - fail open
+            long avgVolume = (long) bars.stream()
+                    .skip(Math.max(0, bars.size() - 5))
+                    .mapToLong(b -> b.volume())
+                    .average().orElse(0);
+            if (avgVolume < MIN_AVG_DAILY_VOLUME) {
+                return String.format("LOW LIQUIDITY WARNING: %s averaged only %,d shares/day " +
+                                "over the last 5 trading days (threshold: %,d) - your order may sit " +
+                                "unfilled or fill at a poor price. Proceeding is your call.",
+                        symbol, avgVolume, MIN_AVG_DAILY_VOLUME);
+            }
+        } catch (Exception e) {
+            log.debug("[SWING] Liquidity check failed for {} (non-fatal, proceeding): {}",
+                    symbol, e.getMessage());
+        }
+        return null; // liquid enough, or couldn't determine - fail open either way
+    }
 
     private LocalTime forceExitTime;
 
@@ -103,12 +144,14 @@ public class ManualSwingTradingService {
                                      InstrumentCacheService instrumentCache,
                                      MarketDataService marketDataService,
                                      KiteConnect kiteConnect,
-                                     ManualSwingConfig config) {
+                                     ManualSwingConfig config,
+                                     com.trading.swing.auto.repository.DailyBarRepository dailyBarRepo) {
         this.repo = repo;
         this.orderClient = orderClient;
         this.instrumentCache = instrumentCache;
         this.marketDataService = marketDataService;
         this.kiteConnect = kiteConnect;
+        this.dailyBarRepo = dailyBarRepo;
         this.config = config;
     }
 
@@ -301,6 +344,16 @@ public class ManualSwingTradingService {
         log.info("[SWING] {} BUY initiated: symbol={} exchange={} qty={}",
                 source, req.symbol(), req.exchange(), req.quantity());
 
+        // FIX (per explicit request: fill the small-cap illiquidity gap).
+        // Advisory only - logged clearly so you see it immediately, but
+        // deliberately does NOT block or throw. Catches the case BEFORE
+        // wasting a real order attempt + 30s fill-confirmation poll on a
+        // stock unlikely to fill.
+        String liquidityWarning = checkLiquidityWarning(req.symbol());
+        if (liquidityWarning != null) {
+            log.warn("[SWING] {}", liquidityWarning);
+        }
+
         if (req.quantity() <= 0) {
             throw new IllegalArgumentException("Quantity must be positive");
         }
@@ -364,7 +417,21 @@ public class ManualSwingTradingService {
         }
 
         // -- Wait for fill confirmation - never save a trade until confirmed --
-        FillResult fill = pollForFill(buyOrderId);
+        FillResult fill;
+        try {
+            fill = pollForFill(buyOrderId);
+        } catch (OrderRejectedException rejected) {
+            // FIX: definitive rejection (e.g. insufficient margin) - no
+            // position was ever opened, nothing ambiguous, no duplicate-
+            // position risk. Clear, accurate message with Zerodha's own
+            // reason, instead of the misleading "check Zerodha directly
+            // to avoid a duplicate position" warning this used to show.
+            log.error("[SWING] BUY order {} for {} was REJECTED by broker: {}",
+                    buyOrderId, req.symbol(), rejected.getMessage());
+            throw new ManualSwingOrderClient.ManualSwingOrderException(
+                    "Buy order rejected by Zerodha: " + rejected.getMessage() +
+                            ". No position was opened - safe to retry once the issue is resolved.");
+        }
         if (fill == null) {
             log.error("[SWING] BUY order {} for {} did not confirm filled within poll window - " +
                     "NOT saving a trade record", buyOrderId, req.symbol());
@@ -442,6 +509,21 @@ public class ManualSwingTradingService {
 
     private record FillResult(BigDecimal avgPrice, int filledQty) {}
 
+    /**
+     * Thrown when the broker gave a CLEAR, definitive REJECTED/CANCELLED
+     * status - as opposed to a genuinely ambiguous poll-timeout (order
+     * still PENDING after all attempts). FIX (found via direct user
+     * report: an insufficient-margin rejection was showing the same
+     * "check Zerodha directly to avoid a duplicate position" warning as
+     * a genuinely uncertain fill - misleading, since a REJECTED order
+     * definitively means NO position was ever opened, nothing to check
+     * for duplicates. Carries the real reason string from Zerodha
+     * (e.g. "insufficient margin") so the UI can show the actual cause.
+     */
+    static final class OrderRejectedException extends RuntimeException {
+        OrderRejectedException(String reason) { super(reason); }
+    }
+
     private FillResult pollForFill(String orderId) {
         for (int attempt = 0; attempt < config.getOrderPollMaxAttempts(); attempt++) {
             try {
@@ -456,16 +538,26 @@ public class ManualSwingTradingService {
                     if ("REJECTED".equals(latest.status) || "CANCELLED".equals(latest.status)) {
                         log.error("[SWING] Order {} ended in status {} - {}",
                                 orderId, latest.status, latest.statusMessage);
-                        return null;
+                        // FIX: previously just returned null here, indistinguishable
+                        // from a genuine poll-timeout - now throws with the REAL
+                        // reason from Zerodha, since this is a DEFINITIVE outcome,
+                        // not an ambiguous one. No position was ever opened - there
+                        // is nothing to "check for duplicates."
+                        throw new OrderRejectedException(
+                                latest.statusMessage != null && !latest.statusMessage.isBlank()
+                                        ? latest.statusMessage
+                                        : "Order " + latest.status + " by broker (no further reason given)");
                     }
                 }
+            } catch (OrderRejectedException rejected) {
+                throw rejected; // propagate immediately - don't keep polling a dead order
             } catch (Exception e) {
                 log.warn("[SWING] Poll attempt {} for order {} failed (will retry): {}",
                         attempt, orderId, e.getMessage());
             }
             try { Thread.sleep(config.getOrderPollIntervalMs()); } catch (InterruptedException ignored) {}
         }
-        return null;
+        return null; // genuinely ambiguous - still PENDING after every attempt, unchanged from before
     }
 
     // ===================================================================
@@ -477,6 +569,33 @@ public class ManualSwingTradingService {
         if (trade.getBuyDate().isEqual(LocalDate.now())) {
             return;
         }
+
+        // FIX (found via explicit question: "buy Friday, Saturday/Sunday,
+        // sell Monday - is this handled?"). CONFIRMED REAL BUG: the only
+        // existing check above (buyDate.isEqual(today)) only skips the
+        // exact purchase day - it does NOT skip weekends. Separately,
+        // pastForceExitTime below only ever checked the CLOCK TIME
+        // (9:20 AM), with zero awareness of what DAY it is. Combined,
+        // this meant: buy on Friday -> Saturday once the clock passes
+        // 9:20 AM, force-exit would have incorrectly triggered and
+        // attempted a real SELL order on a day the market is closed.
+        // Fixed here: market is CNC/equity, trades Mon-Fri only (no
+        // Indian market holiday calendar is wired into this system, so
+        // genuine market holidays on a weekday are NOT caught by this
+        // specific fix - only weekends are, which is what was asked).
+        // On a real market holiday landing on a weekday, this system
+        // still has no way to know that without a holiday-calendar data
+        // source - a separate, pre-existing limitation, not something
+        // this fix claims to solve.
+        // FIX (per explicit follow-up: "all the holiday also handled in
+        // this strategy please check"). Upgraded from a weekend-only
+        // check to also cover genuine NSE/BSE trading holidays - see
+        // MarketHolidayChecker's class docstring for the honest caveat
+        // on how that holiday list was compiled and its limitations.
+        if (MarketHolidayChecker.isMarketClosedToday()) {
+            return; // market closed (weekend or known holiday) - never attempt monitoring or exit
+        }
+
         if (trade.getSellStatus() != ManualSwingTrade.SellStatus.PENDING) {
             return; // already being sold or already sold - nothing to do
         }
@@ -536,7 +655,23 @@ public class ManualSwingTradingService {
             return;
         }
 
-        FillResult fill = pollForFill(sellOrderId);
+        FillResult fill;
+        try {
+            fill = pollForFill(sellOrderId);
+        } catch (OrderRejectedException rejected) {
+            // FIX: same issue as the buy side - a definitive REJECTED
+            // status was previously falling into the same generic
+            // null-handling as a genuine poll-timeout, meaning a
+            // rejected sell order would sit in ORDER_PLACED forever
+            // waiting for a reconciliation that will never find a
+            // completed fill (because there isn't one - it was
+            // rejected). Now marked failed immediately, with the real
+            // reason, so this position doesn't get silently stuck.
+            log.error("[SWING] SELL order {} for {} was REJECTED by broker: {}",
+                    sellOrderId, trade.getSymbol(), rejected.getMessage());
+            repo.markSellFailed(trade.getTradeId(), "Rejected: " + rejected.getMessage());
+            return;
+        }
         if (fill == null) {
             log.error("[SWING] SELL order {} for {} did not confirm filled - will reconcile " +
                             "against real broker status on next restart, not blindly retried",

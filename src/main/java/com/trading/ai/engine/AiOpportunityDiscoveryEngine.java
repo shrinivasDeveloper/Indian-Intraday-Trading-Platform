@@ -30,25 +30,25 @@ import java.util.stream.Collectors;
  * The AI's own market scanner and feature builder.
  *
  * FIXES APPLIED:
- *   1. f[58] trendline — now checks BOTH rising and falling trendlines
+ *   1. f[58] trendline - now checks BOTH rising and falling trendlines
  *                        was only checking rising, always returning false in bearish markets
- *   2. f[59] pattern confidence — now includes f[55] (sweep high) for SHORT candidates
- *                        was (f[54]+f[56]+f[58])/3 → SHORT always got 0 confidence
- *   3. f[48–53] news — reads from news_scored_items MySQL table written by NewsTradingStrategy
- *                        was hardcoded 0 — ML model would never learn news patterns
- *   4. numericScore — includes news signal and both sweep directions
- *   5. buildCandidate — sets newsSummary from actual news if available
+ *   2. f[59] pattern confidence - now includes f[55] (sweep high) for SHORT candidates
+ *                        was (f[54]+f[56]+f[58])/3 -> SHORT always got 0 confidence
+ *   3. f[48-53] news - reads from news_scored_items MySQL table written by NewsTradingStrategy
+ *                        was hardcoded 0 - ML model would never learn news patterns
+ *   4. numericScore - includes news signal and both sweep directions
+ *   5. buildCandidate - sets newsSummary from actual news if available
  *
  * 60 FEATURES (9 groups):
- *   A (0–7):   Price structure — MA distances, zone proximity, S/R
- *   B (8–15):  Momentum — returns, RSI, MACD, acceleration
- *   C (16–21): Volume — RVOL, spike, trend, buy pressure
- *   D (22–27): HTF trend — EMA alignment, daily bias, weekly
- *   E (28–33): Sector — change%, RS, alignment
- *   F (34–41): Market context — Nifty/BNF, VIX, breadth, time
- *   G (42–47): Symbol history — win rate, avg R, recency
- *   H (48–53): News — reads from shared MySQL table (zero coupling to NewsStrategy)
- *   I (54–59): AI patterns — liquidity sweeps, SR flip, trendline, channel
+ *   A (0-7):   Price structure - MA distances, zone proximity, S/R
+ *   B (8-15):  Momentum - returns, RSI, MACD, acceleration
+ *   C (16-21): Volume - RVOL, spike, trend, buy pressure
+ *   D (22-27): HTF trend - EMA alignment, daily bias, weekly
+ *   E (28-33): Sector - change%, RS, alignment
+ *   F (34-41): Market context - Nifty/BNF, VIX, breadth, time
+ *   G (42-47): Symbol history - win rate, avg R, recency
+ *   H (48-53): News - reads from shared MySQL table (zero coupling to NewsStrategy)
+ *   I (54-59): AI patterns - liquidity sweeps, SR flip, trendline, channel
  *
  * INDEPENDENCE:
  *   All features from AiMarketDataService and shared MySQL.
@@ -69,7 +69,7 @@ public class AiOpportunityDiscoveryEngine {
     private final Map<String, AiSymbolHistory> symbolHistory = new ConcurrentHashMap<>();
 
     private static final double MIN_NUMERIC_SCORE = 35.0;
-    private static final int    TOP_CANDIDATES    = 20;
+    private static final int    TOP_CANDIDATES    = 30;
     private static final LocalTime MARKET_OPEN    = LocalTime.of(9, 30);
     private static final LocalTime MARKET_CLOSE   = LocalTime.of(15, 30);
 
@@ -87,25 +87,25 @@ public class AiOpportunityDiscoveryEngine {
         this.dailyPatternEngine = dailyPatternEngine;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // MAIN SCAN — 4-stage hierarchical pipeline
+    // =======================================================================
+    // MAIN SCAN - 4-stage hierarchical pipeline
     //
-    // Stage 1: Daily (1-year) — primary qualification gate
+    // Stage 1: Daily (1-year) - primary qualification gate
     //   Hard filter. Only stocks with clean HTF structure pass.
     //   Checks: EMA alignment, ADR quality, trend consistency,
     //           52-week position, structural higher-highs/lower-lows.
     //
-    // Stage 2 (15m validation): REMOVED — daily patterns are the only
+    // Stage 2 (15m validation): REMOVED - daily patterns are the only
     //   qualification layer. No 15m filter between daily and feature building.
     //
     // Stage 3: Feature building + daily pattern gate
     //   Final confirmation layer: entry quality, volume, RR.
     //   Builds the full 60-feature vector.
     //
-    // Stage 4: 1-minute — EXECUTION ONLY (not in discovery pipeline)
+    // Stage 4: 1-minute - EXECUTION ONLY (not in discovery pipeline)
     //   Used only at execution time for precise entry timing.
     //   1m candles are NOT used for stock selection or filtering.
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     public List<AiCandidate> discover(MarketSnapshot snapshot,
                                       Set<String> exclude,
@@ -134,26 +134,40 @@ public class AiOpportunityDiscoveryEngine {
             // Minimum data guard
             if (daily.size() < 20 || c5m.size() < 10) continue;
 
-            // ══════════════════════════════════════════════════════════════
-            // STAGE 1 — DAILY QUALIFICATION (1-year HTF filter)
+            // ==============================================================
+            // STAGE 1 - DAILY QUALIFICATION (1-year HTF filter)
             // Hard gate. Stock must pass ALL daily checks to proceed.
-            // ══════════════════════════════════════════════════════════════
+            // ==============================================================
             DailyQualResult dq = qualifyOnDaily(symbol, ltp, daily);
             if (!dq.passes) {
-                log.debug("[AI-DISCOVER] {} ✗ Stage1 daily: {}", symbol, dq.reason);
+                log.debug("[AI-DISCOVER] {} [FAIL] Stage1 daily: {}", symbol, dq.reason);
                 continue;
             }
             stage1Pass++;
+
+            // FIX (production-readiness cross-check, found before this
+            // was ever deployed): originally placed at the TOP of this
+            // loop, this DB query would have run for ALL 532 universe
+            // symbols on EVERY 5-minute cycle (~75 cycles/trading day =
+            // ~40,000 extra queries/day) - most of them wasted on
+            // symbols that would have been filtered out anyway by the
+            // cheap, in-memory checks above. Moved to HERE, after Stage
+            // 1's daily qualification - only genuine survivors (a much
+            // smaller, real candidate set) ever trigger this query now.
+            // Zero change to WHAT gets excluded, only WHEN the check
+            // runs - same real ai_trade_outcomes table, same 2-day
+            // lookback, same exclusion behavior as originally intended.
+            if (wasRecentlyTraded(symbol)) continue;
 
             // Stage 2 (15m validation) removed by design.
             // Daily patterns are the only qualification layer before feature building.
             stage2Pass++;
 
-            // ══════════════════════════════════════════════════════════════
-            // STAGE 3 — 5-MINUTE TRADE CONFIRMATION
+            // ==============================================================
+            // STAGE 3 - 5-MINUTE TRADE CONFIRMATION
             // Builds full feature vector for reasoning engine.
-            // Stage 1 & 2 already qualified this stock — now find best entry.
-            // ══════════════════════════════════════════════════════════════
+            // Stage 1 & 2 already qualified this stock - now find best entry.
+            // ==============================================================
             try {
                 double[] features = buildFeatures(symbol, ltp, c5m, c15m, daily, ctx);
                 featuredCount++;
@@ -164,7 +178,7 @@ public class AiOpportunityDiscoveryEngine {
                 String direction = suggestDirection(features);
                 if (direction == null) continue;
 
-                // ── STAGE 3 GATE: Minimum daily pattern score ─────────────
+                // -- STAGE 3 GATE: Minimum daily pattern score -------------
                 // ALL 16 patterns are now on daily candles.
                 // A trade requires at least 2 daily patterns confirming direction.
                 // This prevents low-quality setups from reaching the reasoning engine.
@@ -190,7 +204,7 @@ public class AiOpportunityDiscoveryEngine {
                     if (features[58] > 0.5) dailyPatternScore++; // trendline touch
                     if (features[47] < -0.5) dailyPatternScore++; // supply zone
                 }
-                // Group K patterns (f[60-69]) — direction-aligned daily patterns
+                // Group K patterns (f[60-69]) - direction-aligned daily patterns
                 for (int k = 60; k <= 69; k++) {
                     if ("LONG".equals(direction)  && features[k] > 0.5) dailyPatternScore++;
                     if ("SHORT".equals(direction) && features[k] < -0.5) dailyPatternScore++;
@@ -198,28 +212,28 @@ public class AiOpportunityDiscoveryEngine {
 
                 // Minimum threshold: at least 1 daily pattern must confirm
                 if (dailyPatternScore < 1) {
-                    log.debug("[AI-DISCOVER] {} skipped — 0 daily patterns confirm {}",
+                    log.debug("[AI-DISCOVER] {} skipped - 0 daily patterns confirm {}",
                             symbol, direction);
                     continue;
                 }
-                log.debug("[AI-DISCOVER] {} ✅ {} daily patterns confirm {} direction",
+                log.debug("[AI-DISCOVER] {} [OK] {} daily patterns confirm {} direction",
                         symbol, dailyPatternScore, direction);
 
                 // Daily bias override: prefer direction aligned with daily structure
                 if (dq.biasBull && "SHORT".equals(direction)) {
                     if (numericScore < 70) {
-                        log.debug("[AI-DISCOVER] {} SHORT skipped — daily bias bullish", symbol);
+                        log.debug("[AI-DISCOVER] {} SHORT skipped - daily bias bullish", symbol);
                         continue;
                     }
                 }
                 if (!dq.biasBull && "LONG".equals(direction)) {
                     if (numericScore < 70) {
-                        log.debug("[AI-DISCOVER] {} LONG skipped — daily bias bearish", symbol);
+                        log.debug("[AI-DISCOVER] {} LONG skipped - daily bias bearish", symbol);
                         continue;
                     }
                 }
 
-                // ── Exhausted gap filter ─────────────────────────────────────
+                // -- Exhausted gap filter -------------------------------------
                 // Skip stocks that have ALREADY moved > 1% today AND momentum
                 // is now reversing. Prevents chasing moves that are done.
                 //
@@ -227,7 +241,7 @@ public class AiOpportunityDiscoveryEngine {
                 //   1. Already moved > 1% from yesterday close
                 //   2. Last 5 candles momentum is now reversing
                 //
-                // Note: 10-day position check removed — a stock can be near
+                // Note: 10-day position check removed - a stock can be near
                 // its 10-day low and still be a valid reversal setup.
                 double dayReturn    = features[24]; // normalised daily return
                 double momentum5c   = features[10]; // last 5-candle direction
@@ -237,12 +251,12 @@ public class AiOpportunityDiscoveryEngine {
                 boolean exhaustedShort = rawDayReturn < -0.01 && momentum5c > 0;
 
                 if (exhaustedLong && "LONG".equals(direction)) {
-                    log.debug("[AI-DISCOVER] {} LONG skipped — up {}% but momentum reversing",
+                    log.debug("[AI-DISCOVER] {} LONG skipped - up {}% but momentum reversing",
                             symbol, String.format("%.1f", rawDayReturn * 100));
                     continue;
                 }
                 if (exhaustedShort && "SHORT".equals(direction)) {
-                    log.debug("[AI-DISCOVER] {} SHORT skipped — down {}% but momentum recovering",
+                    log.debug("[AI-DISCOVER] {} SHORT skipped - down {}% but momentum recovering",
                             symbol, String.format("%.1f", rawDayReturn * 100));
                     continue;
                 }
@@ -267,30 +281,30 @@ public class AiOpportunityDiscoveryEngine {
                 .limit(TOP_CANDIDATES)
                 .collect(Collectors.toList());
 
-        log.info("[AI-DISCOVER] Pipeline: {} total → {} daily → {} 15m → {} featured → {} candidates | {}ms",
+        log.info("[AI-DISCOVER] Pipeline: {} total -> {} daily -> {} 15m -> {} featured -> {} candidates | {}ms",
                 universe.size(), stage1Pass, stage2Pass, featuredCount,
                 top.size(), System.currentTimeMillis() - t0);
         return top;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // STAGE 1 — DAILY QUALIFICATION (1-year HTF analysis)
+    // =======================================================================
+    // STAGE 1 - DAILY QUALIFICATION (1-year HTF analysis)
     // Hard filter. ALL conditions must pass.
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     /** Result object from daily qualification */
     record DailyQualResult(boolean passes, boolean biasBull, String reason) {}
 
     /**
-     * Daily qualification — uses ~252 days of daily candle data.
+     * Daily qualification - uses ~252 days of daily candle data.
      *
      * Checks (ALL must pass for LONG bias, mirror for SHORT bias):
-     *   1. Minimum history — at least 60 days of daily data
-     *   2. ADR quality     — average daily range > 0.4% (stock moves enough to trade)
-     *   3. EMA structure   — daily EMA20 > EMA50 (medium-term trend quality)
-     *   4. 52-week position — not buying near 52-week low (avoid catching knives)
-     *   5. Trend consistency — stock not in a crash (last 20 days not down > 15%)
-     *   6. Volume quality  — not a dead stock (average volume meaningful)
+     *   1. Minimum history - at least 60 days of daily data
+     *   2. ADR quality     - average daily range > 0.4% (stock moves enough to trade)
+     *   3. EMA structure   - daily EMA20 > EMA50 (medium-term trend quality)
+     *   4. 52-week position - not buying near 52-week low (avoid catching knives)
+     *   5. Trend consistency - stock not in a crash (last 20 days not down > 15%)
+     *   6. Volume quality  - not a dead stock (average volume meaningful)
      *
      * Returns biasBull=true if daily structure favours LONG,
      *         biasBull=false if daily structure favours SHORT.
@@ -304,7 +318,7 @@ public class AiOpportunityDiscoveryEngine {
 
         int n = daily.size();
 
-        // ── Check 1: ADR quality ─────────────────────────────────────────
+        // -- Check 1: ADR quality -----------------------------------------
         // Average Daily Range must be > 0.4% of price
         // Stocks moving less than 0.4%/day cannot generate meaningful intraday setups
         double adrSum = 0;
@@ -321,7 +335,7 @@ public class AiOpportunityDiscoveryEngine {
                     String.format("%.2f", adr * 100) + "%");
         }
 
-        // ── Check 2: EMA structure ───────────────────────────────────────
+        // -- Check 2: EMA structure ---------------------------------------
         // Compute EMA20 and EMA50 from daily candles
         double ema20 = computeEMAFromDaily(daily, 20);
         double ema50 = computeEMAFromDaily(daily, 50);
@@ -333,10 +347,10 @@ public class AiOpportunityDiscoveryEngine {
         boolean bearEma = ema20 < ema50;  // medium trend bearish
 
         // If EMA200 available, use it as additional filter
-        // Price below EMA200 = long-term downtrend — prefer SHORT or neutral only
+        // Price below EMA200 = long-term downtrend - prefer SHORT or neutral only
         boolean belowEma200 = ema200 > 0 && ltp < ema200;
 
-        // ── Check 3: 52-week position (if enough data) ───────────────────
+        // -- Check 3: 52-week position (if enough data) -------------------
         double week52High = 0, week52Low = Double.MAX_VALUE;
         int lookback252 = Math.min(252, n);
         for (int i = n - lookback252; i < n; i++) {
@@ -349,12 +363,12 @@ public class AiOpportunityDiscoveryEngine {
         // Position within 52-week range (0 = at 52-week low, 1 = at 52-week high)
         double week52Pos = week52Range > 0 ? (ltp - week52Low) / week52Range : 0.5;
 
-        // ── Check 4: Recent trend consistency ────────────────────────────
+        // -- Check 4: Recent trend consistency ----------------------------
         // Last 20 days: if stock crashed > 20% it is not tradeable LONG
         double price20DaysAgo = daily.get(Math.max(0, n - 20)).getClose().doubleValue();
         double recentReturn = price20DaysAgo > 0 ? (ltp - price20DaysAgo) / price20DaysAgo : 0;
 
-        // ── Determine daily bias ─────────────────────────────────────────
+        // -- Determine daily bias -----------------------------------------
         boolean biasBull;
         if (bullEma && !belowEma200 && week52Pos > 0.25) {
             // EMA structure bullish, above EMA200, not near 52-week low
@@ -363,16 +377,16 @@ public class AiOpportunityDiscoveryEngine {
             // EMA structure bearish, below or no EMA200, not at 52-week high
             biasBull = false;
         } else {
-            // Mixed — use 20-day momentum to decide
+            // Mixed - use 20-day momentum to decide
             biasBull = recentReturn >= 0;
         }
 
-        // ── Hard rejections ──────────────────────────────────────────────
-        // LONG bias but stock crashed > 25% in 20 days — avoid
+        // -- Hard rejections ----------------------------------------------
+        // LONG bias but stock crashed > 25% in 20 days - avoid
         if (biasBull && recentReturn < -0.25) {
             return new DailyQualResult(false, true, "crashed -25% in 20d");
         }
-        // SHORT bias but stock rallied > 25% in 20 days — avoid chasing
+        // SHORT bias but stock rallied > 25% in 20 days - avoid chasing
         if (!biasBull && recentReturn > 0.25) {
             return new DailyQualResult(false, false, "rallied +25% in 20d");
         }
@@ -402,26 +416,26 @@ public class AiOpportunityDiscoveryEngine {
         return ema;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // DAILY PATTERN HELPERS — used by f[54], f[55], f[58]
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // DAILY PATTERN HELPERS - used by f[54], f[55], f[58]
+    // =======================================================================
 
     /**
-     * f[54] — Daily Liquidity Sweep Low.
+     * f[54] - Daily Liquidity Sweep Low.
      * Looks for equal DAILY lows within 0.5% across last 10 daily candles.
      * The day's LOW swept below that level AND closed ABOVE it = institutional trap.
-     * This is a genuine daily sweep — not 5m noise.
+     * This is a genuine daily sweep - not 5m noise.
      */
     /**
-     * f[54] — Daily Liquidity Sweep Low (STRICT).
+     * f[54] - Daily Liquidity Sweep Low (STRICT).
      *
      * A genuine sweep requires a SIGNIFICANT support level tested multiple times:
      *   1. Level must have been tested at least 2 previous times (3 touches min)
-     *      — this distinguishes real support from random daily noise
+     *      - this distinguishes real support from random daily noise
      *   2. The sweep candle's low went BELOW the level
      *   3. Close recovered ABOVE the level (rejection of the sweep)
      *   4. Recovery close > 0.3% above level (not just a hairline recovery)
-     *   5. Equal low tolerance tightened to 0.3% (was 0.5% — too loose)
+     *   5. Equal low tolerance tightened to 0.3% (was 0.5% - too loose)
      *
      * This eliminates false signals from any two candles that happen to have
      * similar lows within normal daily price oscillation.
@@ -453,7 +467,7 @@ public class AiOpportunityDiscoveryEngine {
                     if (candLow < level * (1 - 0.001)
                             && candClose > level * 1.003) { // 0.3% recovery
                         // PROXIMITY: ltp must still be within 1.0% of sweep level
-                        // If stock ran 2%+ above level → entry opportunity gone
+                        // If stock ran 2%+ above level -> entry opportunity gone
                         if (ltp <= level * 1.010) {
                             return 1.0; // sweep confirmed AND price still near level
                         }
@@ -466,12 +480,12 @@ public class AiOpportunityDiscoveryEngine {
     }
 
     /**
-     * f[55] — Daily Liquidity Sweep High.
+     * f[55] - Daily Liquidity Sweep High.
      * Equal DAILY highs swept and closed below = institutional trap on daily.
      */
     /**
-     * f[55] — Daily Liquidity Sweep High (STRICT).
-     * Same strictness as f[54] — significant resistance level required.
+     * f[55] - Daily Liquidity Sweep High (STRICT).
+     * Same strictness as f[54] - significant resistance level required.
      * Level must have been tested 2+ times before being swept.
      * Sweep candle exceeded level AND closed clearly below it.
      */
@@ -498,9 +512,9 @@ public class AiOpportunityDiscoveryEngine {
                     if (candHigh > level * 1.001
                             && candClose < level * 0.997) { // 0.3% rejection
                         // PROXIMITY: ltp must still be within 1.0% of sweep level
-                        // If stock dropped 2%+ below level → short opportunity gone
+                        // If stock dropped 2%+ below level -> short opportunity gone
                         if (ltp >= level * 0.990) {
-                            // FIX: was returning +1.0 — caused computePatternScore()
+                            // FIX: was returning +1.0 - caused computePatternScore()
                             // to never credit SweepHigh for SHORT (checks val < -0.5).
                             // SweepHigh is a SHORT-only pattern; must be negative.
                             return -1.0; // sweep high confirmed AND price near level
@@ -514,7 +528,7 @@ public class AiOpportunityDiscoveryEngine {
     }
 
     /**
-     * f[58] — Daily Trendline Touch (3-touch validated).
+     * f[58] - Daily Trendline Touch (3-touch validated).
      * Finds rising or falling trendline from daily swing points.
      * Requires 3+ touches to validate the line.
      * Current price within 1.5% of trendline = touch confirmed.
@@ -558,7 +572,7 @@ public class AiOpportunityDiscoveryEngine {
             }
         }
 
-        // Falling resistance trendline (SHORT setup) — lb=3
+        // Falling resistance trendline (SHORT setup) - lb=3
         List<double[]> swingHighs = new ArrayList<>();
         for (int i = 3; i < wn - 3; i++) {
             double h = w.get(i).getHigh().doubleValue();
@@ -584,7 +598,7 @@ public class AiOpportunityDiscoveryEngine {
                 }
                 if (touches >= 3 && projected > 0
                         && Math.abs(ltp - projected) / projected < 0.015) {
-                    // FIX: was returning +1.0 for falling trendline too — identical
+                    // FIX: was returning +1.0 for falling trendline too - identical
                     // to the rising-trendline LONG case above. Falling resistance
                     // trendline is a SHORT setup and must be negative-signed so
                     // computePatternScore()'s bearish check (val < -0.5) can see it.
@@ -595,9 +609,9 @@ public class AiOpportunityDiscoveryEngine {
         return 0;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // 60-FEATURE VECTOR
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     private double[] buildFeatures(String symbol, double ltp,
                                    List<Candle> c5m, List<Candle> c15m,
@@ -606,7 +620,7 @@ public class AiOpportunityDiscoveryEngine {
         double[] f = new double[80]; // f[0-59] base features, f[60-69] daily pattern features
         AiStructureLevels structure = aiData.getStructure(symbol);
 
-        // ── Group A: Price Structure (0–7) ──────────────────────────────
+        // -- Group A: Price Structure (0-7) ------------------------------
         double ma20  = aiData.computeEMA(daily, 20);
         double ma50  = aiData.computeEMA(daily, 50);
         double ma200 = aiData.computeEMA(daily, 200);
@@ -632,7 +646,7 @@ public class AiOpportunityDiscoveryEngine {
             f[7] = res  != null ? Math.min(1.0, res.touchCount()  / 5.0) : 0;
         }
 
-        // ── Group B: Momentum (8–15) ─────────────────────────────────────
+        // -- Group B: Momentum (8-15) -------------------------------------
         int n5  = c5m.size();
         int n15 = c15m.size();
 
@@ -662,7 +676,7 @@ public class AiOpportunityDiscoveryEngine {
         f[14] = norm(aiData.computeMACD(c5m), -1, 1);
         f[15] = f[8] - (n5 >= 4 ? (f[8] + f[9]) / 2 : f[8]);
 
-        // ── Group C: Volume (16–21) ──────────────────────────────────────
+        // -- Group C: Volume (16-21) --------------------------------------
         double rvol = aiData.computeRVOL(c5m, 20);
         f[16] = norm(rvol, 0.3, 3.0);
         f[17] = rvol > 2.0 ? 1.0 : 0.0;
@@ -688,7 +702,7 @@ public class AiOpportunityDiscoveryEngine {
 
         f[20] = (f[8] > 0 && rvol > 1.2) ? 1.0 : (f[8] < 0 && rvol > 1.2) ? -1.0 : 0;
 
-        // ── Group D: HTF Trend (22–27) ───────────────────────────────────
+        // -- Group D: HTF Trend (22-27) -----------------------------------
         // Declared here so f[21] RS calculation can use dailyReturn
         double dailyReturn = 0;
         if (daily.size() >= 2) {
@@ -698,11 +712,11 @@ public class AiOpportunityDiscoveryEngine {
         }
 
         // FIX: f[21] = Relative Strength vs Nifty
-        // RS = stock daily return − Nifty daily return
+        // RS = stock daily return - Nifty daily return
         // +1.0 = stock outperforming Nifty by 3%+ (genuine strength)
         // -1.0 = stock underperforming Nifty by 3%+ (genuine weakness)
         //  0.0 = moving in line with index
-        // This is one of the most important features — a stock up 1.5% when
+        // This is one of the most important features - a stock up 1.5% when
         // Nifty is flat is very different from a stock up 1.5% when Nifty is up 2%.
         try {
             List<Candle> niftyDaily = aiData.getDailyCandles("NIFTY 50");
@@ -742,7 +756,7 @@ public class AiOpportunityDiscoveryEngine {
             f[27] = range10 > 0 ? norm((ltp - lo10) / range10, 0, 1) : 0.5;
         }
 
-        // ── Group E: Sector (28–33) ──────────────────────────────────────
+        // -- Group E: Sector (28-33) --------------------------------------
         String sector = getSector(symbol);
         try {
             AiMarketUnderstandingEngine.AiSectorData sd =
@@ -756,18 +770,18 @@ public class AiOpportunityDiscoveryEngine {
                 f[31] = sd.alignedBearish() ? 1.0 : 0.0;
                 // FIX 3: f[32] = intraday EMA direction for this sector (-1 to +1)
                 // Old: always 0.5 (unused placeholder)
-                // New: actual intraday EMA bias — ML learns intraday sector momentum
+                // New: actual intraday EMA bias - ML learns intraday sector momentum
                 f[32] = norm(sd.intradayEmaDirection(), -1.0, 1.0);
                 f[33] = norm(sd.changePercent(), -1.0, 1.0);
             }
         } catch (Exception ignored) {}
 
-        // ── Group F: Market Context (34–41) ─────────────────────────────
+        // -- Group F: Market Context (34-41) -----------------------------
         f[34] = ctx.niftyDirection;
         f[35] = ctx.bnfDirection;
         f[36] = norm(ctx.niftyAtrPct, 0, 0.8);
-        // FIX: invert VIX normalisation — low VIX is GOOD (positive feature)
-        // Old: norm(vix, 8, 30) gave +1.0 for VIX 30 — ML learned high VIX = good (WRONG)
+        // FIX: invert VIX normalisation - low VIX is GOOD (positive feature)
+        // Old: norm(vix, 8, 30) gave +1.0 for VIX 30 - ML learned high VIX = good (WRONG)
         // New: -norm gives +0.8 for VIX 10 (calm) and -1.0 for VIX 30 (fearful)
         f[37] = -norm(ctx.vix, 8, 30);
         f[38] = norm(ctx.breadthRatio, 0.5, 1.5);
@@ -778,7 +792,7 @@ public class AiOpportunityDiscoveryEngine {
                 : now.isBefore(LocalTime.of(13, 30)) ? 0.6
                 : now.isBefore(LocalTime.of(14, 30)) ? 0.3 : 0.0;
 
-        // ── Group G: Symbol History (42–47) ─────────────────────────────
+        // -- Group G: Symbol History (42-47) -----------------------------
         AiSymbolHistory history = symbolHistory.getOrDefault(symbol,
                 AiSymbolHistory.empty(symbol));
         f[42] = norm(history.getWinRate(), 0.3, 0.8);
@@ -790,21 +804,21 @@ public class AiOpportunityDiscoveryEngine {
         // Demand zone: a tight, quiet BASE candle immediately followed by a
         // strong institutional up-move (the "launch pad"). Supply zone:
         // same idea, downward.
-        // +1.0 = price at demand zone (institutional buy zone — bullish)
-        // -1.0 = price at supply zone (institutional sell zone — bearish)
+        // +1.0 = price at demand zone (institutional buy zone - bullish)
+        // -1.0 = price at supply zone (institutional sell zone - bearish)
         //  0.0 = no nearby S/D zone
         //
-        // BUG FIXED: baseBody was computed but never actually checked —
+        // BUG FIXED: baseBody was computed but never actually checked -
         // the old code flagged ANY candle followed by a big move as a
         // "zone", regardless of whether that first candle was a genuine
         // quiet consolidation or itself a chaotic, wide-ranging candle.
-        // That's not real S/D zone theory and explains the low accuracy —
-        // now requires baseBody < 0.6×ATR (a genuinely small/flat base).
+        // That's not real S/D zone theory and explains the low accuracy -
+        // now requires baseBody < 0.6xATR (a genuinely small/flat base).
         //
         // BUG FIXED: when both a demand-like and supply-like base existed
         // within the lookback window, the old code let whichever matched
         // LAST in the loop silently overwrite the other via Math.max/min
-        // on a single shared variable — an arbitrary, index-order-dependent
+        // on a single shared variable - an arbitrary, index-order-dependent
         // result, not a quality- or distance-based decision. Now tracks the
         // CLOSEST valid zone of each type by actual distance from current
         // price, and between the two, the nearer one wins (the more
@@ -858,7 +872,7 @@ public class AiOpportunityDiscoveryEngine {
                 boolean hasDemand = bestDemandDist < Double.MAX_VALUE;
                 boolean hasSupply = bestSupplyDist < Double.MAX_VALUE;
                 if (hasDemand && hasSupply) {
-                    // Both present — the structurally nearer zone wins,
+                    // Both present - the structurally nearer zone wins,
                     // not whichever happened to be processed last.
                     sdScore = bestDemandDist <= bestSupplyDist ? 0.8 : -0.8;
                 } else if (hasDemand) {
@@ -870,10 +884,10 @@ public class AiOpportunityDiscoveryEngine {
             f[47] = sdScore;
         } catch (Exception ignored) {}
 
-        // ── Group H: News (48–53) ────────────────────────────────────────
+        // -- Group H: News (48-53) ----------------------------------------
         // FIX: reads from news_scored_items written by NewsTradingStrategy.
-        // Zero coupling — reads via JdbcTemplate only, no News class imported.
-        // If table not available → all zeros (safe fallback, trade still evaluates).
+        // Zero coupling - reads via JdbcTemplate only, no News class imported.
+        // If table not available -> all zeros (safe fallback, trade still evaluates).
         NewsContext news = readNewsContext(symbol);
         if (news != null) {
             f[48] = 1.0;                                           // news exists
@@ -883,19 +897,19 @@ public class AiOpportunityDiscoveryEngine {
             f[52] = Math.min(1.0, news.score() / 80.0);           // conviction strength
             f[53] = news.corroborated() ? 1.0 : 0.0;              // corroboration flag
         }
-        // else: f[48–53] remain 0.0 — no news found
+        // else: f[48-53] remain 0.0 - no news found
 
-        // ── Group I: AI Patterns (54–59) — ALL ON DAILY CANDLES ──────────
+        // -- Group I: AI Patterns (54-59) - ALL ON DAILY CANDLES ----------
         //
         // REDESIGNED: All 5 patterns now use DAILY candles exclusively.
         // No more 5m/15m noise. Only clean daily structure signals.
         //
-        // f[54] = Daily Liquidity Sweep Low  — equal daily lows swept and recovered
-        // f[55] = Daily Liquidity Sweep High — equal daily highs swept and recovered
-        // f[56] = Daily S/R Flip            — price holding above former daily resistance
-        // f[57] = Daily Channel Position    — price position within 20-day daily range
-        // f[58] = Daily Trendline Touch     — price at daily trendline (3-touch validated)
-        // f[59] = Daily Pattern Confidence  — composite of all daily intraday patterns
+        // f[54] = Daily Liquidity Sweep Low  - equal daily lows swept and recovered
+        // f[55] = Daily Liquidity Sweep High - equal daily highs swept and recovered
+        // f[56] = Daily S/R Flip            - price holding above former daily resistance
+        // f[57] = Daily Channel Position    - price position within 20-day daily range
+        // f[58] = Daily Trendline Touch     - price at daily trendline (3-touch validated)
+        // f[59] = Daily Pattern Confidence  - composite of all daily intraday patterns
 
         // f[54]: Daily Liquidity Sweep Low
         // Equal daily lows within 0.5% swept intraday and closed above = institutional trap
@@ -904,13 +918,13 @@ public class AiOpportunityDiscoveryEngine {
         // f[55]: Daily Liquidity Sweep High
         f[55] = detectDailyLiquiditySweepHigh(daily, ltp);
 
-        // f[56]: Daily S/R Flip — price holding above former daily resistance
+        // f[56]: Daily S/R Flip - price holding above former daily resistance
         f[56] = (structure != null)
                 ? (aiData.detectSRFlip(daily, structure, ltp) ? 1.0 : 0.0) : 0.0;
 
-        // f[57]: Daily channel position — where is price in 20-day daily range
+        // f[57]: Daily channel position - where is price in 20-day daily range
         // Scale: -1 (range bottom) to +1 (range top), via norm(). Neutral = 0.
-        // FIX: fallback was 0.5 — on a -1..+1 scale, 0.5 means "70% toward
+        // FIX: fallback was 0.5 - on a -1..+1 scale, 0.5 means "70% toward
         // the top", not neutral. This silently gave SHORT setups an
         // undeserved +2pt bonus (AiPatternConfidenceEngine: cp > 0.2 check)
         // whenever a stock had <20 days history or a flat/degenerate range.
@@ -927,20 +941,20 @@ public class AiOpportunityDiscoveryEngine {
             f[57] = 0.0;
         }
 
-        // f[58]: Daily trendline touch — uses daily swing points, 3-touch validated
+        // f[58]: Daily trendline touch - uses daily swing points, 3-touch validated
         // This is the SAME trendline as f[69] from AiDailyPatternEngine but normalised
         f[58] = detectDailyTrendlineTouch(daily, ltp);
 
-        // f[59]: Daily pattern confidence — composite
+        // f[59]: Daily pattern confidence - composite
         // FIX: f[55] (SweepHigh) and f[58] (TrendlineI falling case) are now
         // negative-signed when triggered. Use Math.abs() on both so SHORT
         // setups contribute equally to this composite as LONG setups do.
         f[59] = (Math.max(f[54], Math.abs(f[55])) + f[56] + Math.abs(f[58])) / 3.0;
 
-        // ── Group K: Daily Pattern Features (f[60-69]) ───────────────────────
+        // -- Group K: Daily Pattern Features (f[60-69]) -----------------------
         // All patterns validated strictly on daily candles (1-year data).
         // BOS, CHOCH, OB, FVG, Accumulation/Distribution, Triple, H&S,
-        // Triangle, Channel, Trendline — each -1 to +1.
+        // Triangle, Channel, Trendline - each -1 to +1.
         try {
             AiDailyPatternEngine.DailyPatterns dp = dailyPatternEngine.detect(ltp, daily);
             double[] dpf = dp.toFeatures();
@@ -952,10 +966,33 @@ public class AiOpportunityDiscoveryEngine {
         return f;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // NUMERIC PRE-SCORE
     // FIX: includes news signal and both sweep directions
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+
+    /**
+     * True if this symbol was traded (any outcome) within the last 2
+     * days - per explicit request, this is now a HARD exclusion at
+     * discovery time, not just the softer downstream score penalty
+     * AiTradingSystem separately still applies as a second layer.
+     * Fails OPEN (returns false, does not exclude) on any query error -
+     * never lets a database hiccup silently cost a legitimate new
+     * opportunity its discovery slot.
+     */
+    private boolean wasRecentlyTraded(String symbol) {
+        try {
+            Integer count = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM ai_trade_outcomes WHERE symbol = ? AND exit_time >= ?",
+                    Integer.class, symbol,
+                    java.sql.Timestamp.from(java.time.Instant.now().minusSeconds(2 * 86_400L)));
+            return count != null && count > 0;
+        } catch (Exception e) {
+            log.debug("[AI-DISCOVER] Recently-traded check failed for {} (failing open, " +
+                    "not excluding): {}", symbol, e.getMessage());
+            return false;
+        }
+    }
 
     private double numericScore(double[] f) {
         double s = 0;
@@ -973,9 +1010,9 @@ public class AiOpportunityDiscoveryEngine {
         return Math.min(100, s);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // DIRECTION DETECTION
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     private String suggestDirection(double[] f) {
         double bullScore = 0, bearScore = 0;
@@ -1003,9 +1040,9 @@ public class AiOpportunityDiscoveryEngine {
         return bullScore > bearScore ? "LONG" : "SHORT";
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // CANDIDATE BUILDER
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     private AiCandidate buildCandidate(String symbol, double ltp, String sector,
                                        AiFeatureVector fv, String direction,
@@ -1061,9 +1098,9 @@ public class AiOpportunityDiscoveryEngine {
                 .build();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // MARKET CONTEXT BUILDER
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     private AiMarketContext buildMarketContext(MarketSnapshot snapshot) {
         LocalTime now        = LocalTime.now(ZoneId.of("Asia/Kolkata"));
@@ -1087,15 +1124,15 @@ public class AiOpportunityDiscoveryEngine {
                 regimeScore);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // TRENDLINE DETECTION
     // FIX: separate rising and falling trendline checks
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // NEWS CONTEXT — reads from shared MySQL table
-    // Zero coupling to NewsStrategy — JdbcTemplate only
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // NEWS CONTEXT - reads from shared MySQL table
+    // Zero coupling to NewsStrategy - JdbcTemplate only
+    // =======================================================================
 
     private NewsContext readNewsContext(String symbol) {
         try {
@@ -1119,23 +1156,23 @@ public class AiOpportunityDiscoveryEngine {
                     symbol);
             return results.isEmpty() ? null : results.get(0);
         } catch (Exception e) {
-            // Table not yet created or no data — safe to return null
+            // Table not yet created or no data - safe to return null
             return null;
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // NORMALISATION
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     private double norm(double value, double min, double max) {
         if (max == min) return 0;
         return Math.max(-1, Math.min(1, 2.0 * (value - min) / (max - min) - 1.0));
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // ACCESSORS
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     public void updateSymbolHistory(String symbol, AiSymbolHistory history) {
         symbolHistory.put(symbol, history);
@@ -1149,9 +1186,9 @@ public class AiOpportunityDiscoveryEngine {
         return marketEngine.getSectorForSymbol(symbol);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // INNER TYPE — news context from MySQL
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // INNER TYPE - news context from MySQL
+    // =======================================================================
 
     private record NewsContext(
             int     score,

@@ -15,15 +15,15 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * ManualSwingTradeRepository — own table (manual_swing_trades), own schema,
+ * ManualSwingTradeRepository - own table (manual_swing_trades), own schema,
  * zero foreign keys into any existing table, zero shared code with the
  * AI/News ledger or order-lock tables. Genuinely independent persistence.
  *
  * Duplicate-protection design (see class doc on ManualSwingTradingService
  * for the full picture): SELL idempotency is enforced via a conditional
- * UPDATE — "claim" a trade for selling with
+ * UPDATE - "claim" a trade for selling with
  * UPDATE ... SET sell_status='ORDER_PLACED' WHERE trade_id=? AND
- * sell_status='PENDING' — and check the affected-row count. If another
+ * sell_status='PENDING' - and check the affected-row count. If another
  * scheduler run already claimed it, this UPDATE affects 0 rows and the
  * caller correctly backs off. This is simpler and just as robust as a
  * separate lock table for this specific concern, and it's naturally
@@ -44,7 +44,7 @@ public class ManualSwingTradeRepository {
     /**
      * FIX (learned from an earlier mistake in this same session with
      * AiNewsCapitalLedger): the manual_swing_trades table may already
-     * exist from before this auto-selection feature was added — without
+     * exist from before this auto-selection feature was added - without
      * the trade_source column. CREATE TABLE IF NOT EXISTS does nothing
      * in that case, since the table already exists. Detects this
      * precisely via information_schema and adds the column with a
@@ -59,7 +59,7 @@ public class ManualSwingTradeRepository {
                 """, Integer.class);
             if (hasColumn != null && hasColumn > 0) return; // already correct schema
 
-            log.warn("[SWING-REPO] manual_swing_trades exists without trade_source column — " +
+            log.warn("[SWING-REPO] manual_swing_trades exists without trade_source column - " +
                     "adding it now (defaulting existing rows to MANUAL, since they predate the " +
                     "auto-selection feature and were all genuinely manual buys)");
             jdbc.execute("ALTER TABLE manual_swing_trades " +
@@ -98,7 +98,7 @@ public class ManualSwingTradeRepository {
                 )
                 """);
         } catch (Exception e) {
-            log.error("[SWING-REPO] Could not create manual_swing_trades table — this module " +
+            log.error("[SWING-REPO] Could not create manual_swing_trades table - this module " +
                     "will not function correctly until this is resolved: {}", e.getMessage());
         }
     }
@@ -147,7 +147,7 @@ public class ManualSwingTradeRepository {
      * The actual gate for the auto-selection feature: "if a MANUAL trade
      * already exists today, never place an automated one." Deliberately
      * checks trade_source = 'MANUAL' specifically, not just "any trade
-     * today" — an earlier AUTO trade today (which shouldn't normally
+     * today" - an earlier AUTO trade today (which shouldn't normally
      * happen, since the auto-engine only fires once at 3pm, but this
      * stays correct even if it were ever called twice) must not be
      * mistaken for a manual one.
@@ -168,6 +168,23 @@ public class ManualSwingTradeRepository {
         return count != null && count > 0;
     }
 
+    /**
+     * Most recent buy_date for this symbol, across BOTH manual and auto
+     * trades - needed for the 10-trading-day cooling period (per
+     * explicit instruction: "if we traded today don't trade again,
+     * cooling period is 10 trading days"). Returns empty if this
+     * symbol has never been traded before. Purely additive - does not
+     * touch existsManualTradeToday/existsAutoTradeToday or any other
+     * existing method.
+     */
+    public Optional<LocalDate> findMostRecentBuyDate(String symbol) {
+        List<java.sql.Date> dates = jdbc.query(
+                "SELECT buy_date FROM manual_swing_trades WHERE symbol = ? " +
+                        "ORDER BY buy_date DESC LIMIT 1",
+                (rs, rowNum) -> rs.getDate("buy_date"), symbol);
+        return dates.isEmpty() ? Optional.empty() : Optional.of(dates.get(0).toLocalDate());
+    }
+
     public Optional<ManualSwingTrade> findById(String tradeId) {
         List<ManualSwingTrade> r = jdbc.query(
                 "SELECT * FROM manual_swing_trades WHERE trade_id = ?", MAPPER, tradeId);
@@ -186,7 +203,7 @@ public class ManualSwingTradeRepository {
 
     /**
      * Atomically claims a trade for selling. Returns true only if THIS call
-     * was the one that transitioned PENDING -> ORDER_PLACED — the actual
+     * was the one that transitioned PENDING -> ORDER_PLACED - the actual
      * duplicate-protection mechanism. If another scheduler run (or a retry
      * racing with itself) already claimed it, this returns false and the
      * caller must back off, not retry.
@@ -219,7 +236,7 @@ public class ManualSwingTradeRepository {
 
     /**
      * Sell attempt failed (order rejected, API error, etc). Reverts
-     * sell_status back to PENDING so the NEXT monitoring cycle retries —
+     * sell_status back to PENDING so the NEXT monitoring cycle retries -
      * trade_status stays ACTIVE throughout, per the spec's error-handling
      * requirement ("keep the trade ACTIVE... retry during next cycle").
      */
@@ -236,7 +253,7 @@ public class ManualSwingTradeRepository {
     /**
      * Used only on startup, for trades found stuck in ORDER_PLACED (an
      * order was placed but the app crashed/restarted before the fill was
-     * confirmed). NEVER blindly resets to PENDING — the caller must check
+     * confirmed). NEVER blindly resets to PENDING - the caller must check
      * the real broker order status first and only call this if the order
      * genuinely never filled.
      */

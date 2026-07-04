@@ -110,6 +110,26 @@ public class DailyBarRepository {
                         ") AND trade_date = ?", MAPPER, params);
     }
 
+    /**
+     * Counts the number of DISTINCT REAL trading days strictly between
+     * fromDate (exclusive) and toDate (inclusive), using this table's
+     * actual bhavcopy calendar rather than naive calendar-day
+     * subtraction - correctly excludes weekends and market holidays,
+     * since only genuine trading days ever appear in this table at all.
+     * Needed for the 10-trading-day cooling period (per explicit
+     * instruction). Uses the whole table's distinct dates (not scoped
+     * to one symbol) since the market-wide trading calendar is the
+     * same for every stock.
+     */
+    public int countTradingDaysBetween(LocalDate fromDateExclusive, LocalDate toDateInclusive) {
+        Integer count = jdbc.queryForObject("""
+            SELECT COUNT(DISTINCT trade_date) FROM swing_auto_daily_bars
+            WHERE trade_date > ? AND trade_date <= ?
+            """, Integer.class,
+                java.sql.Date.valueOf(fromDateExclusive), java.sql.Date.valueOf(toDateInclusive));
+        return count != null ? count : 0;
+    }
+
     public boolean hasDataForDate(LocalDate date) {
         Integer count = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM swing_auto_daily_bars WHERE trade_date = ?",

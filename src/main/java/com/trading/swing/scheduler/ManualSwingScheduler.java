@@ -75,6 +75,28 @@ public class ManualSwingScheduler {
     @Scheduled(fixedRateString = "${manual-swing.monitoring-interval-ms:60000}",
             scheduler = "manualSwingTaskScheduler")
     public void monitorActiveTrades() {
+        // FIX (found via direct log review: this scheduler logged
+        // "Market open - monitoring resumed" and proceeded to check
+        // trades on a SATURDAY, since inMarketHours below only ever
+        // checked the CLOCK TIME, with zero day-of-week or holiday
+        // awareness - the exact same bug class already fixed in
+        // ManualSwingTradingService.checkAndExitIfNeeded() and
+        // AutoSwingScheduler, but missed here since this is a separate,
+        // third file with its own independent market-hours check.
+        // checkAndExitIfNeeded() itself would have correctly no-op'd
+        // due to that earlier fix (so no incorrect sell could actually
+        // happen), but this outer log was still misleading and this
+        // still reached a method call that immediately returns -
+        // fixed at the source here instead.
+        if (com.trading.swing.service.MarketHolidayChecker.isMarketClosedToday()) {
+            if (wasInMarketHours) {
+                log.info("[SWING-SCHEDULER] Market closed (weekend/holiday) - monitoring " +
+                        "stopped, will automatically resume next real trading day");
+            }
+            wasInMarketHours = false;
+            return;
+        }
+
         LocalTime now = LocalTime.now();
         boolean inMarketHours = !now.isBefore(marketOpen) && !now.isAfter(marketClose);
 

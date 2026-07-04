@@ -99,11 +99,32 @@ public class AutoSwingScheduler {
     public void checkAndRunAutoSelection() {
         if (!config.isAutoTradeEnabled()) return;
 
+        // FIX (same confirmed bug class found in ManualSwingTradingService's
+        // exit monitoring): this scheduler had zero weekend awareness -
+        // once the clock passed the 3pm trigger time on a Saturday or
+        // Sunday, it would have proceeded to check for a manual trade and
+        // potentially run full auto-selection on a day the market is
+        // closed. NOTE: this only catches weekends, not genuine mid-week
+        // market holidays - no holiday-calendar data source is wired into
+        // this system, a separate, pre-existing limitation.
+        // FIX (per explicit follow-up: "all the holiday also handled in
+        // this strategy please check"). Upgraded from a weekend-only
+        // check to also cover genuine NSE/BSE trading holidays - see
+        // MarketHolidayChecker's class docstring for the honest caveat
+        // on how that holiday list was compiled and its limitations.
+        if (com.trading.swing.service.MarketHolidayChecker.isMarketClosedToday()) {
+            return;
+        }
+
         LocalDate today = LocalDate.now();
         if (!today.equals(lastRunDate)) {
             alreadyRanToday.set(false); // new day - reset the once-per-day guard
             lastRunDate = today;
-            selectionEngine.clearFundamentalsCache(); // clear Yahoo Finance cache for new day
+            // REMOVED: clearFundamentalsCache() call - AutoStockSelectionEngine
+            // no longer has this method, since Rule 4/fundamentals (and the
+            // Yahoo Finance service backing it) were fully removed per explicit
+            // instruction. Nothing else needs to happen here on a new day for
+            // this scheduler beyond resetting the once-per-day guard above.
         }
 
         LocalTime now = LocalTime.now();

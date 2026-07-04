@@ -223,7 +223,6 @@ manual-swing:
   sector-weekly-min-pct: 15.0
   sector-monthly-over-weekly-margin-pct: 5.0
   sector-yearly-min-pct: 60.0
-  min-promoter-holding-pct: 60.0
 
 ai:
   trading:

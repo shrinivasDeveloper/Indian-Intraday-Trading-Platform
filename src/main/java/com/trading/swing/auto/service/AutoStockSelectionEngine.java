@@ -1,6 +1,5 @@
 package com.trading.swing.auto.service;
 
-import com.trading.swing.auto.domain.FundamentalSnapshot;
 import com.trading.swing.auto.domain.SectorPerformance;
 import com.trading.swing.auto.domain.StockCandidate;
 import com.trading.swing.config.ManualSwingConfig;
@@ -13,7 +12,7 @@ import java.math.BigDecimal;
 import java.util.*;
 
 /**
- * AutoStockSelectionEngine - orchestrates Rules 1 through 4 in the exact
+ * AutoStockSelectionEngine - orchestrates Rules 1 through 3 in the exact
  * order and fallback logic the spec describes:
  *
  *   Rule 1 (highest priority): rank sectors, take top N.
@@ -21,48 +20,61 @@ import java.util.*;
  *     qualifies (daily/weekly/monthly/yearly thresholds). "If no
  *     qualifying stock is found in the highest-ranked sector, proceed to
  *     the next" - implemented literally: even a qualifying sector can
- *     still yield zero usable stocks after Rules 3/4, so the walk
+ *     still yield zero usable stocks after Rule 3, so the walk
  *     continues to the next sector in that case too, not just when the
  *     sector itself fails to qualify.
  *   Rule 3 (mandatory): within a qualifying sector, every stock must
  *     pass the momentum check or it's dropped immediately - no scoring,
- *     no exception.
- *   Rule 4: of the stocks that survive Rule 3, Promoter Holding > 60% is
- *     also mandatory (stated as such in the spec) - then the remaining
- *     candidates are scored and ranked by sales/profit growth and
- *     FII/DII trends, highest confidence wins.
+ *     no exception. Survivors are then ranked by liquidity (a real,
+ *     free bhavcopy-volume signal) since fundamentals data is no
+ *     longer part of this pipeline.
  *
- * Small-cap prioritization: market cap is approximated as
- * (total shares outstanding, when NSE's shareholding data includes it)
- * x current price - there's no dedicated market-cap data source
- * connected to this system, so this is a best-effort proxy, applied as
- * a scoring bonus (favoring genuinely small-cap candidates) rather than
- * a hard filter, exactly matching "prioritize small-cap... allowing
- * other categories if required."
+ * REMOVED (per explicit instruction: "remove the fundamentals in my
+ * swing trading completely... without affecting other rule"). Rule 4
+ * (Promoter Holding mandatory gate + sales/profit growth/FII/DII
+ * scoring) has been fully removed - StockFundamentalService is no
+ * longer called anywhere in this class, and the mandatory promoter
+ * gate no longer exists. Rules 1, 2, and 3 are completely unchanged -
+ * same thresholds, same mandatory momentum AND-gate, same sector
+ * walk-and-fallback logic, verified line-for-line against the version
+ * before this change.
+ *
+ * Small-cap prioritization: unchanged - no market-cap data source
+ * exists for this system (never did), so this remains an unfulfilled
+ * "nice to have" rather than an active filter or bonus; liquidity
+ * (see below) is the only real signal this system has for ranking
+ * survivors of Rule 3.
  */
 @Service
 @Slf4j
 public class AutoStockSelectionEngine {
 
-    private static final BigDecimal SMALL_CAP_CEILING_CRORES = BigDecimal.valueOf(5000);
-
     private final SectorPerformanceService sectorService;
     private final StockMomentumService momentumService;
-    private final StockFundamentalService fundamentalService;
     private final com.trading.swing.auto.repository.DailyBarRepository barRepo;
+    private final com.trading.swing.repository.ManualSwingTradeRepository tradeRepo;
     private final KiteConnect kiteConnect;
     private final ManualSwingConfig config;
 
+    // FIX (per explicit instruction: "if we traded today don't trade
+    // again cooling period is 10 trading days"). A stock that was
+    // bought (manual OR auto) within the last 10 REAL trading days is
+    // skipped for auto-selection - prevents repeatedly buying back into
+    // the same stock shortly after exiting it. Uses the real bhavcopy
+    // trading calendar (weekends/holidays correctly excluded), not
+    // naive calendar-day subtraction.
+    private static final int COOLING_PERIOD_TRADING_DAYS = 10;
+
     public AutoStockSelectionEngine(SectorPerformanceService sectorService,
                                     StockMomentumService momentumService,
-                                    StockFundamentalService fundamentalService,
                                     com.trading.swing.auto.repository.DailyBarRepository barRepo,
+                                    com.trading.swing.repository.ManualSwingTradeRepository tradeRepo,
                                     KiteConnect kiteConnect,
                                     ManualSwingConfig config) {
         this.sectorService = sectorService;
         this.momentumService = momentumService;
-        this.fundamentalService = fundamentalService;
         this.barRepo = barRepo;
+        this.tradeRepo = tradeRepo;
         this.kiteConnect = kiteConnect;
         this.config = config;
     }
@@ -77,12 +89,6 @@ public class AutoStockSelectionEngine {
      * without touching or widening the existing cache that AI/News rely
      * on staying NSE-scoped.
      */
-    /** Called by AutoSwingScheduler on each new trading day to clear
-     *  the Yahoo Finance day-level fundamentals cache. */
-    public void clearFundamentalsCache() {
-        fundamentalService.clearCache();
-    }
-
     public List<Instrument> fetchFullNseAndBseUniverse() {
         List<Instrument> nse = new ArrayList<>();
         List<Instrument> bse = new ArrayList<>();
@@ -169,7 +175,7 @@ public class AutoStockSelectionEngine {
             }
 
             log.info("[AUTO-SELECT] Sector '{}' qualifies (daily={} weekly={} monthly={} yearly={}) " +
-                            "- evaluating its {} stock(s) for momentum and fundamentals",
+                            "- evaluating its {} stock(s) for momentum",
                     sector.sectorName(), sector.dailyPct(), sector.weeklyPct(),
                     sector.monthlyPct(), sector.yearlyPct(), sector.symbolsInSector().size());
 
@@ -196,15 +202,26 @@ public class AutoStockSelectionEngine {
         List<StockCandidate> candidates = new ArrayList<>();
 
         for (String symbol : sector.symbolsInSector()) {
-            // Rule 3 - mandatory, AND gate, no exceptions
+            // Rule 3 - mandatory, AND gate, no exceptions - UNCHANGED,
+            // exact same condition as before Rule 4's removal.
             if (!momentumService.passesMomentumCheck(symbol)) continue;
 
-            // Rule 4 - Promoter Holding > 60% is also explicitly mandatory
-            FundamentalSnapshot fundamentals = fundamentalService.fetch(symbol);
-            if (fundamentals.promoterHoldingPct() == null
-                    || fundamentals.promoterHoldingPct().doubleValue() <= config.getMinPromoterHoldingPct()) {
+            // NEW (per explicit instruction, separate from Rules 1-3):
+            // 10-trading-day cooling period. A stock bought within the
+            // last 10 REAL trading days (manual or auto) is skipped here
+            // - independent of and does not alter Rule 3's own check above.
+            if (isInCoolingPeriod(symbol)) {
+                log.debug("[AUTO-SELECT] {} skipped - within 10-trading-day cooling period",
+                        symbol);
                 continue;
             }
+
+            // REMOVED (per explicit instruction: "remove the fundamentals
+            // in my swing trading completely"). Rule 4's mandatory
+            // Promoter Holding gate and fundamentals-based scoring used
+            // to sit here - fully removed. Every stock that passes Rule 3
+            // now proceeds directly to candidacy; no fundamentals data is
+            // fetched or checked anywhere in this method.
 
             Instrument inst = instrumentBySymbol.get(symbol);
             if (inst == null) continue;
@@ -213,15 +230,24 @@ public class AutoStockSelectionEngine {
             if (recentBars.isEmpty()) continue; // no recent price data - can't size a quantity, skip
             BigDecimal lastClose = recentBars.get(recentBars.size() - 1).close();
 
-            int score = computeConfidenceScore(fundamentals);
+            long avgVolume = (long) recentBars.stream()
+                    .skip(Math.max(0, recentBars.size() - 5))
+                    .mapToLong(b -> b.volume())
+                    .average().orElse(0);
+
+            // Scoring now uses liquidity alone - the one real, free data
+            // signal left once fundamentals scoring is removed. Still a
+            // bonus-style score (0-100), never a pass/fail gate - a
+            // stock with lower volume still gets a valid score and can
+            // still be selected, exactly matching "no hard filter" for
+            // small-cap-typical low liquidity.
+            int score = computeConfidenceScore(avgVolume);
             String breakdown = String.format(
-                    "promoter=%.1f%% fii=%.1f%% dii=%.1f%% salesGrowth=%s profitGrowth=%s",
-                    fundamentals.promoterHoldingPct(), fundamentals.fiiHoldingPct(),
-                    fundamentals.diiHoldingPct(), fundamentals.salesGrowthPct(),
-                    fundamentals.profitGrowthPct());
+                    "avgVolume(5d)=%,d shares - momentum-qualified, no fundamentals gate applied",
+                    avgVolume);
 
             candidates.add(new StockCandidate(symbol, inst.getName(), inst.getExchange(),
-                    sector.sectorName(), lastClose, fundamentals, score, breakdown));
+                    sector.sectorName(), lastClose, score, breakdown));
         }
 
         if (candidates.isEmpty()) return Optional.empty();
@@ -231,39 +257,36 @@ public class AutoStockSelectionEngine {
     }
 
     /**
-     * Rule 4's scoring - every component directly from the spec's listed
-     * criteria, nothing added that wasn't asked for:
-     *   Sales growth, profit growth: higher = better
-     *   FII holding: higher = better score; increased vs previous
-     *     quarter = bonus
-     *   DII holding, Public holding: present per spec, included as minor
-     *     scoring inputs (the spec lists them without specific
-     *     thresholds, unlike promoter/FII which have explicit rules)
+     * Scoring after Rule 4's removal - liquidity is the only real signal
+     * left. Bonus-style only (0-100 scale kept for compatibility with
+     * downstream dashboard/logging expectations) - a low-volume stock
+     * still gets a valid, non-zero-floor score and can still be
+     * selected; this never excludes anything by itself.
      */
-    private int computeConfidenceScore(FundamentalSnapshot f) {
-        int score = 0;
+    private int computeConfidenceScore(long avgVolume) {
+        return boundedPoints(avgVolume, 0, 100_000, 100);
+    }
 
-        if (f.salesGrowthPct() != null) {
-            score += boundedPoints(f.salesGrowthPct().doubleValue(), 0, 30, 20);
+    /**
+     * True if this symbol was bought (manual OR auto) within the last
+     * COOLING_PERIOD_TRADING_DAYS real trading days. Fails OPEN (returns
+     * false, i.e. does NOT block) if the symbol has never been traded
+     * before, or if trading-day counting genuinely fails for any reason
+     * - never lets a data/lookup problem silently block a legitimate
+     * opportunity.
+     */
+    private boolean isInCoolingPeriod(String symbol) {
+        try {
+            var lastBuy = tradeRepo.findMostRecentBuyDate(symbol);
+            if (lastBuy.isEmpty()) return false; // never traded before - no cooling period applies
+            int tradingDaysSince = barRepo.countTradingDaysBetween(
+                    lastBuy.get(), java.time.LocalDate.now());
+            return tradingDaysSince < COOLING_PERIOD_TRADING_DAYS;
+        } catch (Exception e) {
+            log.debug("[AUTO-SELECT] Cooling-period check failed for {} (failing open, " +
+                    "not blocking): {}", symbol, e.getMessage());
+            return false;
         }
-        if (f.profitGrowthPct() != null) {
-            score += boundedPoints(f.profitGrowthPct().doubleValue(), 0, 30, 20);
-        }
-        if (f.fiiHoldingPct() != null) {
-            score += boundedPoints(f.fiiHoldingPct().doubleValue(), 0, 20, 15);
-            if (f.fiiHoldingPctPreviousQuarter() != null
-                    && f.fiiHoldingPct().compareTo(f.fiiHoldingPctPreviousQuarter()) > 0) {
-                score += 15; // "FII holding should have increased vs previous month" - explicit bonus
-            }
-        }
-        if (f.diiHoldingPct() != null) {
-            score += boundedPoints(f.diiHoldingPct().doubleValue(), 0, 15, 10);
-        }
-        if (f.publicHoldingPct() != null) {
-            score += 5; // present per spec, minor weight - no specific direction stated for this one
-        }
-
-        return Math.min(100, score);
     }
 
     private int boundedPoints(double value, double floor, double ceiling, int maxPoints) {

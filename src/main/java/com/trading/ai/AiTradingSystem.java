@@ -76,8 +76,13 @@ public class AiTradingSystem {
     // last raised, while individual watchlist items - which read the
     // live threshold value passed through per-candidate - correctly
     // showed 85, creating a confusing mismatch on screen).
-    private static final int TRENDING_EXECUTION_THRESHOLD = 75;
-    private static final int RANGING_EXECUTION_THRESHOLD  = 85;
+    // FIX (per explicit instruction: "make it 80 is minimum score",
+    // given alongside removing the TOO_EXTENDED gate). Previously 75
+    // TRENDING / 85 RANGING - now unified to a single 80-point minimum
+    // for both regimes, serving as the compensating quality control for
+    // the removed extension gate.
+    private static final int TRENDING_EXECUTION_THRESHOLD = 80;
+    private static final int RANGING_EXECUTION_THRESHOLD  = 80;
 
     // -- Pure observability: WHY didn't an eligible-or-close candidate
     // actually execute? Pipeline has several gates AFTER the pattern-
@@ -445,29 +450,18 @@ public class AiTradingSystem {
             AiPatternConfidenceEngine.ConfidenceResult conf =
                     confidenceEngine.score(candidate, dailyCandles, candles5m);
 
-            // -- FIX 1 (hard lock): reject if price already moved >1.5% from
-            // the prior close before we got a chance to enter. Placed here,
-            // BEFORE risk assessment, so an over-extended candidate never
-            // reaches SL/T1/T2 computation or execution at all. Uses
-            // dailyCandles already fetched above - no new data source, no
-            // change to any existing gate's logic, purely an additional
-            // early-exit check.
-            if (!dailyCandles.isEmpty()) {
-                double prevClose = dailyCandles.get(dailyCandles.size() - 1)
-                        .getClose().doubleValue();
-                if (prevClose > 0) {
-                    double movePct = Math.abs(candidate.getLtp() - prevClose) / prevClose;
-                    if (movePct > 0.015) {
-                        log.debug("[AI-SYSTEM] {} TOO_EXTENDED - already moved {}% from prior " +
-                                        "close (max 1.5%) - hard skip", candidate.getSymbol(),
-                                String.format("%.2f", movePct * 100));
-                        String dpExt = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
-                        watchlist.put(candidate.getSymbol(),
-                                dpExt + "|TOO_EXTENDED|" + conf.totalScore() + "|" + executionThreshold);
-                        continue;
-                    }
-                }
-            }
+            // REMOVED (per explicit instruction: "Extended, please remove
+            // this gate many trade are blocking this gate please
+            // completely remove... make it 80 is minimum score"). The
+            // >1.5%-move-from-prior-close hard-lock that used to sit here
+            // has been fully removed - it was blocking too many otherwise-
+            // valid trades. The unified 80-point minimum score (see
+            // TRENDING_EXECUTION_THRESHOLD/RANGING_EXECUTION_THRESHOLD
+            // below) is the compensating quality control requested in its
+            // place. Every other gate before and after this point -
+            // direction alignment, confidence floor, risk assessment,
+            // daily/concurrent caps, reasoning engine - is completely
+            // untouched.
 
             // -- FIX 2 (soft penalty): recently-traded symbols need a higher
             // score to qualify again, instead of being excluded outright. A
@@ -485,7 +479,9 @@ public class AiTradingSystem {
 
             // Add to watchlist with skip reason encoded
             // Format: "pattern|skipReason|score|threshold"
-            // skipReason: ELIGIBLE / SCORE_LOW / NO_CANDLE / DIRECTION / CHOPPY / TOO_EXTENDED
+            // skipReason: ELIGIBLE / SCORE_LOW / NO_CANDLE / DIRECTION / CHOPPY
+            // (TOO_EXTENDED removed per explicit instruction - see threshold
+            // constants above for the compensating 80-point minimum score)
             if (conf.bullishPatterns() + conf.bearishPatterns() > 0) {
                 String dp = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
                 String skipReason;
@@ -522,7 +518,7 @@ public class AiTradingSystem {
             }
 
             // -- TRENDING: market direction alignment required --------------
-            // Rule: TRENDING -> Score >= 70 + Market Direction + Stock Direction in sync
+            // Rule: TRENDING -> Score >= 80 + Market Direction + Stock Direction in sync
             // Only LONG trades when market is BULLISH trending.
             // Only SHORT trades when market is BEARISH trending.
             // RANGING has no direction requirement - both sides valid.

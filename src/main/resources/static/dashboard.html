@@ -792,7 +792,7 @@
             </div>
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:9px">
-            <div style="padding:4px 10px;border-radius:12px;font-size:10px;font-weight:700;background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)">TRENDING: Score ≥ ${ai.trendingThreshold||70} + direction match</div>
+            <div style="padding:4px 10px;border-radius:12px;font-size:10px;font-weight:700;background:rgba(63,185,80,.15);color:var(--green);border:1px solid rgba(63,185,80,.3)">TRENDING: Score ≥ ${ai.trendingThreshold||80} + direction match</div>
             <div style="padding:4px 10px;border-radius:12px;font-size:10px;font-weight:700;background:rgba(88,166,255,.15);color:var(--blue);border:1px solid rgba(88,166,255,.3)">RANGING: Score ≥ ${ai.rangingThreshold||80} (both directions)</div>
             <div style="padding:4px 10px;border-radius:12px;font-size:10px;font-weight:700;background:rgba(248,81,73,.15);color:var(--red);border:1px solid rgba(248,81,73,.3)">CHOPPY: Watchlist only — no execution</div>
           </div>
@@ -816,9 +816,13 @@
                 const pat    = patRaw;
                 const reason = typeof item==='object'?(item.skipReason||'ELIGIBLE'):'ELIGIBLE';
                 const score  = typeof item==='object'?(item.score||0):0;
-                const thr    = typeof item==='object'?(item.threshold||70):70;
+                const thr    = typeof item==='object'?(item.threshold||80):80;
 
                 // Border and status based on skip reason
+                // NOTE: TOO_EXTENDED removed - the >1.5% extension gate
+                // that produced this reason was removed per explicit
+                // instruction (replaced with a unified 80-point minimum
+                // score instead). Backend can no longer send this value.
                 const borderColor =
                     reason==='ELIGIBLE'  ? 'rgba(63,185,80,.5)'  :   // green — ready to trade
                     reason==='NO_CANDLE' ? 'rgba(88,166,255,.4)' :   // blue — waiting for candle
@@ -826,7 +830,6 @@
                     reason==='RECENTLY_TRADED' ? 'rgba(240,192,64,.4)' :   // gold — recency penalty
                     reason==='DIRECTION' ? 'rgba(255,100,100,.4)':   // red — counter-trend
                     reason==='CHOPPY'    ? 'rgba(120,120,120,.4)':   // grey — choppy market
-                    reason==='TOO_EXTENDED' ? 'rgba(255,100,100,.4)':  // red — extended >1.5%
                     'rgba(88,166,255,.35)';
 
                 const reasonLabel =
@@ -836,7 +839,6 @@
                     reason==='RECENTLY_TRADED' ? `${score}/${thr} (recent)` :
                     reason==='DIRECTION' ? '↔ Direction'            :
                     reason==='CHOPPY'    ? '〜 Choppy'              :
-                    reason==='TOO_EXTENDED' ? '⚠ Extended'          :
                     reason; // FIX: was a bare '—' for any unhandled reason,
                             // silently hiding the actual skip reason (this is
                             // exactly what produced the "-" for
@@ -853,7 +855,6 @@
                     reason==='RECENTLY_TRADED' ? 'var(--gold)' :
                     reason==='DIRECTION' ? 'var(--red)'     :
                     reason==='CHOPPY'    ? 'var(--muted)'   :
-                    reason==='TOO_EXTENDED' ? 'var(--red)'  :
                     'var(--muted)';
 
                 const pc2 =
