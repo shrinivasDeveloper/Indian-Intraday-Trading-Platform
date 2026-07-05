@@ -1,15 +1,19 @@
 package com.trading.swing.service;
 
+import com.trading.shared.risk.AccountMarginGuard;
+import com.trading.shared.risk.CrossStrategyPositionRegistry;
 import com.zerodhatech.kiteconnect.KiteConnect;
 import com.zerodhatech.kiteconnect.kitehttp.exceptions.KiteException;
 import com.zerodhatech.kiteconnect.utils.Constants;
 import com.zerodhatech.models.Order;
 import com.zerodhatech.models.OrderParams;
+import com.zerodhatech.models.Quote;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.util.List;
 
 /**
@@ -25,6 +29,15 @@ import java.util.List;
  * infrastructure pattern used throughout this app - e.g. AI and News both
  * share the same JdbcTemplate/KiteConnect for the same reason) - zero
  * shared business logic, zero shared order-construction code.
+ *
+ * FIX (found during a full production-readiness review): wired in
+ * AccountMarginGuard and CrossStrategyPositionRegistry - two genuinely
+ * shared, cross-strategy safeguards (capital/margin and symbol exposure
+ * are real, singular, shared resources across the whole Zerodha account,
+ * unlike strategy-specific business logic). Purely additive - zero
+ * changes to the actual order-building/placement code below, zero
+ * changes to this class's public method signatures, zero changes to
+ * any caller.
  */
 @Component
 @Slf4j
@@ -32,13 +45,44 @@ import java.util.List;
 public class ManualSwingOrderClient {
 
     private final KiteConnect kiteConnect;
+    private final AccountMarginGuard marginGuard;
+    private final CrossStrategyPositionRegistry positionRegistry;
 
     public String placeBuyMarketOrder(String symbol, String exchange, int qty) {
-        return doPlace(build(symbol, exchange, Constants.TRANSACTION_TYPE_BUY, qty));
+        // FIX: cross-strategy safeguards, checked right before order
+        // placement - advisory margin check (skips the attempt rather
+        // than letting it fail at the broker) and exposure visibility
+        // (warns only, never blocks). Zero change to the actual order
+        // construction/placement below.
+        try {
+            String quoteKey = exchange + ":" + symbol;
+            Quote q = kiteConnect.getQuote(new String[]{quoteKey}).get(quoteKey);
+            if (q != null && q.lastPrice > 0) {
+                BigDecimal estimatedCost = BigDecimal.valueOf(q.lastPrice)
+                        .multiply(BigDecimal.valueOf(qty));
+                var marginResult = marginGuard.checkSufficientMargin(estimatedCost, "SWING");
+                if (!marginResult.sufficient()) {
+                    throw new ManualSwingOrderException(
+                            "Insufficient account margin for this order (need ~Rs." + estimatedCost +
+                                    ", available Rs." + marginResult.availableMargin() + ") - order not attempted");
+                }
+            }
+        } catch (ManualSwingOrderException e) {
+            throw e; // re-throw the deliberate margin-insufficiency exception
+        } catch (KiteException | Exception e) {
+            log.debug("[SWING] Pre-order margin/quote check skipped (non-fatal): {}", e.getMessage());
+        }
+        positionRegistry.checkAndWarnIfHeldElsewhere(symbol, "SWING");
+
+        String orderId = doPlace(build(symbol, exchange, Constants.TRANSACTION_TYPE_BUY, qty));
+        positionRegistry.registerPosition(symbol, "SWING");
+        return orderId;
     }
 
     public String placeSellMarketOrder(String symbol, String exchange, int qty) {
-        return doPlace(build(symbol, exchange, Constants.TRANSACTION_TYPE_SELL, qty));
+        String orderId = doPlace(build(symbol, exchange, Constants.TRANSACTION_TYPE_SELL, qty));
+        positionRegistry.releasePosition(symbol, "SWING");
+        return orderId;
     }
 
     private OrderParams build(String symbol, String exchange, String txType, int qty) {

@@ -10,23 +10,23 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.stereotype.Component;
 
 /**
- * ManualSwingConfig — the dedicated Configuration component for this
+ * ManualSwingConfig - the dedicated Configuration component for this
  * module, as explicitly required by the independence section of the
  * spec ("Create separate: ... Configuration"). Every tunable value the
  * module needs lives here, bound from the manual-swing.* namespace in
- * application.yml — nothing hard-coded anywhere else in the module.
+ * application.yml - nothing hard-coded anywhere else in the module.
  *
  * FIX (found during a "did this touch anything else" validation pass):
  * the application has @EnableScheduling but NO custom TaskScheduler bean
- * defined anywhere — meaning AI's EOD force-close, News's EOD force-
+ * defined anywhere - meaning AI's EOD force-close, News's EOD force-
  * close, BTST's crons, and any new @Scheduled method all share Spring's
  * single-threaded default scheduler, executing strictly one at a time.
  * This module's order-fill polling uses blocking Thread.sleep() calls
- * (up to ~30s total per attempt cycle) — on the shared default
+ * (up to ~30s total per attempt cycle) - on the shared default
  * scheduler, that could have delayed a critical AI/News EOD exit if the
  * timing happened to overlap. A dedicated, separate TaskScheduler bean
  * here means this module's scheduler runs entirely on its own thread,
- * never contending with any existing strategy's cron jobs — referenced
+ * never contending with any existing strategy's cron jobs - referenced
  * explicitly via @Scheduled(scheduler = "manualSwingTaskScheduler", ...)
  * on ManualSwingScheduler.
  */
@@ -54,14 +54,14 @@ public class ManualSwingConfig {
     /** Max poll attempts before giving up on fill confirmation. Default 10. */
     private int orderPollMaxAttempts = 10;
 
-    /** Per-symbol buy-lock expiry, milliseconds — see duplicate-protection
+    /** Per-symbol buy-lock expiry, milliseconds - see duplicate-protection
      *  docs on ManualSwingTradingService. Default 10s, generous for a
      *  single HTTP request/response cycle, short enough not to lock out
      *  a genuinely new buy attempt for long. */
     private long buyLockExpiryMs = 10000;
 
     /**
-     * Dedicated scheduler thread for this module only — see the class-
+     * Dedicated scheduler thread for this module only - see the class-
      * level FIX note above. 1 thread is intentional: this module's own
      * monitoring tick already has a re-entrancy guard (only one tick
      * runs at a time), so there's never a need for more than one thread
@@ -79,7 +79,7 @@ public class ManualSwingConfig {
 
     /**
      * Separate executor specifically for the bhavcopy backfill's @Async
-     * background task — deliberately NOT the same thread as
+     * background task - deliberately NOT the same thread as
      * manualSwingTaskScheduler, since the backfill can run for an
      * extended period (many sequential, deliberately delayed HTTP
      * fetches) and must never block the monitoring scheduler's own
@@ -102,9 +102,9 @@ public class ManualSwingConfig {
      * ManualSwingScheduler's time-critical exit monitoring (target hits,
      * the 9:20 AM force-exit). The auto-selection process makes 2 NSE
      * HTTP calls (shareholding + financial results) PER momentum-passing
-     * stock in EVERY qualifying sector — easily 30-40+ sequential network
+     * stock in EVERY qualifying sector - easily 30-40+ sequential network
      * calls in a real run. On a single shared thread, that selection run
-     * would have BLOCKED exit-monitoring ticks for ACTIVE trades — the
+     * would have BLOCKED exit-monitoring ticks for ACTIVE trades - the
      * exact same class of problem the original AI/News scheduler-
      * isolation fix was meant to prevent, recreated within this module
      * between its own two schedulers. Dedicated thread fixes it, same
@@ -119,40 +119,51 @@ public class ManualSwingConfig {
         return scheduler;
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // AUTO STOCK SELECTION — small-cap-focused automated swing trading.
-    // Disabled by default (autoTradeEnabled=false) — must be explicitly
+    // ===================================================================
+    // AUTO STOCK SELECTION - small-cap-focused automated swing trading.
+    // Disabled by default (autoTradeEnabled=false) - must be explicitly
     // turned on. Every threshold below comes directly from the spec's
     // Rule 2/3/4 sections; nothing here is invented.
-    // ═══════════════════════════════════════════════════════════════════
+    // ===================================================================
 
-    /** Master switch — auto-selection does nothing at all unless true. */
+    /** Master switch - auto-selection does nothing at all unless true. */
     private boolean autoTradeEnabled = false;
 
     /** The 3:00 PM IST trigger time. */
     private String autoTradeCheckTime = "15:00";
 
-    /** Fixed capital for the auto-selected trade. Default ₹10,000 per spec. */
+    /** Fixed capital for the auto-selected trade. Default Rs.10,000 per spec. */
     private double autoTradeCapital = 10000.0;
 
     /** How many trading days of bhavcopy history to backfill. ~252 = 1 year,
      *  needed for Rule 2's yearly-performance qualification. */
     private int backfillTargetDays = 252;
 
-    /** Delay between each backfill day's HTTP fetch, milliseconds —
+    /** Delay between each backfill day's HTTP fetch, milliseconds -
      *  deliberately conservative to stay respectful of NSE's servers
      *  during the one-time historical backfill. */
     private long backfillDelayMs = 2000;
 
-    /** Rule 1: how many top-ranked sectors to evaluate before giving up. */
-    private int topSectorsToEvaluate = 4;
-
-    /** Rule 2 sector qualification thresholds — directly from the spec. */
-    private double sectorDailyMinPct = 5.0;
+    /**
+     * CORRECTED (per explicit spec correction): these are STOCK-level
+     * qualification thresholds, not sector-level (this system's earlier
+     * implementation incorrectly applied them to a sector-wide average).
+     * Daily band corrected to 4-6% (was incorrectly 5-6%) - "4-6% only
+     * not more than this," per the exact corrected spec text. Field
+     * names kept as sectorXxx for now to avoid a wider rename across
+     * every file that references them via ManualSwingConfig - the
+     * VALUES and their actual usage (in StockQualificationService) are
+     * what matter and are now correct.
+     */
+    private double sectorDailyMinPct = 4.0;
     private double sectorDailyMaxPct = 6.0;
     private double sectorWeeklyMinPct = 15.0;
     private double sectorMonthlyOverWeeklyMarginPct = 5.0;
-    private double sectorYearlyMinPct = 60.0;
+
+    /** ADDED (per explicit instruction: "add for stock yearly gate -
+     *  yearly Performance >= 70 percentage"). A genuinely NEW, different
+     *  threshold from the old, removed sector-level 60% value. */
+    private double sectorYearlyMinPct = 70.0;
 
     /** Rule 4: mandatory promoter holding floor. */
     private double minPromoterHoldingPct = 60.0;

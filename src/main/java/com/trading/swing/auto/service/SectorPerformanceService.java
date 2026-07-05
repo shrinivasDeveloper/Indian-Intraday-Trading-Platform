@@ -12,36 +12,34 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
- * SectorPerformanceService - Rule 1 (sector strength, highest priority)
- * and Rule 2 (sector qualification thresholds).
+ * SectorPerformanceService - "Sector Strength (Highest Priority)".
  *
- * CLASSIFICATION SOURCE (updated): for any stock covered by NSE Indices
- * Ltd.'s own Nifty Total Market constituent file (750 stocks - Nifty
- * 500 + Nifty Microcap 250), this now uses that REAL, OFFICIAL,
- * revenue-segment-based classification - not a keyword guess. This is
- * the actual source NSE/Trendlyne-style sector pages are built on,
- * confirmed against NSE Indices' own published methodology and
- * downloaded fresh daily via OfficialSectorMappingCache.
+ * CORRECTED (per explicit user correction to this session's earlier,
+ * incorrect implementation): sectors are PURE RANKING ONLY - there is
+ * NO qualification threshold/gate at the sector level. Every one of
+ * the 31 sectors is ranked by its Daily/Weekly/Monthly performance
+ * (yearly is NOT part of sector ranking - removed, since the corrected
+ * spec never mentions yearly at all). The actual pass/fail
+ * qualification (4-6% daily, >=15% weekly, monthly >= weekly+5%) is a
+ * STOCK-level concept, implemented separately in
+ * StockQualificationService - never applied to a sector's own average.
  *
- * For the remainder - smaller micro-caps outside those 750 stocks, where
- * no free official mapping exists - StockSectorClassifier's keyword
- * matching is used as a CLEARLY DISTINGUISHED fallback (logged
- * separately, never silently blended with the real data). This is the
- * most honest approach available without a paid data source: real data
- * where it genuinely exists, transparent approximation where it doesn't.
+ * Ranking formula, stated plainly since the spec doesn't specify exact
+ * weights: sectors are ranked by the simple average of their
+ * Daily/Weekly/Monthly percentages (when available) - an unweighted
+ * composite, the most literal, defensible reading of "rank sectors
+ * based on Daily/Weekly/Monthly Performance" without inventing
+ * arbitrary weighting the spec never specified.
  *
- * Methodology for performance calculation, stated plainly: sector
- * performance is the SIMPLE AVERAGE of its constituent stocks' % price
- * change over each timeframe - not market-cap-weighted, since no
- * market-cap data source is currently connected to this system.
+ * ALL 31 sectors are returned, ranked - not limited to a "top N" -
+ * per explicit correction: "untill all 31 sector select all."
  *
- * "No listed stock should be excluded" (Rule 1): every EQ/BE symbol with
- * sufficient stored history is included in its sector's average - none
- * are filtered out before this stage, regardless of which classification
- * source (official or fallback) applies to it.
+ * CLASSIFICATION SOURCE: unchanged from before - 750 stocks via NSE
+ * Indices' own real official data, remainder via keyword fallback,
+ * clearly distinguished, never blended. "No listed stock excluded"
+ * remains fully honored.
  */
 @Service
 @Slf4j
@@ -125,23 +123,35 @@ public class SectorPerformanceService {
     }
 
     /**
-     * Computes performance for every classified sector, ranks by daily
-     * performance (Rule 1: "Rank sectors based on Daily, Weekly, Monthly
-     * Performance" - daily first as the primary sort, the others as
-     * supporting context and the actual Rule 2 gates), and returns the
-     * top N (config: topSectorsToEvaluate) - qualifying or not, so the
-     * caller can walk down the ranked list per Rule 2's explicit
-     * fallback instruction ("if no qualifying stock found in the
-     * highest-ranked sector, proceed to the next").
+     * Computes performance for every classified sector and ranks ALL of
+     * them by a composite Daily/Weekly/Monthly score - per explicit
+     * correction, this returns every sector (not limited to a "top N"),
+     * so the caller can walk the FULL ranked list per the spec's
+     * "untill all 31 sector select all" instruction. No qualification
+     * gate is applied here - sectors are pure ranking, never filtered
+     * out by a threshold at this level.
      */
-    public List<SectorPerformance> rankTopSectors(Map<String, List<String>> sectorToSymbols) {
+    public List<SectorPerformance> rankAllSectors(Map<String, List<String>> sectorToSymbols) {
         List<SectorPerformance> all = new ArrayList<>();
         for (Map.Entry<String, List<String>> entry : sectorToSymbols.entrySet()) {
             SectorPerformance perf = computeSectorPerformance(entry.getKey(), entry.getValue());
             if (perf != null) all.add(perf);
         }
-        all.sort((a, b) -> b.dailyPct().compareTo(a.dailyPct()));
-        return all.stream().limit(config.getTopSectorsToEvaluate()).collect(Collectors.toList());
+        all.sort((a, b) -> compositeScore(b).compareTo(compositeScore(a)));
+        log.info("[SECTOR-PERF] Ranked {} sectors (all evaluated, no top-N limit per corrected spec)",
+                all.size());
+        return all;
+    }
+
+    /** Unweighted average of whichever of Daily/Weekly/Monthly are
+     *  actually available for this sector - the composite rank key. */
+    private BigDecimal compositeScore(SectorPerformance p) {
+        List<BigDecimal> present = new ArrayList<>();
+        if (p.dailyPct() != null) present.add(p.dailyPct());
+        if (p.weeklyPct() != null) present.add(p.weeklyPct());
+        if (p.monthlyPct() != null) present.add(p.monthlyPct());
+        if (present.isEmpty()) return BigDecimal.valueOf(Double.NEGATIVE_INFINITY);
+        return average(present);
     }
 
     private SectorPerformance computeSectorPerformance(String sectorName, List<String> symbols) {
@@ -149,10 +159,9 @@ public class SectorPerformanceService {
         List<BigDecimal> dailyChanges = new ArrayList<>();
         List<BigDecimal> weeklyChanges = new ArrayList<>();
         List<BigDecimal> monthlyChanges = new ArrayList<>();
-        List<BigDecimal> yearlyChanges = new ArrayList<>();
 
         for (String symbol : symbols) {
-            List<DailyBar> bars = barRepo.findBySymbol(symbol, today.minusYears(1).minusDays(10));
+            List<DailyBar> bars = barRepo.findBySymbol(symbol, today.minusDays(60));
             if (bars.size() < 2) continue; // not enough history for this symbol yet - skip it,
             // don't let one thin symbol distort the average
 
@@ -160,95 +169,19 @@ public class SectorPerformanceService {
             pctChangeFromLookback(bars, latestClose, 1).ifPresent(dailyChanges::add);
             pctChangeFromLookback(bars, latestClose, 5).ifPresent(weeklyChanges::add);
             pctChangeFromLookback(bars, latestClose, 21).ifPresent(monthlyChanges::add);
-            pctChangeFromLookback(bars, latestClose, 252).ifPresent(yearlyChanges::add);
         }
 
-        if (dailyChanges.isEmpty()) {
+        if (dailyChanges.isEmpty() && weeklyChanges.isEmpty() && monthlyChanges.isEmpty()) {
             log.debug("[SECTOR-PERF] {} has no symbols with sufficient history yet - skipped",
                     sectorName);
             return null;
         }
 
-        // FIX (critical, found during prompt-vs-output verification):
-        // average() previously returned BigDecimal.ZERO for an empty
-        // list - meaning during the gradual historical backfill (which
-        // takes a while by design), a sector with literally ZERO stocks
-        // having 252 days of history would report yearlyAvg=0.0% and
-        // get auto-disqualified by Rule 2's ">=60%" check - not because
-        // its real yearly performance was bad, but because the system
-        // falsely reported "0%" instead of "I don't have this data yet."
-        // A sector with genuinely strong 65% yearly growth would have
-        // been incorrectly rejected. Fixed: weekly/monthly/yearly
-        // averages are now Optional - null means "insufficient data,"
-        // structurally distinct from a real, computed zero, and
-        // checkQualification() treats null as "cannot yet judge this
-        // criterion" rather than "fails this criterion."
-        BigDecimal dailyAvg   = average(dailyChanges); // always has data - checked above
-        Optional<BigDecimal> weeklyAvg  = averageOrEmpty(weeklyChanges);
-        Optional<BigDecimal> monthlyAvg = averageOrEmpty(monthlyChanges);
-        Optional<BigDecimal> yearlyAvg  = averageOrEmpty(yearlyChanges);
+        BigDecimal dailyAvg   = averageOrEmpty(dailyChanges).orElse(null);
+        BigDecimal weeklyAvg  = averageOrEmpty(weeklyChanges).orElse(null);
+        BigDecimal monthlyAvg = averageOrEmpty(monthlyChanges).orElse(null);
 
-        String disqualReason = checkQualification(dailyAvg, weeklyAvg, monthlyAvg, yearlyAvg);
-
-        return new SectorPerformance(sectorName, dailyAvg,
-                weeklyAvg.orElse(null), monthlyAvg.orElse(null), yearlyAvg.orElse(null),
-                symbols, disqualReason == null, disqualReason);
-    }
-
-    /**
-     * Rule 2's exact thresholds, checked in the exact order stated:
-     *   Daily: 5%-6% (not higher than 6%)
-     *   Weekly: >= 15%
-     *   Monthly: >= weekly + 5 percentage points
-     *   Yearly: >= 60%
-     *
-     * weekly/monthly/yearly are Optional - empty means genuinely
-     * insufficient backfilled history for this timeframe yet (NOT a real
-     * 0% reading). A sector cannot be confidently qualified OR
-     * disqualified on a criterion it doesn't yet have real data for -
-     * this returns a clearly distinct "insufficient data" reason rather
-     * than silently treating missing data as a failing zero.
-     */
-    private String checkQualification(BigDecimal daily, Optional<BigDecimal> weekly,
-                                      Optional<BigDecimal> monthly, Optional<BigDecimal> yearly) {
-        double d = daily.doubleValue();
-
-        if (d < config.getSectorDailyMinPct() || d > config.getSectorDailyMaxPct()) {
-            return String.format("Daily %.2f%% outside required %.0f-%.0f%% band",
-                    d, config.getSectorDailyMinPct(), config.getSectorDailyMaxPct());
-        }
-
-        if (weekly.isEmpty()) {
-            return "Weekly performance: insufficient backfilled history yet - cannot judge " +
-                    "this criterion, not a failing 0%";
-        }
-        double w = weekly.get().doubleValue();
-        if (w < config.getSectorWeeklyMinPct()) {
-            return String.format("Weekly %.2f%% below required %.0f%%",
-                    w, config.getSectorWeeklyMinPct());
-        }
-
-        if (monthly.isEmpty()) {
-            return "Monthly performance: insufficient backfilled history yet - cannot judge " +
-                    "this criterion, not a failing 0%";
-        }
-        double m = monthly.get().doubleValue();
-        double requiredMonthly = w + config.getSectorMonthlyOverWeeklyMarginPct();
-        if (m < requiredMonthly) {
-            return String.format("Monthly %.2f%% below weekly+%.0f (%.2f%% required)",
-                    m, config.getSectorMonthlyOverWeeklyMarginPct(), requiredMonthly);
-        }
-
-        if (yearly.isEmpty()) {
-            return "Yearly performance: insufficient backfilled history yet (needs ~252 trading " +
-                    "days) - cannot judge this criterion, not a failing 0%";
-        }
-        double y = yearly.get().doubleValue();
-        if (y < config.getSectorYearlyMinPct()) {
-            return String.format("Yearly %.2f%% below required %.0f%%",
-                    y, config.getSectorYearlyMinPct());
-        }
-        return null; // genuinely qualifies - every timeframe had real data and passed
+        return new SectorPerformance(sectorName, dailyAvg, weeklyAvg, monthlyAvg, symbols);
     }
 
     private Optional<BigDecimal> pctChangeFromLookback(List<DailyBar> bars, BigDecimal latestClose,

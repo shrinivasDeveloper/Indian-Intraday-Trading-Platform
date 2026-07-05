@@ -160,6 +160,7 @@
     <div class="tab" onclick="switchTab('news',this)">News 📰</div>
     <div class="tab" onclick="switchTab('ai',this)" id="tab-ai">AI Engine 🤖</div>
     <div class="tab" onclick="switchTab('swing',this); swLoadTrades();" id="tab-swing">Swing 📈</div>
+    <div class="tab" onclick="switchTab('herozero',this); hzLoad();" id="tab-herozero">Hero/Zero ⚡</div>
 </div>
 
 <!-- OVERVIEW -->
@@ -336,6 +337,54 @@
         <tbody id="sw-trades-body"></tbody>
     </table>
     <div id="sw-trades-empty" class="sub" style="display:none;padding:20px;text-align:center">No trades found</div>
+</div>
+
+<!-- HERO OR ZERO - independent module, reads only from /api/herozero/* -->
+<div id="tc-herozero" class="tc">
+    <div class="g g4">
+        <div class="card"><div class="ct">Strategy Status</div><div class="stat" id="hz-enabled">—</div></div>
+        <div class="card"><div class="ct">Entry Time</div><div class="stat" id="hz-entry-time">—</div></div>
+        <div class="card"><div class="ct">Exit Time</div><div class="stat" id="hz-exit-time">—</div></div>
+        <div class="card"><div class="ct">Active Trades</div><div class="stat sb" id="hz-active-count">—</div></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+        <div class="ct">📅 Monthly Expiry Status - All Indexes</div>
+        <table style="width:100%;font-size:12px;margin-top:8px">
+            <thead><tr style="color:var(--muted);text-align:left">
+                <th>Index</th><th>Natural Expiry</th><th>Actual Expiry</th>
+                <th>Holiday Shift</th><th>Monthly Expiry Today</th>
+            </tr></thead>
+            <tbody id="hz-indexes-body"></tbody>
+        </table>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+        <div class="ct">✅ Trade History</div>
+        <table style="width:100%;font-size:12px;margin-top:8px">
+            <thead><tr style="color:var(--muted);text-align:left">
+                <th>Index</th><th>Expiry</th><th>CE Strike</th><th>PE Strike</th>
+                <th>CE Premium</th><th>PE Premium</th><th>Total Premium</th>
+                <th>Qty</th><th>Status</th><th>P&L</th><th>Exit Reason</th>
+            </tr></thead>
+            <tbody id="hz-trades-body"></tbody>
+        </table>
+        <div id="hz-trades-empty" class="sub" style="display:none;padding:20px;text-align:center">No trades yet</div>
+    </div>
+
+    <div class="card" style="margin-top:16px;border:1px solid rgba(240,192,64,.3)">
+        <div class="ct">⚠️ Reminders</div>
+        <div class="sub" style="line-height:1.8">
+            - Monthly Expiry Only - Weekly Expiry Not Allowed<br>
+            - Exit at mandatory time without exception<br>
+            - Never average positions<br>
+            - Never hold beyond exit time<br>
+            - Maximum loss is limited to the premium paid<br>
+            - Holiday calendar checked automatically before every session<br>
+            - Strategy is fully automated and restart-safe<br>
+            - Completely independent from AI/News/Swing strategies
+        </div>
+    </div>
 </div>
 
 <script>
@@ -1178,6 +1227,91 @@
             </tr>`;
         }).join(''));
     }
+
+    // ===================================================================
+    // HERO OR ZERO - completely independent module. Fetches ONLY from
+    // /api/herozero/*, its own dedicated controller - zero coupling to
+    // the AI/News/Swing dashboard functions above.
+    // ===================================================================
+    async function hzLoad() {
+        try {
+            const [statusRes, tradesRes] = await Promise.all([
+                fetch('/api/herozero/status'),
+                fetch('/api/herozero/trades')
+            ]);
+            const status = await statusRes.json();
+            const trades = await tradesRes.json();
+            hzRenderStatus(status);
+            hzRenderIndexes(status.indexes || {});
+            hzRenderTrades(trades || []);
+        } catch (e) { console.error('[HERO-ZERO] load failed', e); }
+    }
+
+    function hzRenderStatus(status) {
+        set('hz-enabled', status.enabled ? 'ENABLED' : 'DISABLED');
+        const enabledEl = q('hz-enabled');
+        if (enabledEl) enabledEl.style.color = status.enabled ? 'var(--green)' : 'var(--red)';
+        set('hz-entry-time', status.entryTime || '—');
+        set('hz-exit-time', status.exitTime || '—');
+        set('hz-active-count', (status.activeTrades || []).length);
+    }
+
+    function hzRenderIndexes(indexes) {
+        const rows = Object.entries(indexes).map(([index, info]) => {
+            const shiftText = info.wasHolidayShifted
+                ? `⚠️ ${info.naturalExpiry} → ${info.actualExpiry}`
+                : 'No shift';
+            const todayPill = info.isMonthlyExpiryToday
+                ? '<span class="pill pg">YES</span>'
+                : '<span class="pill" style="color:var(--muted)">No</span>';
+            return `<tr>
+                <td>${index}</td>
+                <td>${info.naturalExpiry}</td>
+                <td>${info.actualExpiry}</td>
+                <td class="sub">${shiftText}</td>
+                <td>${todayPill}</td>
+            </tr>`;
+        }).join('');
+        html('hz-indexes-body', rows);
+    }
+
+    function hzRenderTrades(trades) {
+        const empty = q('hz-trades-empty');
+        if (!trades.length) {
+            html('hz-trades-body', '');
+            if (empty) empty.style.display = 'block';
+            return;
+        }
+        if (empty) empty.style.display = 'none';
+
+        html('hz-trades-body', trades.map(t => {
+            const pnlColor = t.pnl == null ? 'var(--muted)' : (parseFloat(t.pnl) >= 0 ? 'var(--green)' : 'var(--red)');
+            const pnlText = t.pnl == null ? '—' : fp(t.pnl);
+            const statusColor = t.tradeStatus === 'ACTIVE' ? 'var(--green)'
+                : t.tradeStatus === 'EXITED' ? 'var(--muted)'
+                : t.tradeStatus === 'SKIPPED' ? 'var(--gold)' : 'var(--red)';
+            return `<tr>
+                <td>${t.index}</td>
+                <td>${t.monthlyExpiryDate}</td>
+                <td>${t.ceStrike ?? '—'}</td>
+                <td>${t.peStrike ?? '—'}</td>
+                <td>${t.cePremium ?? '—'}</td>
+                <td>${t.pePremium ?? '—'}</td>
+                <td>${t.totalPremium ?? '—'}</td>
+                <td>${t.quantity ?? '—'}</td>
+                <td><span class="pill" style="color:${statusColor}">${t.tradeStatus}</span></td>
+                <td style="color:${pnlColor};font-weight:600">${pnlText}</td>
+                <td class="sub">${t.exitReason ?? '—'}</td>
+            </tr>`;
+        }).join(''));
+    }
+
+    // Own independent refresh cycle - 15s, matching this module's own
+    // pace (entry/exit only twice a day), not tied to any other tab's
+    // poll interval at all.
+    window.addEventListener('DOMContentLoaded', () => {
+        hzLoad(); setInterval(hzLoad, 15000);
+    });
 
     // Own independent refresh cycle — 10s, swing-trade granularity, not
     // tied to the main dashboard's 3s poll at all.
