@@ -149,22 +149,22 @@ public class ManualSwingConfig {
      * qualification thresholds, not sector-level (this system's earlier
      * implementation incorrectly applied them to a sector-wide average).
      * Daily band corrected to 4-6% (was incorrectly 5-6%) - "4-6% only
-     * not more than this," per the exact corrected spec text. Field
-     * names kept as sectorXxx for now to avoid a wider rename across
-     * every file that references them via ManualSwingConfig - the
-     * VALUES and their actual usage (in StockQualificationService) are
-     * what matter and are now correct.
+     * not more than this," per the exact corrected spec text.
+     *
+     * RENAMED (per explicit follow-up: "we have removed the sector
+     * related right we need stock related") - fields renamed from
+     * sectorXxx to stockXxx to accurately reflect what they actually
+     * gate now, since sector-based filtering was removed entirely from
+     * this pipeline earlier. Only consumer is StockQualificationService,
+     * updated to match.
      */
-    private double sectorDailyMinPct = 4.0;
-    private double sectorDailyMaxPct = 6.0;
-    private double sectorWeeklyMinPct = 15.0;
-    private double sectorMonthlyOverWeeklyMarginPct = 5.0;
+    private double stockDailyMinPct = 4.0;
+    private double stockDailyMaxPct = 6.0;
+    private double stockWeeklyMinPct = 15.0;
+    private double stockMonthlyOverWeeklyMarginPct = 5.0;
 
     /** ADDED (per explicit instruction: "add for stock yearly gate -
      *  yearly Performance >= 70 percentage"). A genuinely NEW, different
      *  threshold from the old, removed sector-level 60% value. */
-    private double sectorYearlyMinPct = 70.0;
-
-    /** Rule 4: mandatory promoter holding floor. */
-    private double minPromoterHoldingPct = 60.0;
+    private double stockYearlyMinPct = 70.0;
 }

@@ -70,6 +70,11 @@ zerodha:
 # whitelisted on Kite Developer Console, not Railway's own IP.
 # Disabled by default (proxyEnabled=false) - zero effect on local
 # development, where your own IP is already stable and whitelisted.
+# NOTE: local relay port (127.0.0.1:18899) is hardcoded in
+# LocalProxyRelay.java, not configurable here - confirmed this is the
+# correct, simpler version after reverting an earlier attempt to make
+# it configurable (the actual port conflict that prompted that attempt
+# was a leftover OS process, not a real code need for configurability).
 kite:
   proxy:
     enabled: ${KITE_PROXY_ENABLED:false}
@@ -114,6 +119,15 @@ paper-trading:
 # ================================
 # RISK CONTROL — still read by CircuitBreakerService, which AI/News
 # both depend on for the daily/weekly/monthly drawdown permission check.
+#
+# NOTE: this is entirely SEPARATE from AccountMarginGuard (a newer,
+# genuinely shared cross-strategy safeguard added during a full
+# platform production-readiness review — checks REAL live Zerodha
+# account margin before each order, no config needed, always active
+# once its bean is wired in). CircuitBreakerService below governs
+# drawdown/loss limits; AccountMarginGuard governs whether the account
+# can literally afford one more order right now. Both matter, neither
+# replaces the other.
 # ================================
 circuit-breaker:
   max-trades-per-day: 10
@@ -191,7 +205,23 @@ strategy:
 # explicitly setting AI_TRADING_ENABLED=false is now required to turn
 # AI off, the safer default direction given you're going live with AI
 # specifically tomorrow.
-# ================================
+#
+# threshold correction (this revision): TRENDING/RANGING execution
+# thresholds unified to a single 80-point minimum in code
+# (AiTradingSystem.java) after the old ">1.5% extended" hard-lock gate
+# was removed per explicit instruction - min-confidence/min-rr below
+# are unrelated, separate gates and are unchanged.
+ai:
+  trading:
+    enabled: ${AI_TRADING_ENABLED:true}
+    max-trades-per-day: 5
+    max-concurrent: 2
+    min-confidence: 0.60
+    min-rr: 2.0
+    ranking-top-n: 20
+    risk-per-trade: 0.01
+    scanner-enabled: true
+
 # ================================
 # MANUAL SWING TRADING MODULE
 # Completely independent module — manual CNC swing trades initiated from
@@ -206,34 +236,91 @@ manual-swing:
   order-poll-interval-ms: 3000     # fill-confirmation poll, same cadence as rest of app
   order-poll-max-attempts: 10
 
-  # ── Auto Stock Selection & Auto Buy (small-cap focused) — DISABLED by
-  # default. Per spec: scans full NSE+BSE universe, ranks sectors (Rule 1),
-  # qualifies them against daily/weekly/monthly/yearly thresholds (Rule 2),
-  # applies mandatory momentum (Rule 3) and promoter-holding (Rule 4)
-  # gates, scores survivors by fundamentals, buys the highest-confidence
-  # pick at 3pm with fixed capital — ONLY if no manual trade exists today.
-  auto-trade-enabled: false
+  # ── Auto Stock Selection & Auto Buy — DISABLED by default.
+  #
+  # CORRECTED THIS REVISION (per explicit spec correction - the earlier
+  # implementation had genuinely conflated sector-level and stock-level
+  # qualification):
+  #   "Sector Strength" (Rule 1) — REMOVED ENTIRELY per later explicit
+  #     instruction ("remove sector field put only stock filter for all
+  #     nse bse stock"). Every NSE+BSE equity stock is now evaluated
+  #     directly, with zero sector grouping/ranking/gating of any kind.
+  #     top-sectors-to-evaluate's old meaning is gone entirely.
+  #   "Stock Qualification" — now the ONLY qualification concept, checked
+  #     per INDIVIDUAL STOCK (not a sector average): daily 4-6%, weekly
+  #     >=15%, monthly >= weekly+5%, AND a NEW yearly >=70% gate added
+  #     later this revision (stock-yearly-min-pct is REPURPOSED for this
+  #     stock-level check now, not removed - just means something
+  #     different than its original sector-level intent).
+  #   "Stock Momentum" (mandatory) — current-month higher-highs + no
+  #     significant breakdown - UNCHANGED throughout every correction,
+  #     confirmed byte-identical each time.
+  #   Cooling period — CORRECTED from 10 to 15 trading days per explicit
+  #     instruction ("last 15 days dont take trade").
+  #
+  # REMOVED (confirmed dead, zero remaining references anywhere):
+  #   top-sectors-to-evaluate — sector walking no longer exists at all
+  #   min-promoter-holding-pct — Rule 4/fundamentals removed entirely
+  #     earlier this revision (Yahoo Finance dependency also removed)
+  auto-trade-enabled: true
   auto-trade-check-time: "15:00"
   auto-trade-capital: 10000
   backfill-target-days: 252
   backfill-delay-ms: 2000
-  top-sectors-to-evaluate: 4
-  sector-daily-min-pct: 5.0
-  sector-daily-max-pct: 6.0
-  sector-weekly-min-pct: 15.0
-  sector-monthly-over-weekly-margin-pct: 5.0
-  sector-yearly-min-pct: 60.0
+  stock-daily-min-pct: 4.0    # CORRECTED from 5.0 - spec says "4-6% only"
+  stock-daily-max-pct: 6.0
+  stock-weekly-min-pct: 15.0
+  stock-monthly-over-weekly-margin-pct: 5.0
+  stock-yearly-min-pct: 70.0  # REPURPOSED: was sector-level 60%, now the
+    # NEW stock-level yearly gate at 70%, added
+  # per explicit instruction this revision
 
-ai:
-  trading:
-    enabled: ${AI_TRADING_ENABLED:true}
-    max-trades-per-day: 5
-    max-concurrent: 2
-    min-confidence: 0.60
-    min-rr: 2.0
-    ranking-top-n: 20
-    risk-per-trade: 0.01
-    scanner-enabled: true
+# ================================
+# HERO OR ZERO — MONTHLY EXPIRY OPTIONS STRATEGY
+#
+# NEW THIS REVISION: completely independent module (own controller,
+# service, scheduler, repository, entity, config, exception - zero
+# shared business logic with AI/News/Swing, confirmed by direct source
+# search). Trades ONE CE + ONE PE per index, ONLY on that index's real
+# Monthly Expiry day (automatically holiday-shifted per NSE/BSE rules),
+# entry at entry-time, MANDATORY exit at exit-time regardless of P&L.
+#
+# DISABLED BY DEFAULT (enabled=false) — this places real, undefined-
+# max-loss-until-decided option market orders automatically once
+# enabled. Confirmed from your own startup logs every time so far:
+# "[HERO-ZERO] Strategy disabled (hero-zero.enabled=false) - scheduler
+# idle." Must be explicitly turned on when you're ready to go live.
+#
+# HONEST CAVEAT (stated in code, repeated here): expiry-weekday
+# assignments below and the holiday calendar used internally
+# (HeroZeroHolidayChecker, a SEPARATE, independent copy from Swing's
+# own MarketHolidayChecker) were compiled from public sources, NOT
+# verified against NSE/BSE's own official JS-rendered calendar
+# directly. Verify both before trusting this with real capital.
+# ================================
+hero-zero:
+  enabled: ${HERO_ZERO_ENABLED:false}
+  entry-time: "14:30"
+  exit-time: "15:10"
+  strike-selection-start-time: "14:25"
+  quantity-lots: 1
+  min-liquidity-volume: 500
+  order-poll-max-attempts: 10
+  order-poll-interval-ms: 3000
+  target-premium:
+    NIFTY: 15
+    BANKNIFTY: 25
+    FINNIFTY: 15
+    MIDCPNIFTY: 5
+    SENSEX: 30
+  # 1=Monday ... 7=Sunday (ISO-8601) — VERIFY against NSE/BSE's current
+  # circular before trusting these, per the honest caveat above.
+  expiry-weekday:
+    NIFTY: 2
+    BANKNIFTY: 4
+    FINNIFTY: 2
+    MIDCPNIFTY: 5
+    SENSEX: 5
 
 # ================================
 # WARMUP CONFIG

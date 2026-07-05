@@ -77,10 +77,10 @@ public class StockQualificationService {
                     null, null, null, null);
         }
         double daily = dailyOpt.get().doubleValue();
-        if (daily < config.getSectorDailyMinPct() || daily > config.getSectorDailyMaxPct()) {
+        if (daily < config.getStockDailyMinPct() || daily > config.getStockDailyMaxPct()) {
             return new QualificationResult(false, String.format(
                     "Daily %.2f%% outside required %.0f-%.0f%% band",
-                    daily, config.getSectorDailyMinPct(), config.getSectorDailyMaxPct()),
+                    daily, config.getStockDailyMinPct(), config.getStockDailyMaxPct()),
                     dailyOpt.get(), weeklyOpt.orElse(null), monthlyOpt.orElse(null), yearlyOpt.orElse(null));
         }
 
@@ -89,9 +89,9 @@ public class StockQualificationService {
                     dailyOpt.get(), null, null, null);
         }
         double weekly = weeklyOpt.get().doubleValue();
-        if (weekly < config.getSectorWeeklyMinPct()) {
+        if (weekly < config.getStockWeeklyMinPct()) {
             return new QualificationResult(false, String.format(
-                    "Weekly %.2f%% below required %.0f%%", weekly, config.getSectorWeeklyMinPct()),
+                    "Weekly %.2f%% below required %.0f%%", weekly, config.getStockWeeklyMinPct()),
                     dailyOpt.get(), weeklyOpt.get(), monthlyOpt.orElse(null), yearlyOpt.orElse(null));
         }
 
@@ -100,11 +100,11 @@ public class StockQualificationService {
                     dailyOpt.get(), weeklyOpt.get(), null, yearlyOpt.orElse(null));
         }
         double monthly = monthlyOpt.get().doubleValue();
-        double requiredMonthly = weekly + config.getSectorMonthlyOverWeeklyMarginPct();
+        double requiredMonthly = weekly + config.getStockMonthlyOverWeeklyMarginPct();
         if (monthly < requiredMonthly) {
             return new QualificationResult(false, String.format(
                     "Monthly %.2f%% below weekly+%.0f (%.2f%% required)",
-                    monthly, config.getSectorMonthlyOverWeeklyMarginPct(), requiredMonthly),
+                    monthly, config.getStockMonthlyOverWeeklyMarginPct(), requiredMonthly),
                     dailyOpt.get(), weeklyOpt.get(), monthlyOpt.get(), yearlyOpt.orElse(null));
         }
 
@@ -116,9 +116,9 @@ public class StockQualificationService {
                     dailyOpt.get(), weeklyOpt.get(), monthlyOpt.get(), null);
         }
         double yearly = yearlyOpt.get().doubleValue();
-        if (yearly < config.getSectorYearlyMinPct()) {
+        if (yearly < config.getStockYearlyMinPct()) {
             return new QualificationResult(false, String.format(
-                    "Yearly %.2f%% below required %.0f%%", yearly, config.getSectorYearlyMinPct()),
+                    "Yearly %.2f%% below required %.0f%%", yearly, config.getStockYearlyMinPct()),
                     dailyOpt.get(), weeklyOpt.get(), monthlyOpt.get(), yearlyOpt.get());
         }
 
