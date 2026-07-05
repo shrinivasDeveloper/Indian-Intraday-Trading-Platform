@@ -59,6 +59,8 @@ public class HeroZeroTradingService {
     private final HeroZeroTradeRepository repo;
     private final MonthlyExpiryCalculator expiryCalculator;
     private final KiteConnect kiteConnect;
+    private final com.trading.shared.risk.AccountMarginGuard marginGuard;
+    private final com.trading.shared.risk.CrossStrategyPositionRegistry positionRegistry;
 
     // Duplicate-protection: per-index lock, cleared daily. Prevents a
     // rapid double-invocation (e.g. scheduler race, manual trigger
@@ -67,11 +69,15 @@ public class HeroZeroTradingService {
     private static final long ENTRY_LOCK_EXPIRY_MS = 60_000;
 
     public HeroZeroTradingService(HeroZeroConfig config, HeroZeroTradeRepository repo,
-                                  MonthlyExpiryCalculator expiryCalculator, KiteConnect kiteConnect) {
+                                  MonthlyExpiryCalculator expiryCalculator, KiteConnect kiteConnect,
+                                  com.trading.shared.risk.AccountMarginGuard marginGuard,
+                                  com.trading.shared.risk.CrossStrategyPositionRegistry positionRegistry) {
         this.config = config;
         this.repo = repo;
         this.expiryCalculator = expiryCalculator;
         this.kiteConnect = kiteConnect;
+        this.marginGuard = marginGuard;
+        this.positionRegistry = positionRegistry;
     }
 
     // =======================================================================
@@ -408,16 +414,43 @@ public class HeroZeroTradingService {
     }
 
     private String placeMarketBuy(Instrument inst) throws KiteException, IOException, JSONException {
+        // FIX (found during a full platform production-readiness review):
+        // wired in the same two cross-strategy safeguards already applied
+        // to Swing and the shared AI/News order client. Zero changes to
+        // the actual order construction below (marketProtection, product
+        // type, quantity calculation all untouched).
+        int qty = inst.getLot_size() * config.getQuantityLots();
+        try {
+            String quoteKey = inst.getExchange() + ":" + inst.getTradingsymbol();
+            Quote q = kiteConnect.getQuote(new String[]{quoteKey}).get(quoteKey);
+            if (q != null && q.lastPrice > 0) {
+                BigDecimal estimatedCost = BigDecimal.valueOf(q.lastPrice).multiply(BigDecimal.valueOf(qty));
+                var marginResult = marginGuard.checkSufficientMargin(estimatedCost, "HERO_ZERO");
+                if (!marginResult.sufficient()) {
+                    throw new HeroZeroException(
+                            "Insufficient account margin for " + inst.getTradingsymbol() +
+                                    " (need ~Rs." + estimatedCost + ", available Rs." +
+                                    marginResult.availableMargin() + ")");
+                }
+            }
+        } catch (HeroZeroException e) {
+            throw e; // re-throw the deliberate margin-insufficiency signal
+        } catch (KiteException | Exception e) {
+            log.debug("[HERO-ZERO] Pre-order margin/quote check skipped (non-fatal): {}", e.getMessage());
+        }
+        positionRegistry.checkAndWarnIfHeldElsewhere(inst.getTradingsymbol(), "HERO_ZERO");
+
         OrderParams p = new OrderParams();
         p.tradingsymbol = inst.getTradingsymbol();
         p.exchange = inst.getExchange();
         p.transactionType = Constants.TRANSACTION_TYPE_BUY;
-        p.quantity = inst.getLot_size() * config.getQuantityLots();
+        p.quantity = qty;
         p.orderType = Constants.ORDER_TYPE_MARKET;
         p.product = Constants.PRODUCT_MIS;
         p.validity = Constants.VALIDITY_DAY;
         p.marketProtection = -1; // SEBI-required for market orders - see session-wide fix
         Order order = kiteConnect.placeOrder(p, Constants.VARIETY_REGULAR);
+        positionRegistry.registerPosition(inst.getTradingsymbol(), "HERO_ZERO");
         return order.orderId;
     }
 
@@ -433,6 +466,7 @@ public class HeroZeroTradingService {
         p.validity = Constants.VALIDITY_DAY;
         p.marketProtection = -1;
         Order order = kiteConnect.placeOrder(p, Constants.VARIETY_REGULAR);
+        positionRegistry.releasePosition(tradingSymbol, "HERO_ZERO");
         return order.orderId;
     }
 

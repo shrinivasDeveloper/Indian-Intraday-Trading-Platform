@@ -1,5 +1,7 @@
 package com.trading.execution.client;
 
+import com.trading.shared.risk.AccountMarginGuard;
+import com.trading.shared.risk.CrossStrategyPositionRegistry;
 import com.zerodhatech.kiteconnect.KiteConnect;
 import com.zerodhatech.kiteconnect.kitehttp.exceptions.KiteException;
 import com.zerodhatech.models.*;
@@ -11,10 +13,13 @@ import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.util.*;
 
 /**
- * ZerodhaOrderClient - JAR-verified order execution client.
+ * ZerodhaOrderClient - JAR-verified order execution client, shared by
+ * BOTH AI and News (confirmed - this is the same execution path News
+ * uses via AiLiveOrderExecutionService).
  *
  * JAR-VERIFIED TYPE CORRECTIONS (from javap on kiteconnect.jar):
  *
@@ -56,6 +61,17 @@ import java.util.*;
  *     ORDER_OPEN        = "OPEN"
  *     ORDER_CANCELLED   = "CANCELLED"
  *     ORDER_REJECTED    = "REJECTED"
+ *
+ * FIX (found during a full platform production-readiness review): wired
+ * in AccountMarginGuard and CrossStrategyPositionRegistry - the same two
+ * genuinely shared, cross-strategy safeguards already wired into Swing.
+ * Since THIS client is itself shared by both AI and News with no way to
+ * distinguish which one is calling without changing every existing call
+ * site's method signature (explicitly not wanted), the safeguard logs
+ * are labeled generically as "AI_NEWS_SHARED" - still gives real,
+ * actionable visibility (this symbol/this amount), just not attributed
+ * to one specific strategy name. Zero changes to any existing method
+ * signature, zero changes to build()/doPlace()/order-construction logic.
  */
 @Component
 @Slf4j
@@ -63,25 +79,81 @@ import java.util.*;
 public class ZerodhaOrderClient {
 
     private final KiteConnect kiteConnect;
+    private final AccountMarginGuard marginGuard;
+    private final CrossStrategyPositionRegistry positionRegistry;
 
     // -- Order placement ---------------------------------------------------
 
     @Retryable(maxAttempts = 3, backoff = @Backoff(delay = 500, multiplier = 2))
     public String placeMarketOrder(String symbol, String txType, int qty) {
-        return doPlace(build(symbol, txType, qty, Constants.ORDER_TYPE_MARKET, 0.0, 0.0),
+        checkSafeguardsBeforeBuy(symbol, txType, qty, null);
+        String orderId = doPlace(build(symbol, txType, qty, Constants.ORDER_TYPE_MARKET, 0.0, 0.0),
                 Constants.VARIETY_REGULAR);
+        updateRegistryAfterOrder(symbol, txType);
+        return orderId;
     }
 
     @Retryable(maxAttempts = 3, backoff = @Backoff(delay = 500, multiplier = 2))
     public String placeLimitOrder(String symbol, String txType, int qty, double price) {
-        return doPlace(build(symbol, txType, qty, Constants.ORDER_TYPE_LIMIT, price, 0.0),
+        checkSafeguardsBeforeBuy(symbol, txType, qty, price);
+        String orderId = doPlace(build(symbol, txType, qty, Constants.ORDER_TYPE_LIMIT, price, 0.0),
                 Constants.VARIETY_REGULAR);
+        updateRegistryAfterOrder(symbol, txType);
+        return orderId;
     }
 
     @Retryable(maxAttempts = 3, backoff = @Backoff(delay = 500, multiplier = 2))
     public String placeSlmOrder(String symbol, String txType, int qty, double trigger) {
-        return doPlace(build(symbol, txType, qty, Constants.ORDER_TYPE_SLM, 0.0, trigger),
+        checkSafeguardsBeforeBuy(symbol, txType, qty, null);
+        String orderId = doPlace(build(symbol, txType, qty, Constants.ORDER_TYPE_SLM, 0.0, trigger),
                 Constants.VARIETY_REGULAR);
+        updateRegistryAfterOrder(symbol, txType);
+        return orderId;
+    }
+
+    /**
+     * Advisory margin check + exposure visibility - only meaningfully
+     * checks margin for BUY orders (a SELL/exit doesn't consume
+     * additional margin for an existing position). Never throws on its
+     * own failure, never blocks a SELL - only a BUY can be skipped here,
+     * and only when margin is genuinely confirmed insufficient.
+     */
+    private void checkSafeguardsBeforeBuy(String symbol, String txType, int qty, Double knownPrice) {
+        if (!Constants.TRANSACTION_TYPE_BUY.equals(txType)) return; // exits never gated here
+
+        try {
+            double price = knownPrice != null ? knownPrice : fetchLtp(symbol);
+            if (price > 0) {
+                BigDecimal estimatedCost = BigDecimal.valueOf(price).multiply(BigDecimal.valueOf(qty));
+                var marginResult = marginGuard.checkSufficientMargin(estimatedCost, "AI_NEWS_SHARED");
+                if (!marginResult.sufficient()) {
+                    throw new IllegalStateException(
+                            "Insufficient account margin for " + symbol + " (need ~Rs." +
+                                    estimatedCost + ", available Rs." + marginResult.availableMargin() + ")");
+                }
+            }
+        } catch (IllegalStateException e) {
+            throw e; // re-throw the deliberate margin-insufficiency signal
+        } catch (KiteException | Exception e) {
+            log.debug("[AI-NEWS-ORDER] Pre-order margin/quote check skipped (non-fatal): {}",
+                    e.getMessage());
+        }
+        positionRegistry.checkAndWarnIfHeldElsewhere(symbol, "AI_NEWS_SHARED");
+    }
+
+    private void updateRegistryAfterOrder(String symbol, String txType) {
+        if (Constants.TRANSACTION_TYPE_BUY.equals(txType)) {
+            positionRegistry.registerPosition(symbol, "AI_NEWS_SHARED");
+        } else if (Constants.TRANSACTION_TYPE_SELL.equals(txType)) {
+            positionRegistry.releasePosition(symbol, "AI_NEWS_SHARED");
+        }
+    }
+
+    private double fetchLtp(String symbol) throws KiteException, IOException, org.json.JSONException {
+        String key = Constants.EXCHANGE_NSE + ":" + symbol;
+        Map<String, Quote> quotes = kiteConnect.getQuote(new String[]{key});
+        Quote q = quotes.get(key);
+        return q != null ? q.lastPrice : 0.0;
     }
 
     // -- Order modification ------------------------------------------------
