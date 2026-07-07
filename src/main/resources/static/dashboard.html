@@ -337,6 +337,11 @@
         <tbody id="sw-trades-body"></tbody>
     </table>
     <div id="sw-trades-empty" class="sub" style="display:none;padding:20px;text-align:center">No trades found</div>
+
+    <div class="card" style="margin-top:16px">
+        <div class="ct">🔍 Auto Swing - Why didn't it trade today?</div>
+        <div id="sw-auto-summary" class="sub" style="padding:12px 0">Loading...</div>
+    </div>
 </div>
 
 <!-- HERO OR ZERO - independent module, reads only from /api/herozero/* -->
@@ -1178,6 +1183,42 @@
             swRenderTrades();
             swRenderSummary();
         } catch (e) { console.error('[SWING] loadTrades failed', e); }
+
+        // ADDED (per explicit request: "if not taken can we add the
+        // reason in dashboard why its not taken") - independent fetch,
+        // failure here never blocks the trades table above from rendering.
+        try {
+            const res = await fetch(SWING_API + '/auto-selection/last-run');
+            const summary = await res.json();
+            swRenderAutoSummary(summary);
+        } catch (e) { console.error('[SWING] auto-selection summary fetch failed', e); }
+    }
+
+    function swRenderAutoSummary(s) {
+        const el = q('sw-auto-summary');
+        if (!el) return;
+        if (!s) {
+            el.innerHTML = 'Auto-selection has not run yet today (runs at the configured ' +
+                    'trigger time, default 3:00 PM) - or a manual trade already exists today, ' +
+                    'which skips auto-selection entirely.';
+            return;
+        }
+        const selectedLine = s.selectedSymbol
+            ? `<span style="color:var(--green);font-weight:600">Selected: ${s.selectedSymbol}</span>`
+            : `<span style="color:var(--gold);font-weight:600">No stock selected today</span>`;
+        el.innerHTML = `
+            ${selectedLine}<br>
+            <div style="margin-top:8px;line-height:1.8">
+                Total equity scanned: <b>${s.totalEquityScanned.toLocaleString()}</b><br>
+                Failed daily/weekly/monthly/yearly thresholds: <b>${s.failedQualification.toLocaleString()}</b><br>
+                Failed mandatory momentum: <b>${s.failedMomentum.toLocaleString()}</b><br>
+                In 15-day cooling period: <b>${s.skippedCoolingPeriod.toLocaleString()}</b><br>
+                No recent price data: <b>${s.noRecentPriceData.toLocaleString()}</b><br>
+                Qualifying candidates found: <b>${s.qualifyingCandidates.toLocaleString()}</b>
+            </div>
+            <div class="sub" style="margin-top:8px">${s.outcome}</div>
+            <div class="sub" style="margin-top:4px">Last run: ${s.runAt}</div>
+        `;
     }
 
     function swRenderSummary() {

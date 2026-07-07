@@ -142,4 +142,20 @@ public class ManualSwingOrderClient {
     public static class ManualSwingOrderException extends RuntimeException {
         public ManualSwingOrderException(String msg) { super(msg); }
     }
+
+    /**
+     * FIX (added for the auto-selection fallback-to-next-candidate
+     * feature): a distinct subtype specifically for the "filled at the
+     * broker but DB save failed" scenario - a REAL, untracked position
+     * now exists. This must NEVER be treated the same as an ordinary
+     * "order didn't fill" failure (which is safe to retry with a
+     * different stock) - callers that need to distinguish "safe to try
+     * another candidate" from "STOP immediately, human intervention
+     * needed" can catch this specific subtype. Existing code that only
+     * catches the base ManualSwingOrderException is completely
+     * unaffected - it still catches this too, exactly as before.
+     */
+    public static class PartialFailureException extends ManualSwingOrderException {
+        public PartialFailureException(String msg) { super(msg); }
+    }
 }

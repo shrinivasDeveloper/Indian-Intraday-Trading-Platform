@@ -483,7 +483,7 @@ public class ManualSwingTradingService {
                             "tradeId={} buyOrderId={}",
                     buyOrderId, req.symbol(), fill.filledQty(), buyPrice, e.getMessage(),
                     trade.getTradeId(), buyOrderId, e);
-            throw new ManualSwingOrderClient.ManualSwingOrderException(
+            throw new ManualSwingOrderClient.PartialFailureException(
                     "Buy order filled at the broker (orderId=" + buyOrderId + ", qty=" +
                             fill.filledQty() + ", price=" + buyPrice + ") but could NOT be saved to the " +
                             "database. This is a real position - please verify in Zerodha and contact " +

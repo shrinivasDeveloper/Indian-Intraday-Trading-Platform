@@ -15,7 +15,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
 import java.time.LocalTime;
-import java.util.Optional;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -153,38 +153,71 @@ public class AutoSwingScheduler {
         // cheap, single-file fetch, separate from the gradual historical backfill.
         backfillService.fetchToday();
 
-        Optional<StockCandidate> pick = selectionEngine.selectBestStock();
-        if (pick.isEmpty()) {
+        // FIX (per explicit request: "how can we ensure at least one
+        // trade is executed successfully every trading day" - illiquid
+        // small-caps sometimes never fill, since a MARKET order still
+        // needs a genuine counter-party). Walks the FULL ranked list of
+        // today's qualifying candidates, not just the top pick - if the
+        // best-scoring stock's buy order can't fill (no sellers), falls
+        // back to the next-best candidate instead of giving up for the
+        // day entirely. Zero change to selection criteria (thresholds,
+        // momentum, cooling period) - only what happens AFTER selection,
+        // when execution itself fails for reasons unrelated to the
+        // stock's quality.
+        List<StockCandidate> ranked = selectionEngine.selectRankedCandidates();
+        if (ranked.isEmpty()) {
             log.warn("[AUTO-SWING-SCHEDULER] No qualifying stock found today - no automated " +
                     "trade will be placed");
             return;
         }
 
-        StockCandidate candidate = pick.get();
-        int qty = computeQuantity(candidate);
-        if (qty <= 0) {
-            log.error("[AUTO-SWING-SCHEDULER] Computed quantity {} for {} is not viable " +
-                            "(capital Rs.{} insufficient even for 1 share at last close Rs.{}) - skipping",
-                    qty, candidate.symbol(), config.getAutoTradeCapital(), candidate.lastClose());
-            return;
+        for (int i = 0; i < ranked.size(); i++) {
+            StockCandidate candidate = ranked.get(i);
+            int qty = computeQuantity(candidate);
+            if (qty <= 0) {
+                log.warn("[AUTO-SWING-SCHEDULER] Computed quantity {} for {} is not viable " +
+                                "(capital Rs.{} insufficient even for 1 share at last close Rs.{}) - " +
+                                "trying next candidate", qty, candidate.symbol(),
+                        config.getAutoTradeCapital(), candidate.lastClose());
+                continue;
+            }
+
+            try {
+                // Default 8% target - the spec gives an explicit target%
+                // input only for the MANUAL UI flow; the AUTO path has no
+                // stated target%, so this reuses the same exit mechanism
+                // already built and validated for manual trades (the
+                // spec's own "configurable exit logic" pointer), with a
+                // reasonable default consistent with genuine swing-trade
+                // sizing.
+                tradingService.placeAutoBuy(candidate.symbol(), candidate.exchange(),
+                        candidate.companyName(), qty, BigDecimal.valueOf(8.0));
+                log.info("[AUTO-SWING-SCHEDULER] Automated BUY placed: {} qty={} score={} - {} " +
+                                "(candidate {}/{} tried)", candidate.symbol(), qty,
+                        candidate.confidenceScore(), candidate.scoreBreakdown(), i + 1, ranked.size());
+                return; // success - today's trade is done, stop here
+            } catch (com.trading.swing.service.ManualSwingOrderClient.PartialFailureException e) {
+                // DANGEROUS: a real, untracked position may now exist at
+                // the broker. Never try another candidate after this -
+                // continuing to auto-buy while there's an unreconciled
+                // phantom position would compound real risk. Stop
+                // immediately and surface this at the highest severity.
+                log.error("[AUTO-SWING-SCHEDULER] *** CRITICAL - STOPPING all further auto-buy " +
+                        "attempts today *** {}: {}", candidate.symbol(), e.getMessage(), e);
+                return;
+            } catch (Exception e) {
+                // Safe to retry with a different stock - order never
+                // placed, definitively rejected (no position opened), or
+                // fill genuinely ambiguous (a different symbol carries no
+                // duplicate-position risk even in the ambiguous case).
+                log.warn("[AUTO-SWING-SCHEDULER] BUY failed for {} (candidate {}/{}): {} - " +
+                                "trying next candidate", candidate.symbol(), i + 1, ranked.size(),
+                        e.getMessage());
+            }
         }
 
-        try {
-            // Default 8% target - the spec gives an explicit target% input
-            // only for the MANUAL UI flow; the AUTO path has no stated
-            // target%, so this reuses the same exit mechanism already
-            // built and validated for manual trades (the spec's own
-            // "configurable exit logic" pointer), with a reasonable
-            // default consistent with genuine swing-trade sizing.
-            tradingService.placeAutoBuy(candidate.symbol(), candidate.exchange(),
-                    candidate.companyName(), qty, BigDecimal.valueOf(8.0));
-            log.info("[AUTO-SWING-SCHEDULER] Automated BUY placed: {} qty={} sector={} confidence={}/100 - {}",
-                    candidate.symbol(), qty, candidate.sectorName(),
-                    candidate.confidenceScore(), candidate.scoreBreakdown());
-        } catch (Exception e) {
-            log.error("[AUTO-SWING-SCHEDULER] Automated BUY failed for {}: {}",
-                    candidate.symbol(), e.getMessage(), e);
-        }
+        log.warn("[AUTO-SWING-SCHEDULER] All {} qualifying candidate(s) failed to execute today " +
+                "- no automated trade was placed", ranked.size());
     }
 
     /**

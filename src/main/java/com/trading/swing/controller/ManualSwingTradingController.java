@@ -1,5 +1,6 @@
 package com.trading.swing.controller;
 
+import com.trading.swing.auto.service.AutoStockSelectionEngine;
 import com.trading.swing.dto.BuySwingRequest;
 import com.trading.swing.dto.InstrumentSearchResult;
 import com.trading.swing.dto.SwingTradeResponse;
@@ -14,7 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * ManualSwingTradingController — a completely separate API surface
+ * ManualSwingTradingController - a completely separate API surface
  * (/api/swing/**) from the existing dashboard controller. No shared
  * routes, no shared request/response types.
  */
@@ -24,9 +25,25 @@ import java.util.Map;
 public class ManualSwingTradingController {
 
     private final ManualSwingTradingService service;
+    private final AutoStockSelectionEngine autoSelectionEngine;
 
-    public ManualSwingTradingController(ManualSwingTradingService service) {
+    public ManualSwingTradingController(ManualSwingTradingService service,
+                                        AutoStockSelectionEngine autoSelectionEngine) {
         this.service = service;
+        this.autoSelectionEngine = autoSelectionEngine;
+    }
+
+    /**
+     * ADDED (per explicit request: "if not taken can we add the reason
+     * in dashboard why its not taken"). Returns the most recent Auto
+     * Swing selection run's summary - real rejection-stage counts and
+     * the final outcome, so a "no trade today" result is genuinely
+     * debuggable from the dashboard instead of only a server log line.
+     * Returns null (empty body) if auto-selection hasn't run yet today.
+     */
+    @GetMapping("/auto-selection/last-run")
+    public ResponseEntity<AutoStockSelectionEngine.SelectionRunSummary> getLastAutoSelectionRun() {
+        return ResponseEntity.ok(autoSelectionEngine.getLastRunSummary());
     }
 
     @GetMapping("/instruments/search")

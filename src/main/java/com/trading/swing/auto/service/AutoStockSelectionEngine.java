@@ -124,11 +124,55 @@ public class AutoStockSelectionEngine {
      * stock - no sector grouping, no sector ranking. Returns empty if
      * no stock in the ENTIRE universe qualifies.
      */
-    public Optional<StockCandidate> selectBestStock() {
+    /**
+     * Real, dashboard-visible summary of the most recent selectBestStock()
+     * run - per explicit request: "if not taken can we add the reason in
+     * dashboard why its not taken genuine reason." Confirmed this was a
+     * real gap: Auto Swing had zero equivalent to AI/News's existing
+     * "Why didn't it trade?" cards. Tracks aggregate counts per rejection
+     * stage (not every individual stock's reason - with 500+ stocks
+     * scanned, per-symbol detail would be excessive; the aggregate
+     * breakdown is what's actually useful for debugging "why no trade
+     * today"). Updated at the end of every run, read by the dashboard
+     * via getLastRunSummary().
+     */
+    public record SelectionRunSummary(
+            java.time.LocalDateTime runAt,
+            int totalEquityScanned,
+            int failedQualification,
+            int failedMomentum,
+            int skippedCoolingPeriod,
+            int noRecentPriceData,
+            int qualifyingCandidates,
+            String selectedSymbol,   // null if none selected
+            String outcome           // human-readable final result
+    ) {}
+
+    private volatile SelectionRunSummary lastRunSummary = null;
+
+    public SelectionRunSummary getLastRunSummary() {
+        return lastRunSummary;
+    }
+
+    /**
+     * Returns the FULL ranked list of every stock that passed all
+     * qualification checks today - highest score first. ADDED (per
+     * explicit request: "how can we ensure at least one trade is
+     * executed successfully every trading day" - illiquid small-caps
+     * sometimes never fill). Lets the caller (AutoSwingScheduler) fall
+     * back to the next-best candidate if the top pick's buy order
+     * genuinely can't fill, rather than giving up for the day entirely.
+     * selectBestStock() below is unchanged in behavior - it simply
+     * delegates here and takes the first result, exactly as before.
+     */
+    public List<StockCandidate> selectRankedCandidates() {
         List<Instrument> universe = fetchFullNseAndBseUniverse();
         if (universe.isEmpty()) {
             log.error("[AUTO-SELECT] Empty instrument universe - cannot proceed");
-            return Optional.empty();
+            lastRunSummary = new SelectionRunSummary(java.time.LocalDateTime.now(),
+                    0, 0, 0, 0, 0, 0, null,
+                    "FAILED: Could not fetch NSE+BSE instrument universe from Kite");
+            return List.of();
         }
 
         // FIX: EQ/BE filter previously lived inside
@@ -139,6 +183,7 @@ public class AutoStockSelectionEngine {
         // treated as "stocks" by the qualification checks below.
         List<StockCandidate> candidates = new ArrayList<>();
         int totalEquity = 0;
+        int failedQualification = 0, failedMomentum = 0, skippedCooling = 0, noRecentData = 0;
 
         for (Instrument inst : universe) {
             String type = inst.getInstrument_type();
@@ -151,23 +196,29 @@ public class AutoStockSelectionEngine {
             StockQualificationService.QualificationResult qual = qualificationService.check(symbol);
             if (!qual.qualifies()) {
                 log.debug("[AUTO-SELECT] {} does not qualify: {}", symbol, qual.reason());
+                failedQualification++;
                 continue;
             }
 
             if (!momentumService.passesMomentumCheck(symbol)) {
                 log.debug("[AUTO-SELECT] {} qualified on performance but failed mandatory " +
                         "momentum check", symbol);
+                failedMomentum++;
                 continue;
             }
 
             if (isInCoolingPeriod(symbol)) {
                 log.debug("[AUTO-SELECT] {} skipped - within {}-trading-day cooling period",
                         symbol, COOLING_PERIOD_TRADING_DAYS);
+                skippedCooling++;
                 continue;
             }
 
             var recentBars = barRepo.findBySymbol(symbol, java.time.LocalDate.now().minusDays(10));
-            if (recentBars.isEmpty()) continue;
+            if (recentBars.isEmpty()) {
+                noRecentData++;
+                continue;
+            }
             BigDecimal lastClose = recentBars.get(recentBars.size() - 1).close();
 
             long avgVolume = (long) recentBars.stream()
@@ -189,16 +240,38 @@ public class AutoStockSelectionEngine {
                 "{} qualifying candidate(s) found", totalEquity, candidates.size());
 
         if (candidates.isEmpty()) {
-            log.warn("[AUTO-SELECT] No qualifying stock found across the entire NSE+BSE universe " +
-                    "today - no automated trade will be placed");
-            return Optional.empty();
+            String outcome = String.format(
+                    "No qualifying stock found today: %,d failed daily/weekly/monthly/yearly " +
+                            "thresholds, %,d failed mandatory momentum, %,d in 15-day cooling period, " +
+                            "%,d had no recent price data - out of %,d equity instruments scanned",
+                    failedQualification, failedMomentum, skippedCooling, noRecentData, totalEquity);
+            log.warn("[AUTO-SELECT] {}", outcome);
+            lastRunSummary = new SelectionRunSummary(java.time.LocalDateTime.now(),
+                    totalEquity, failedQualification, failedMomentum, skippedCooling,
+                    noRecentData, 0, null, outcome);
+            return List.of();
         }
 
         candidates.sort((a, b) -> Integer.compare(b.confidenceScore(), a.confidenceScore()));
         StockCandidate best = candidates.get(0);
         log.info("[AUTO-SELECT] Final selection: {} (score={}/100) - {}",
                 best.symbol(), best.confidenceScore(), best.scoreBreakdown());
-        return Optional.of(best);
+        lastRunSummary = new SelectionRunSummary(java.time.LocalDateTime.now(),
+                totalEquity, failedQualification, failedMomentum, skippedCooling,
+                noRecentData, candidates.size(), best.symbol(),
+                "Selected " + best.symbol() + " (score " + best.confidenceScore() + "/100) out of " +
+                        candidates.size() + " qualifying candidate(s)");
+        return candidates;
+    }
+
+    /**
+     * UNCHANGED external behavior - delegates to selectRankedCandidates()
+     * and returns just the first (highest-scoring) result, exactly as
+     * this method always has. Any existing caller sees zero difference.
+     */
+    public Optional<StockCandidate> selectBestStock() {
+        List<StockCandidate> ranked = selectRankedCandidates();
+        return ranked.isEmpty() ? Optional.empty() : Optional.of(ranked.get(0));
     }
 
     private int computeConfidenceScore(long avgVolume) {
