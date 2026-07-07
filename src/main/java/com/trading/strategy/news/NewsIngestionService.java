@@ -21,45 +21,45 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * NewsIngestionService — fetches real-time Indian market news from CONFIRMED WORKING sources.
+ * NewsIngestionService - fetches real-time Indian market news from CONFIRMED WORKING sources.
  *
- * ─────────────────────────────────────────────────────────────────────────────
- * ALL SOURCES ARE FREE — NO API KEY REQUIRED — NO BOT DETECTION ISSUES.
+ * -----------------------------------------------------------------------------
+ * ALL SOURCES ARE FREE - NO API KEY REQUIRED - NO BOT DETECTION ISSUES.
  *
  * All 5 sources below are confirmed working from your Windows machine logs.
  * Sources that were removed and why:
- *   NSE API          → HTTP 404 (URL never worked, BSE covers same data)
- *   Zee Business RSS → HTTP 403 (permanent bot detection, not fixable with headers)
- *   Moneycontrol Markets RSS → HTTP 503 (rate-limited/banned, persistent failure)
- *   GNews API        → HTTP 403 (requires API key — 403 without key, always)
+ *   NSE API          -> HTTP 404 (URL never worked, BSE covers same data)
+ *   Zee Business RSS -> HTTP 403 (permanent bot detection, not fixable with headers)
+ *   Moneycontrol Markets RSS -> HTTP 503 (rate-limited/banned, persistent failure)
+ *   GNews API        -> HTTP 403 (requires API key - 403 without key, always)
  *
- * ── ACTIVE SOURCES ────────────────────────────────────────────────────────────
+ * -- ACTIVE SOURCES ------------------------------------------------------------
  *
- * SOURCE 1 — BSE Corporate Announcements    [CONFIRMED ✅ +6 in logs]
+ * SOURCE 1 - BSE Corporate Announcements    [CONFIRMED [OK] +6 in logs]
  *   URL:  https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w
- *   What: ALL corporate filings — earnings, dividends, board meetings, M&A.
+ *   What: ALL corporate filings - earnings, dividends, board meetings, M&A.
  *   Poll: Every 3 minutes.
  *
- * SOURCE 2 — BSE Results Filter             [CONFIRMED ✅ same API, results-only]
+ * SOURCE 2 - BSE Results Filter             [CONFIRMED [OK] same API, results-only]
  *   URL:  https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?strCat=Result
  *   What: ONLY quarterly results / earnings announcements. Highest signal quality.
  *   Poll: Every 3 minutes (offset 90s from SOURCE 1).
  *
- * SOURCE 3 — ET Markets RSS                 [CONFIRMED ✅ no errors in logs]
+ * SOURCE 3 - ET Markets RSS                 [CONFIRMED [OK] no errors in logs]
  *   URL:  https://economictimes.indiatimes.com/markets/rss.cms
  *   What: Indian market news, sector trends, macro events.
  *   Poll: Every 5 minutes.
  *
- * SOURCE 4 — Moneycontrol Business RSS      [CONFIRMED ✅ +6 in logs]
+ * SOURCE 4 - Moneycontrol Business RSS      [CONFIRMED [OK] +6 in logs]
  *   URL:  https://www.moneycontrol.com/rss/business.xml
  *   What: Corporate news, M&A, government policy, macro economy.
  *   Poll: Every 7 minutes.
  *
- * SOURCE 5 — Hindu Business Line RSS        [CONFIRMED ✅ no errors in logs]
+ * SOURCE 5 - Hindu Business Line RSS        [CONFIRMED [OK] no errors in logs]
  *   URL:  https://www.thehindubusinessline.com/feeder/default.rss
  *   What: Indian business, economy, government policy.
  *   Poll: Every 10 minutes.
- * ─────────────────────────────────────────────────────────────────────────────
+ * -----------------------------------------------------------------------------
  */
 @Service
 @Slf4j
@@ -70,16 +70,16 @@ public class NewsIngestionService {
     private final InstrumentCacheService   instrumentCache;
     private final ObjectMapper             objectMapper;
 
-    // ── Config ────────────────────────────────────────────────────────────────
+    // -- Config ----------------------------------------------------------------
     @Value("${strategy.news.enabled:true}")
     private boolean enabled;
 
-    // ── State ─────────────────────────────────────────────────────────────────
+    // -- State -----------------------------------------------------------------
     private final List<NewsItem>       activeItems = new CopyOnWriteArrayList<>();
     private final Map<String, Boolean> seenIds     = new ConcurrentHashMap<>();
     private volatile Set<String>       knownSymbols = Collections.emptySet();
 
-    /** Consecutive failure counter per source — for health monitoring */
+    /** Consecutive failure counter per source - for health monitoring */
     private final Map<String, Integer> sourceFailures    = new ConcurrentHashMap<>();
     /** Per-source backoff epoch (ms). After 3 consecutive failures, skip until this time. */
     private final Map<String, Long>    sourceBackoffUntil = new ConcurrentHashMap<>();
@@ -91,12 +91,12 @@ public class NewsIngestionService {
             .version(HttpClient.Version.HTTP_1_1)
             .build();
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // SCHEDULED FETCHERS — ONLY CONFIRMED WORKING SOURCES
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
+    // SCHEDULED FETCHERS - ONLY CONFIRMED WORKING SOURCES
+    // ==========================================================================
 
     /**
-     * SOURCE 1: BSE Corporate Announcements — every 3 minutes.
+     * SOURCE 1: BSE Corporate Announcements - every 3 minutes.
      * All categories: earnings, dividends, board meetings, M&A, buybacks.
      */
     @Scheduled(fixedRate = 180_000)
@@ -119,7 +119,7 @@ public class NewsIngestionService {
     }
 
     /**
-     * SOURCE 2: BSE Results filter — every 3 minutes, offset 90s.
+     * SOURCE 2: BSE Results filter - every 3 minutes, offset 90s.
      * ONLY quarterly/annual results. Highest signal quality for news trading.
      */
     @Scheduled(fixedRate = 180_000, initialDelay = 90_000)
@@ -142,7 +142,7 @@ public class NewsIngestionService {
     }
 
     /**
-     * SOURCE 3: ET Markets RSS — every 5 minutes.
+     * SOURCE 3: ET Markets RSS - every 5 minutes.
      */
     @Scheduled(fixedRate = 300_000)
     public void fetchFromEtMarkets() {
@@ -161,7 +161,7 @@ public class NewsIngestionService {
     }
 
     /**
-     * SOURCE 4: Moneycontrol Business RSS — every 7 minutes.
+     * SOURCE 4: Moneycontrol Business RSS - every 7 minutes.
      *
      * 403 HANDLING:
      *   Moneycontrol uses Cloudflare. 403 is a bot-challenge, not a permanent ban.
@@ -200,14 +200,14 @@ public class NewsIngestionService {
                 // 3+ failures: activate 30-min backoff, reduce log noise
                 long backoff = System.currentTimeMillis() + 30 * 60 * 1000L;
                 sourceBackoffUntil.put("RSS_MC_BIZ", backoff);
-                log.warn("[NEWS-INGEST] Moneycontrol Business RSS failed ({}x) — backing off 30min: {}",
+                log.warn("[NEWS-INGEST] Moneycontrol Business RSS failed ({}x) - backing off 30min: {}",
                         f, e.getMessage());
             }
         }
     }
 
     /**
-     * SOURCE 5: Hindu Business Line RSS — every 10 minutes.
+     * SOURCE 5: Hindu Business Line RSS - every 10 minutes.
      */
     @Scheduled(fixedRate = 600_000)
     public void fetchFromHinduBL() {
@@ -225,22 +225,22 @@ public class NewsIngestionService {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
     // GLOBAL NEWS SOURCES (6, 7, 8)
     // Added without touching any existing logic.
     // These feed the GLOBAL_EVENT category in NewsScoreEngine.
-    // Scoring, trading, dashboard — all unchanged.
+    // Scoring, trading, dashboard - all unchanged.
     // Source weight: RSS_REUTERS = 11 (between NewsAPI=12 and ET=10)
     //
     // Why these matter for NSE:
-    //   Reuters Business → FED decisions, crude oil, US CPI, geopolitical events
-    //   Reuters Top News → Major global events that move FII flows into India
-    //   RBI Official RSS → Direct RBI policy announcements from source
+    //   Reuters Business -> FED decisions, crude oil, US CPI, geopolitical events
+    //   Reuters Top News -> Major global events that move FII flows into India
+    //   RBI Official RSS -> Direct RBI policy announcements from source
     //                       (currently only picked up 30-60 min late via ET/MC)
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
     /**
-     * SOURCE 6: ET Economy Policy RSS — every 10 minutes.
+     * SOURCE 6: ET Economy Policy RSS - every 10 minutes.
      * Replaces feeds.reuters.com/reuters/businessNews (domain dead since 2020).
      * Covers: FED impact on India, crude oil, RBI policy context,
      *         US inflation, global macro affecting Indian markets.
@@ -263,10 +263,10 @@ public class NewsIngestionService {
     }
 
     /**
-     * SOURCE 7: ET Economy Indicators RSS — every 15 minutes.
+     * SOURCE 7: ET Economy Indicators RSS - every 15 minutes.
      * Replaces feeds.reuters.com/reuters/topNews (domain dead since 2020).
      * Covers: GDP, inflation, IIP, trade data, global commodity prices,
-     *         FII flows, rupee movement — all global macro affecting NSE.
+     *         FII flows, rupee movement - all global macro affecting NSE.
      */
     @Scheduled(fixedRate = 900_000, initialDelay = 75_000)
     public void fetchFromReutersTopNews() {
@@ -285,19 +285,19 @@ public class NewsIngestionService {
     }
 
     /**
-     * SOURCE 8: RBI Official RSS — every 15 minutes.
+     * SOURCE 8: RBI Official RSS - every 15 minutes.
      * Covers: Rate decisions, policy announcements, liquidity measures.
      * Currently RBI news reaches the strategy 30-60 min late via ET/MC.
-     * This fetches directly from the source → faster signal.
-     * Maps to RBI_POLICY category (score 85 × 0.30 = 26/30 category pts).
+     * This fetches directly from the source -> faster signal.
+     * Maps to RBI_POLICY category (score 85 x 0.30 = 26/30 category pts).
      */
     @Scheduled(fixedRate = 900_000, initialDelay = 105_000)
     public void fetchFromRbiOfficial() {
         if (!enabled) return;
         refreshSymbolCache();
         try {
-            // RBI RSS returns HTTP 302 redirect — use getWithRedirect() not fetchRss()
-            // fetchRss() uses get() which throws on non-200 — this is RBI-specific only
+            // RBI RSS returns HTTP 302 redirect - use getWithRedirect() not fetchRss()
+            // fetchRss() uses get() which throws on non-200 - this is RBI-specific only
             String body = getWithRedirect(
                     "https://www.rbi.org.in/RSS/RBIRSSContent.aspx?Id=316",
                     "User-Agent",  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -315,7 +315,20 @@ public class NewsIngestionService {
                 String pubDate     = item[3];
                 if (headline.isBlank()) continue;
                 if (!filter.isRelevant(headline, description)) continue;
-                String id = "RSS_RBI:" + (headline + pubDate).hashCode();
+                // FIX (found from direct user report: "receiving the same
+                // company news repeatedly"). Confirmed real bug: this ID
+                // was previously built from (headline + pubDate).hashCode()
+                // - if a source re-renders its timestamp even slightly
+                // differently between polls (common - many feeds show
+                // shifting "last modified" times), the SAME article
+                // produces a DIFFERENT hash each time, making it look
+                // "new" repeatedly. The article's own link is genuinely
+                // stable and unique per article - using it as the primary
+                // ID actually fixes the duplicate-detection this was
+                // supposed to provide. Falls back to the old hash only if
+                // link is genuinely missing (defensive, keeps working even
+                // for a malformed feed item).
+                String id = "RSS_RBI:" + (link != null && !link.isBlank() ? link : (headline + pubDate).hashCode());
                 if (seenIds.putIfAbsent(id, true) != null) continue;
                 Instant published = parseRssDate(pubDate);
                 NewsItem newsItem = buildItem(id, headline, description, link, "RSS_RBI", published);
@@ -338,12 +351,12 @@ public class NewsIngestionService {
     public void purgeStaleItems() {
         Instant cutoff = Instant.now().minusSeconds(7_200);
         int before = activeItems.size();
-        // FIX: was item.isActionableMonday() — that method now falls back to
+        // FIX: was item.isActionableMonday() - that method now falls back to
         // isActionable() which always returns true (60-min cutoff removed for
         // scoring purposes), which would have made this purge exempt EVERY
         // item EVERY day, leaking memory. isMondayWeekendException() is a
         // narrow, dedicated check that only protects genuine Monday weekend
-        // BSE/NSE filings — everything else still purges normally after 2h.
+        // BSE/NSE filings - everything else still purges normally after 2h.
         activeItems.removeIf(item -> {
             if (item.isMondayWeekendException()) return false;
             return item.publishedAt().isBefore(cutoff);
@@ -352,20 +365,20 @@ public class NewsIngestionService {
         if (purged > 0) log.debug("[NEWS-INGEST] Purged {} stale items", purged);
     }
 
-    /** Daily reset at 9:00 AM — clean slate for the new trading day */
+    /** Daily reset at 9:00 AM - clean slate for the new trading day */
     @Scheduled(cron = "0 0 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
         activeItems.clear();
         seenIds.clear();
         sourceFailures.clear();
-        log.info("[NEWS-INGEST] Daily reset complete — all sources cleared");
+        log.info("[NEWS-INGEST] Daily reset complete - all sources cleared");
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
     // PUBLIC API
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
-    /** All active actionable news items — market-aware check for Monday weekend news */
+    /** All active actionable news items - market-aware check for Monday weekend news */
     public List<NewsItem> getActiveItems() {
         return activeItems.stream()
                 .filter(item -> item.isActionable() || item.isActionableMonday())
@@ -383,11 +396,11 @@ public class NewsIngestionService {
     public int getTotalIngested()                  { return activeItems.size(); }
     public Map<String, Integer> getSourceFailures(){ return Collections.unmodifiableMap(sourceFailures); }
 
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
     // SOURCE IMPLEMENTATIONS
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
-    // ── BSE Corporate Announcements (both SOURCE 1 and SOURCE 2 use this) ────
+    // -- BSE Corporate Announcements (both SOURCE 1 and SOURCE 2 use this) ----
     private int fetchBseAnnouncements(String url, String sourceTag) throws Exception {
         String body = get(url,
                 "Referer",    "https://www.bseindia.com/",
@@ -423,13 +436,13 @@ public class NewsIngestionService {
         return added;
     }
 
-    // ── RSS feeds (ET Markets, Moneycontrol Business, Hindu Business Line) ────
+    // -- RSS feeds (ET Markets, Moneycontrol Business, Hindu Business Line) ----
     //
     // 403 FIX: Moneycontrol (and ET) use Cloudflare bot detection.
     // They check for a complete browser header fingerprint.
-    // Java HttpClient sends minimal headers by default — Cloudflare blocks it.
+    // Java HttpClient sends minimal headers by default - Cloudflare blocks it.
     // Adding sec-fetch-* and upgrade-insecure-requests makes the request look like a real
-    // Chrome browser. NOTE: "Connection" and "Accept-Encoding" are NOT set here — they are
+    // Chrome browser. NOTE: "Connection" and "Accept-Encoding" are NOT set here - they are
     // restricted headers in Java HttpClient and are managed by the HTTP stack automatically.
     // makes the request look like a real Chrome browser.
     //
@@ -450,7 +463,7 @@ public class NewsIngestionService {
 
         // RESTRICTED HEADER FIX:
         // Java HttpClient throws IllegalArgumentException for "Connection" and "Accept-Encoding".
-        // These are managed internally by the HTTP/1.1 stack — the JDK controls them directly:
+        // These are managed internally by the HTTP/1.1 stack - the JDK controls them directly:
         //   Connection:      managed by keep-alive logic inside HttpClient
         //   Accept-Encoding: managed by HttpClient's built-in gzip decompression
         // Setting them via builder.header() throws:
@@ -470,7 +483,7 @@ public class NewsIngestionService {
                 "Referer",                   referer
         );
 
-        // Null/empty body guard — Reuters sometimes returns empty body instead of error
+        // Null/empty body guard - Reuters sometimes returns empty body instead of error
         if (body == null || body.isBlank()) return 0;
 
         List<String[]> items = parseRssItems(body);
@@ -484,7 +497,13 @@ public class NewsIngestionService {
             if (headline.isBlank()) continue;
             if (!filter.isRelevant(headline, description)) continue;
 
-            String id = sourceTag + ":" + (headline + pubDate).hashCode();
+            // FIX (same confirmed bug as RSS_RBI above, per direct user
+            // report of repeated news) - link is genuinely stable and
+            // unique per article, unlike a headline+pubDate hash that can
+            // change if the source re-renders its timestamp slightly
+            // between polls. Applies to ET Markets, Moneycontrol, and
+            // Hindu Business Line - all three share this one method.
+            String id = sourceTag + ":" + (link != null && !link.isBlank() ? link : (headline + pubDate).hashCode());
             if (seenIds.putIfAbsent(id, true) != null) continue;
 
             Instant published = parseRssDate(pubDate);
@@ -494,9 +513,9 @@ public class NewsIngestionService {
         return added;
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
     // SHARED HELPERS
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
     /** Build HTTP GET request with alternating header key/value pairs */
     private String get(String url, String... headers) throws Exception {
@@ -519,9 +538,9 @@ public class NewsIngestionService {
     }
 
     /**
-     * Redirect-following GET — used only for RBI RSS which returns HTTP 302.
+     * Redirect-following GET - used only for RBI RSS which returns HTTP 302.
      * Uses a separate HttpClient with NORMAL redirect policy.
-     * Existing sources use get() with NEVER (default) — completely untouched.
+     * Existing sources use get() with NEVER (default) - completely untouched.
      */
     private String getWithRedirect(String url, String... headers) throws Exception {
         HttpClient redirectClient = HttpClient.newBuilder()
@@ -569,7 +588,7 @@ public class NewsIngestionService {
         }
     }
 
-    // ── XML Parsing ───────────────────────────────────────────────────────────
+    // -- XML Parsing -----------------------------------------------------------
 
     private List<String[]> parseRssItems(String xml) {
         List<String[]> items = new ArrayList<>();
@@ -608,7 +627,7 @@ public class NewsIngestionService {
                 .replaceAll("&apos;", "'").trim();
     }
 
-    // ── Date Parsing ──────────────────────────────────────────────────────────
+    // -- Date Parsing ----------------------------------------------------------
 
     /** Parse RFC 822 RSS date: "Mon, 21 Apr 2026 09:30:00 +0530" */
     private Instant parseRssDate(String pubDate) {
@@ -620,7 +639,7 @@ public class NewsIngestionService {
         }
     }
 
-    /** Parse BSE datetime: "2026-04-24 09:35:22" → IST */
+    /** Parse BSE datetime: "2026-04-24 09:35:22" -> IST */
     private Instant parseIstDateTime(String dtStr) {
         try {
             return ZonedDateTime.parse(

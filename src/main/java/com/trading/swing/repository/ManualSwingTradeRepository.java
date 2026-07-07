@@ -235,6 +235,27 @@ public class ManualSwingTradeRepository {
     }
 
     /**
+     * FIX (found from direct user report): the app previously had ZERO
+     * way to detect a position that was closed OUTSIDE its own sell
+     * flow (e.g. manually via Zerodha's own app/web interface directly),
+     * bypassing this app entirely - it would show ACTIVE forever, with
+     * no automatic correction. Called by HoldingsReconciliationService
+     * when a trade the app believes is ACTIVE is confirmed to no longer
+     * appear in the broker's real holdings. sell_price is left NULL
+     * since the app was never told the real exit price - this is
+     * explicitly a "the broker says this is gone, correcting our stale
+     * record" action, not a normal, price-known sell completion.
+     */
+    public void markClosedExternally(String tradeId) {
+        jdbc.update("""
+            UPDATE manual_swing_trades
+            SET trade_status = 'CLOSED', sell_status = 'COMPLETED',
+                exit_reason = 'CLOSED_EXTERNALLY_RECONCILED', updated_at = ?
+            WHERE trade_id = ?
+            """, Timestamp.from(Instant.now()), tradeId);
+    }
+
+    /**
      * Sell attempt failed (order rejected, API error, etc). Reverts
      * sell_status back to PENDING so the NEXT monitoring cycle retries -
      * trade_status stays ACTIVE throughout, per the spec's error-handling

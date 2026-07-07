@@ -1424,6 +1424,19 @@ public class NewsKeywordFilter {
         combined = combined.replaceAll(
                 "(?i)\\b(reported|filed)\\s+(to|with)\\s+(BSE|NSE)\\b",
                 "$1 $2 the exchange");
+        // FIX (found via dashboard report, second confirmed variant):
+        // "BSE Intimation is hereby given under the regulation 30..." -
+        // a genuinely different boilerplate OPENING than the two above
+        // (those match BSE/NSE appearing mid-sentence; this one has
+        // BSE/NSE as the very first word of a standard regulatory
+        // filing preamble). Real example: a conductor/cable
+        // manufacturer's "commencement of production" announcement was
+        // being attributed to BSE Limited's own stock, purely because
+        // the filing's standard opening happens to start with the
+        // exchange's name.
+        combined = combined.replaceAll(
+                "(?i)\\b(BSE|NSE)\\s+Intimation\\s+is\\s+hereby\\s+given\\b",
+                "The exchange intimation is hereby given");
 
         Set<String> found = new LinkedHashSet<>();
 
