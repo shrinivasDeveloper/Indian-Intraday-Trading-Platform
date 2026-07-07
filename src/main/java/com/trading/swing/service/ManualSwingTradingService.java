@@ -25,6 +25,7 @@ import java.time.Instant;
 import java.util.concurrent.atomic.AtomicReference;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -57,6 +58,15 @@ import java.util.stream.Collectors;
 @Slf4j
 public class ManualSwingTradingService {
 
+    // FIX (confirmed critical bug from a real production log - the
+    // AutoSwingScheduler fired its 3 PM logic at 1:03 AM IST on
+    // Railway). Bare LocalDate.now()/LocalTime.now() use the JVM's
+    // default timezone - UTC on Railway, NOT India time. This affects
+    // the ACTUAL force-exit comparison, buy-date recording, and every
+    // "is this today" check in this file - all now explicitly
+    // Asia/Kolkata-zoned.
+    private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
+
     private final ManualSwingTradeRepository repo;
     private final ManualSwingOrderClient orderClient;
     private final InstrumentCacheService instrumentCache;
@@ -86,7 +96,7 @@ public class ManualSwingTradingService {
      */
     private String checkLiquidityWarning(String symbol) {
         try {
-            var bars = dailyBarRepo.findBySymbol(symbol, LocalDate.now().minusDays(10));
+            var bars = dailyBarRepo.findBySymbol(symbol, LocalDate.now(IST).minusDays(10));
             if (bars.size() < 3) return null; // not enough history to judge - fail open
             long avgVolume = (long) bars.stream()
                     .skip(Math.max(0, bars.size() - 5))
@@ -451,8 +461,8 @@ public class ManualSwingTradingService {
                 .exchange(exchange)
                 .quantity(fill.filledQty())
                 .buyPrice(buyPrice)
-                .buyDate(LocalDate.now())
-                .buyTime(LocalTime.now())
+                .buyDate(LocalDate.now(IST))
+                .buyTime(LocalTime.now(IST))
                 .targetPct(req.targetPct())
                 .targetPrice(targetPrice)
                 .zerodhaBuyOrderId(buyOrderId)
@@ -566,7 +576,7 @@ public class ManualSwingTradingService {
 
     public void checkAndExitIfNeeded(ManualSwingTrade trade) {
         // RULE 1: never monitor on the purchase day, no matter what.
-        if (trade.getBuyDate().isEqual(LocalDate.now())) {
+        if (trade.getBuyDate().isEqual(LocalDate.now(IST))) {
             return;
         }
 
@@ -618,7 +628,7 @@ public class ManualSwingTradingService {
 
         boolean targetHit = ltp.compareTo(trade.getTargetPrice()) >= 0;
         boolean quickProfitHit = gainPct.compareTo(BigDecimal.valueOf(config.getProfitTargetPct())) >= 0;
-        boolean pastForceExitTime = !LocalTime.now().isBefore(forceExitTime);
+        boolean pastForceExitTime = !LocalTime.now(IST).isBefore(forceExitTime);
 
         String exitReason = null;
         if (targetHit) exitReason = "TARGET_HIT";
@@ -770,7 +780,7 @@ public class ManualSwingTradingService {
         switch (filter.toUpperCase()) {
             case "ACTIVE": return t.getTradeStatus() == ManualSwingTrade.TradeStatus.ACTIVE;
             case "CLOSED": return t.getTradeStatus() == ManualSwingTrade.TradeStatus.CLOSED;
-            case "TODAY":  return t.getBuyDate().isEqual(LocalDate.now());
+            case "TODAY":  return t.getBuyDate().isEqual(LocalDate.now(IST));
             case "PROFIT": case "LOSS": {
                 BigDecimal ref = t.getTradeStatus() == ManualSwingTrade.TradeStatus.CLOSED
                         ? t.getSellPrice() : marketDataService.getLastPricesSimple().get(t.getSymbol());

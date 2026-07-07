@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,12 +47,12 @@ public class HeroZeroController {
 
         Map<String, Object> indexes = new LinkedHashMap<>();
         for (String index : List.of("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")) {
-            MonthlyExpiryCalculator.ExpiryResult r = expiryCalculator.calculate(index, LocalDate.now());
+            MonthlyExpiryCalculator.ExpiryResult r = expiryCalculator.calculate(index, LocalDate.now(ZoneId.of("Asia/Kolkata")));
             Map<String, Object> idxInfo = new LinkedHashMap<>();
             idxInfo.put("naturalExpiry", r.naturalExpiry().toString());
             idxInfo.put("actualExpiry", r.actualExpiry().toString());
             idxInfo.put("wasHolidayShifted", r.wasShifted());
-            idxInfo.put("isMonthlyExpiryToday", r.actualExpiry().isEqual(LocalDate.now()));
+            idxInfo.put("isMonthlyExpiryToday", r.actualExpiry().isEqual(LocalDate.now(ZoneId.of("Asia/Kolkata"))));
             indexes.put(index, idxInfo);
         }
         out.put("indexes", indexes);
@@ -71,6 +72,6 @@ public class HeroZeroController {
 
     @GetMapping("/expiry/{index}")
     public Object expiryForIndex(@PathVariable String index) {
-        return expiryCalculator.calculate(index, LocalDate.now());
+        return expiryCalculator.calculate(index, LocalDate.now(ZoneId.of("Asia/Kolkata")));
     }
 }

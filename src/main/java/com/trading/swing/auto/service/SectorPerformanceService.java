@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.*;
 
 /**
@@ -155,7 +156,7 @@ public class SectorPerformanceService {
     }
 
     private SectorPerformance computeSectorPerformance(String sectorName, List<String> symbols) {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
         List<BigDecimal> dailyChanges = new ArrayList<>();
         List<BigDecimal> weeklyChanges = new ArrayList<>();
         List<BigDecimal> monthlyChanges = new ArrayList<>();

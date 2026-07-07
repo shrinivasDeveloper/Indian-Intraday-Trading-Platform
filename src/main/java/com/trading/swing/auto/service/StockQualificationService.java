@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
 
@@ -54,7 +55,7 @@ public class StockQualificationService {
                                       BigDecimal monthlyPct, BigDecimal yearlyPct) {}
 
     public QualificationResult check(String symbol) {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
         // FIX: widened from 60 to 370 days - the new yearly gate needs
         // ~252 trading days of history (roughly 365 calendar days plus
         // buffer for weekends/holidays) to compute at all. The previous

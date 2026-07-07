@@ -206,7 +206,7 @@ public class NewsTradingStrategy {
 
         BigDecimal actualEntry = BigDecimal.valueOf(fill.avgFillPrice());
         Trade trade = Trade.builder()
-                .tradeDate(LocalDate.now())
+                .tradeDate(LocalDate.now(ZoneId.of("Asia/Kolkata")))
                 .tradingSymbol(symbol)
                 .instrumentToken(ctx.instrumentToken())
                 .direction(ctx.direction())
@@ -241,6 +241,14 @@ public class NewsTradingStrategy {
         log.warn("[NEWS] LIVE entry order rejected/cancelled for {} - reason: {}. " +
                         "No position was opened; symbol may be reconsidered on a future cycle.",
                 symbol, statusMessage);
+        // FIX (found while confirming order-placement failures are
+        // visible on the dashboard - they weren't, same gap found and
+        // fixed on the AI side): this now covers BOTH genuine broker-
+        // side rejections AND pre-flight failures caught before ever
+        // reaching the broker (e.g. AccountMarginGuard's insufficient-
+        // margin check, added during the platform-wide cross-strategy
+        // safeguard review).
+        blockReasons.put(symbol, "Order not placed: " + statusMessage);
     }
 
     /** Snapshot of recent news events for dashboard display */
@@ -623,7 +631,7 @@ public class NewsTradingStrategy {
             executed = true;
         } else {
             Trade trade = Trade.builder()
-                    .tradeDate(LocalDate.now())
+                    .tradeDate(LocalDate.now(ZoneId.of("Asia/Kolkata")))
                     .tradingSymbol(symbol)
                     .instrumentToken(instrumentToken)
                     .direction(score.direction())

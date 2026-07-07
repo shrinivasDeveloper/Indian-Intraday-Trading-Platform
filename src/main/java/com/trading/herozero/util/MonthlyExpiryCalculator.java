@@ -5,6 +5,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.temporal.TemporalAdjusters;
 
 /**
@@ -61,7 +62,7 @@ public class MonthlyExpiryCalculator {
     /** True if `today` is genuinely this index's (possibly shifted)
      *  monthly expiry trading day. */
     public boolean isTodayMonthlyExpiry(String index) {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
         ExpiryResult result = calculate(index, today);
         return result.actualExpiry().isEqual(today);
     }

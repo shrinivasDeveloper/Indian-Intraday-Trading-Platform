@@ -24,20 +24,20 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * BtstAiStrategy — Buy Today Sell Tomorrow
+ * BtstAiStrategy - Buy Today Sell Tomorrow
  * Completely separate from AiTradingSystem. Zero shared state.
- * Disabled by default — enable via ai.btst.enabled=true in application.yml
+ * Disabled by default - enable via ai.btst.enabled=true in application.yml
  *
  * INDEPENDENCE FIX (cleanup audit): removed SmartChannelPullbackSignalEvent /
- * ApplicationEventPublisher — BTST no longer routes through the shared
- * platform pipeline (SmartChannelSignalHandler → TradeApprovedEvent →
+ * ApplicationEventPublisher - BTST no longer routes through the shared
+ * platform pipeline (SmartChannelSignalHandler -> TradeApprovedEvent ->
  * PaperTradeExecutionService), which belongs to the strategies being
  * permanently removed. Executes directly via AiLiveOrderExecutionService
  * (LIVE) or direct ledger debit/credit (PAPER), reusing the exact same
  * independent infrastructure AI's main trading system and News already use
- * — strategyName="BTST_AI_V1" throughout. BTST has no intraday SL/T1/T2
+ * - strategyName="BTST_AI_V1" throughout. BTST has no intraday SL/T1/T2
  * monitoring (it holds overnight and exits at a fixed time regardless of
- * price), so unlike AI/News it doesn't need its own TradeManagementEngine —
+ * price), so unlike AI/News it doesn't need its own TradeManagementEngine -
  * just entry and exit execution.
  */
 @Service
@@ -70,7 +70,7 @@ public class BtstAiStrategy {
     private volatile BtstPosition currentPosition = null;
 
     // Holds the score/pattern context for a LIVE entry order while awaiting
-    // fill confirmation — keyed by orderId, mirroring AiTradingSystem's
+    // fill confirmation - keyed by orderId, mirroring AiTradingSystem's
     // identical pattern for its own LIVE entries.
     private record PendingBtstEntry(String symbol, long token, int score, String pattern) {}
     private final Map<String, PendingBtstEntry> pendingEntry = new ConcurrentHashMap<>();
@@ -106,18 +106,18 @@ public class BtstAiStrategy {
             if (saved != null && !saved.isBlank()) {
                 currentPosition = BtstPosition.fromRedis(saved);
                 exitPending.set(true);
-                log.info("[BTST] ✅ Loaded overnight position: {} {} entry=₹{} qty={}",
+                log.info("[BTST] [OK] Loaded overnight position: {} {} entry=Rs.{} qty={}",
                         currentPosition.symbol(), currentPosition.direction(),
                         currentPosition.entryPrice(), currentPosition.qty());
             } else {
-                log.info("[BTST] No overnight position — ready for today");
+                log.info("[BTST] No overnight position - ready for today");
             }
         } catch (Exception e) {
             log.warn("[BTST] Startup load failed: {}", e.getMessage());
         }
     }
 
-    // ── Exit: 9:20 AM next morning ─────────────────────────────────────────
+    // -- Exit: 9:20 AM next morning -----------------------------------------
     @Scheduled(cron = "0 20 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void exitBtstPosition() {
         if (!exitPending.get() || currentPosition == null) return;
@@ -129,32 +129,32 @@ public class BtstAiStrategy {
             BigDecimal exitPrice = BigDecimal.valueOf(Math.round(ltp * 100.0) / 100.0);
 
             if (isLiveMode()) {
-                // wasLong=true — BTST is LONG-only (see fireBtstEntry)
+                // wasLong=true - BTST is LONG-only (see fireBtstEntry)
                 String orderId = liveOrderService.placeExitOrder(
                         pos.symbol(), true, pos.qty(), exitPrice.doubleValue(),
                         STRATEGY_NAME, "BTST_EXIT_9_20");
                 if (orderId == null) {
-                    log.error("[BTST] ⚠️ LIVE exit order placement did not succeed for {} — " +
+                    log.error("[BTST] [WARN] LIVE exit order placement did not succeed for {} - " +
                             "position remains open, will retry next scheduled cycle.", pos.symbol());
-                    return; // exitPending stays true — currentPosition stays set, retries tomorrow at 9:20
+                    return; // exitPending stays true - currentPosition stays set, retries tomorrow at 9:20
                 }
                 pendingExitOrderId = orderId;
                 log.info("[BTST] LIVE exit order placed, awaiting fill: {} orderId={}",
                         pos.symbol(), orderId);
                 // redis/currentPosition cleared in onLiveExitFilled(), once the
-                // broker confirms the fill — not here, since the position is
+                // broker confirms the fill - not here, since the position is
                 // still genuinely open until then.
                 return;
             }
 
-            // PAPER mode — direct, immediate settlement
+            // PAPER mode - direct, immediate settlement
             BigDecimal grossPnl = exitPrice.subtract(pos.entryPrice())
                     .multiply(BigDecimal.valueOf(pos.qty()));
             capitalLedger.recordExit(pos.symbol(), STRATEGY_NAME,
                     pos.entryPrice().multiply(BigDecimal.valueOf(pos.qty())),
                     grossPnl, grossPnl.compareTo(BigDecimal.ZERO) > 0);
 
-            log.info("[BTST] ✅ Exit fired (PAPER): {} @ ₹{} P&L=₹{}", pos.symbol(),
+            log.info("[BTST] [OK] Exit fired (PAPER): {} @ Rs.{} P&L=Rs.{}", pos.symbol(),
                     String.format("%.2f", ltp), grossPnl);
             redis.delete(REDIS_KEY);
             currentPosition = null;
@@ -174,7 +174,7 @@ public class BtstAiStrategy {
                 pos.entryPrice().multiply(BigDecimal.valueOf(pos.qty())),
                 grossPnl, grossPnl.compareTo(BigDecimal.ZERO) > 0);
 
-        log.info("[BTST] ✅ LIVE exit CONFIRMED: {} @ ₹{} qty={} P&L=₹{}",
+        log.info("[BTST] [OK] LIVE exit CONFIRMED: {} @ Rs.{} qty={} P&L=Rs.{}",
                 symbol, actualExit, fill.filledQty(), grossPnl);
         redis.delete(REDIS_KEY);
         currentPosition = null;
@@ -184,17 +184,17 @@ public class BtstAiStrategy {
 
     private void onLiveExitRejected(String symbol, String statusMessage) {
         if (currentPosition == null || !currentPosition.symbol().equals(symbol)) return;
-        log.error("[BTST] ⚠️ LIVE exit order rejected/cancelled for {} — reason: {}. " +
+        log.error("[BTST] [WARN] LIVE exit order rejected/cancelled for {} - reason: {}. " +
                 "Position remains open, will retry next scheduled cycle.", symbol, statusMessage);
         pendingExitOrderId = null;
-        // exitPending stays true, currentPosition stays set — next scheduled
+        // exitPending stays true, currentPosition stays set - next scheduled
         // exitBtstPosition() run (tomorrow 9:20, since this only runs once
         // per day) will attempt again. Given this is a once-daily schedule,
         // a rejection here warrants checking manually before the next session.
     }
 
 
-    // ── Entry: 14:00–14:30 scan ─────────────────────────────────────────────
+    // -- Entry: 14:00-14:30 scan ---------------------------------------------
     @Scheduled(fixedRate = 300_000)
     public void scanForBtstEntry() {
         LocalTime now = LocalTime.now(ZoneId.of("Asia/Kolkata"));
@@ -207,7 +207,7 @@ public class BtstAiStrategy {
 
             String bestSymbol = null;
             int    bestScore  = 0;
-            String bestPattern = "—";
+            String bestPattern = "-";
 
             for (Map.Entry<String, Integer> entry : watchlistScores.entrySet()) {
                 String sym   = entry.getKey();
@@ -225,7 +225,7 @@ public class BtstAiStrategy {
             }
 
             if (bestSymbol == null) return;
-            log.info("[BTST] 🌙 BTST candidate: {} score={}/100 pattern={}", bestSymbol, bestScore, bestPattern);
+            log.info("[BTST] [NIGHT] BTST candidate: {} score={}/100 pattern={}", bestSymbol, bestScore, bestPattern);
             fireBtstEntry(bestSymbol, bestScore, bestPattern);
         } catch (Exception e) {
             log.error("[BTST] Scan failed: {}", e.getMessage());
@@ -251,7 +251,7 @@ public class BtstAiStrategy {
             BigDecimal t1  = BigDecimal.valueOf(Math.round((ltp + riskPerShare * 2.0) * 100.0) / 100.0);
             BigDecimal t2  = BigDecimal.valueOf(Math.round((ltp + riskPerShare * 3.2) * 100.0) / 100.0);
             // FIX (critical, found before going live): same capital-sufficiency
-            // cap applied to AI/News — risk-only sizing can size a position
+            // cap applied to AI/News - risk-only sizing can size a position
             // whose total value exceeds available capital entirely.
             int riskBasedQty  = (int) Math.floor((capital * riskPct) / riskPerShare);
             int affordableQty = (int) Math.floor(capital / entry.doubleValue());
@@ -262,7 +262,7 @@ public class BtstAiStrategy {
                 String orderId = liveOrderService.placeEntryOrder(
                         symbol, true, qty, ltp, STRATEGY_NAME);
                 if (orderId == null) {
-                    log.warn("[BTST] LIVE entry order not placed for {} (blocked or failed) — " +
+                    log.warn("[BTST] LIVE entry order not placed for {} (blocked or failed) - " +
                             "no position opened.", symbol);
                     return;
                 }
@@ -270,22 +270,22 @@ public class BtstAiStrategy {
                 log.info("[BTST] LIVE entry order placed, awaiting fill: {} orderId={}",
                         symbol, orderId);
                 // firedToday/currentPosition committed in onLiveEntryFilled(),
-                // once the broker confirms the fill — using the actual fill
+                // once the broker confirms the fill - using the actual fill
                 // price, not this signal-time ltp.
                 return;
             }
 
-            // PAPER mode — direct, immediate fill simulation
+            // PAPER mode - direct, immediate fill simulation
             capitalLedger.debitMargin(symbol, STRATEGY_NAME, entry.multiply(BigDecimal.valueOf(qty)));
             BtstPosition position = new BtstPosition(
                     symbol, "LONG", entry, sl, t1, t2,
-                    qty, score, "Other", pattern, LocalDate.now().toString());
+                    qty, score, "Other", pattern, LocalDate.now(ZoneId.of("Asia/Kolkata")).toString());
             redis.opsForValue().set(REDIS_KEY, position.toRedis());
             currentPosition = position;
             exitPending.set(true);
             firedToday.set(true);
 
-            log.info("[BTST] ✅ BTST ENTRY (PAPER): {} LONG ₹{} qty={} SL=₹{} T1=₹{} score={}/100",
+            log.info("[BTST] [OK] BTST ENTRY (PAPER): {} LONG Rs.{} qty={} SL=Rs.{} T1=Rs.{} score={}/100",
                     symbol, String.format("%.2f", ltp), qty,
                     String.format("%.2f", sl.doubleValue()),
                     String.format("%.2f", t1.doubleValue()), score);
@@ -301,7 +301,7 @@ public class BtstAiStrategy {
             if (e.getValue().symbol().equals(symbol)) { ctx = e.getValue(); matchedOrderId = e.getKey(); break; }
         }
         if (ctx == null) {
-            log.error("[BTST] onLiveEntryFilled: no pending context for {} — cannot register " +
+            log.error("[BTST] onLiveEntryFilled: no pending context for {} - cannot register " +
                     "position. orderId={}", symbol, fill.orderId());
             return;
         }
@@ -319,19 +319,19 @@ public class BtstAiStrategy {
 
         BtstPosition position = new BtstPosition(
                 symbol, "LONG", actualEntry, sl, t1, t2,
-                fill.filledQty(), ctx.score(), "Other", ctx.pattern(), LocalDate.now().toString());
+                fill.filledQty(), ctx.score(), "Other", ctx.pattern(), LocalDate.now(ZoneId.of("Asia/Kolkata")).toString());
         redis.opsForValue().set(REDIS_KEY, position.toRedis());
         currentPosition = position;
         exitPending.set(true);
         firedToday.set(true);
 
-        log.info("[BTST] ✅ LIVE entry CONFIRMED: {} LONG qty={} actualEntry=₹{} SL=₹{} T1=₹{}",
+        log.info("[BTST] [OK] LIVE entry CONFIRMED: {} LONG qty={} actualEntry=Rs.{} SL=Rs.{} T1=Rs.{}",
                 symbol, fill.filledQty(), actualEntry, sl, t1);
     }
 
     private void onLiveEntryRejected(String symbol, String statusMessage) {
         pendingEntry.entrySet().removeIf(e -> e.getValue().symbol().equals(symbol));
-        log.warn("[BTST] LIVE entry order rejected/cancelled for {} — reason: {}. " +
+        log.warn("[BTST] LIVE entry order rejected/cancelled for {} - reason: {}. " +
                 "No position was opened; firedToday NOT set, may retry within today's " +
                 "remaining entry window (14:00-14:30).", symbol, statusMessage);
     }

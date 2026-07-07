@@ -233,7 +233,7 @@ public class AiTradingSystem {
                 VALUES (?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE window_name = ?, fired_at = ?
                 """,
-                    LocalDate.now(), symbol, window, java.sql.Timestamp.from(Instant.now()),
+                    LocalDate.now(ZoneId.of("Asia/Kolkata")), symbol, window, java.sql.Timestamp.from(Instant.now()),
                     window, java.sql.Timestamp.from(Instant.now()));
         } catch (Exception e) {
             log.debug("[AI-SYSTEM] persistFiredTrade failed for {} (non-fatal): {}",
@@ -251,7 +251,7 @@ public class AiTradingSystem {
         try {
             List<Map<String, Object>> rows = jdbc.queryForList(
                     "SELECT symbol, window_name FROM ai_fired_trades_today WHERE trade_date = ?",
-                    LocalDate.now());
+                    LocalDate.now(ZoneId.of("Asia/Kolkata")));
             if (rows.isEmpty()) {
                 log.info("[AI-SYSTEM] Reconciliation: no trades fired yet today (per database).");
                 return;
@@ -852,7 +852,7 @@ public class AiTradingSystem {
 
                 // -- PAPER MODE - unchanged simulated instant fill -----------
                 Trade trade = Trade.builder()
-                        .tradeDate(LocalDate.now())
+                        .tradeDate(LocalDate.now(ZoneId.of("Asia/Kolkata")))
                         .tradingSymbol(symbol)
                         .instrumentToken(token)
                         .direction(dir)
@@ -917,7 +917,7 @@ public class AiTradingSystem {
 
         BigDecimal actualEntry = BigDecimal.valueOf(fill.avgFillPrice());
         Trade trade = Trade.builder()
-                .tradeDate(LocalDate.now())
+                .tradeDate(LocalDate.now(ZoneId.of("Asia/Kolkata")))
                 .tradingSymbol(symbol)
                 .instrumentToken(ctx.instrumentToken())
                 .direction(ctx.direction())
@@ -953,6 +953,16 @@ public class AiTradingSystem {
         pendingEntryContext.entrySet().removeIf(e -> e.getValue().symbol().equals(symbol));
         log.warn("[AI-SYSTEM] LIVE entry order rejected/cancelled for {} - reason: {}. " +
                 "No position was opened.", symbol, statusMessage);
+        // FIX (found while confirming whether order-placement failures
+        // show on the dashboard - they didn't): this covers BOTH genuine
+        // broker-side rejections (order reached Zerodha, then rejected)
+        // AND pre-flight failures caught before ever reaching the broker
+        // (e.g. AccountMarginGuard's insufficient-margin check, added
+        // during the platform-wide cross-strategy safeguard review) -
+        // both paths route through this same callback via
+        // AiLiveOrderExecutionService's catch block, so this one fix
+        // makes ALL order-placement-stage failures visible here.
+        blockReasons.put(symbol, "Order not placed: " + statusMessage);
     }
 
     // =======================================================================
@@ -1025,7 +1035,7 @@ public class AiTradingSystem {
         // Clear stale fired-trades rows so they're never reconciled into a
         // future day by mistake.
         try {
-            jdbc.update("DELETE FROM ai_fired_trades_today WHERE trade_date < ?", LocalDate.now());
+            jdbc.update("DELETE FROM ai_fired_trades_today WHERE trade_date < ?", LocalDate.now(ZoneId.of("Asia/Kolkata")));
         } catch (Exception e) {
             log.debug("[AI-SYSTEM] Daily fired-trades DB cleanup failed (non-fatal): {}",
                     e.getMessage());

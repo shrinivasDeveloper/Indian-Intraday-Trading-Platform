@@ -222,7 +222,7 @@ public class AutoStockSelectionEngine {
                 continue;
             }
 
-            var recentBars = barRepo.findBySymbol(symbol, java.time.LocalDate.now().minusDays(10));
+            var recentBars = barRepo.findBySymbol(symbol, java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")).minusDays(10));
             if (recentBars.isEmpty()) {
                 noRecentData++;
                 continue;
@@ -291,7 +291,7 @@ public class AutoStockSelectionEngine {
             var lastBuy = tradeRepo.findMostRecentBuyDate(symbol);
             if (lastBuy.isEmpty()) return false;
             int tradingDaysSince = barRepo.countTradingDaysBetween(
-                    lastBuy.get(), java.time.LocalDate.now());
+                    lastBuy.get(), java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")));
             return tradingDaysSince < COOLING_PERIOD_TRADING_DAYS;
         } catch (Exception e) {
             log.debug("[AUTO-SELECT] Cooling-period check failed for {} (failing open, " +

@@ -21,45 +21,46 @@ import java.math.MathContext;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * NewsTradeManagementEngine
  *
- * INDEPENDENCE: News's own, complete position-management engine — entry
+ * INDEPENDENCE: News's own, complete position-management engine - entry
  * registration, SL/target/trailing/partial-exit/market-or-sector-turn exits,
  * EOD force close. Faithfully replicates the EXACT 4-phase model News
  * currently relies on via the shared PaperTradeManagementService (same
  * thresholds, same formulas, same fill-slippage simulation, same brokerage
- * calculation) — by explicit instruction: "whatever logic we have in paper
+ * calculation) - by explicit instruction: "whatever logic we have in paper
  * trading, same trailing." This is NOT a simplified or different model; it
  * is the same behavior, just implemented independently so News no longer
  * needs PaperTradeExecutionService / PaperTradeManagementService /
  * SmartChannelPullbackSignalEvent / SmartChannelSignalHandler / the shared
- * RiskManagementService cross-strategy symbol check — all of which belong
+ * RiskManagementService cross-strategy symbol check - all of which belong
  * to the other strategies being permanently removed.
  *
  * 4-PHASE MODEL (identical thresholds to PaperTradeManagementService):
- *   Phase 1 — Fixed SL
- *   Phase 2 — Breakeven at 1.5R (StrategyConfig.Global.breakevenRTrigger)
- *   Phase 3 — ATR trailing at 2.0R (trendTrailTriggerR), 1.0×ATR distance,
- *             tightening to 0.5×ATR after partial exit
- *   Phase 4 — Partial exit (half qty) at 3.0R (partialExitR), or 1.0R
+ *   Phase 1 - Fixed SL
+ *   Phase 2 - Breakeven at 1.5R (StrategyConfig.Global.breakevenRTrigger)
+ *   Phase 3 - ATR trailing at 2.0R (trendTrailTriggerR), 1.0xATR distance,
+ *             tightening to 0.5xATR after partial exit
+ *   Phase 4 - Partial exit (half qty) at 3.0R (partialExitR), or 1.0R
  *             during LUNCH window (partialExitLunchR), skipped entirely
  *             if strongTrend (i.e. NOT during LUNCH/LATE windows)
  *
- * estimatedAtr = |entry - SL| × 2.0 — this is the EXACT formula
+ * estimatedAtr = |entry - SL| x 2.0 - this is the EXACT formula
  * PaperTradeExecutionService uses; it is not a real market-derived ATR,
  * so no new market-data dependency is introduced by computing it here.
  *
  * SIMPLIFICATION (explicit decision): market-turn and sector-turn exits
- * have been removed — by design, News relies only on SL, target, and a
+ * have been removed - by design, News relies only on SL, target, and a
  * 3:15 PM EOD square-off. That extra filtering was inherited from
  * PaperTradeManagementService's design for longer-holding trend
  * strategies; it had no demonstrated benefit for News's fast,
  * catalyst-driven trades, and risked cutting good trades short on
- * unrelated market noise. MarketTimingService remains — it's still used
+ * unrelated market noise. MarketTimingService remains - it's still used
  * for entryWindow/strongTrend classification and the LUNCH-window
  * partial-exit threshold, unrelated to the removed exit filters.
  */
@@ -77,30 +78,30 @@ public class NewsTradeManagementEngine {
 
     private boolean isLiveMode() { return "LIVE".equalsIgnoreCase(tradingMode); }
 
-    // ── Exact thresholds from StrategyConfig.Global (verified against the
-    // real source — see class header) ───────────────────────────────────
+    // -- Exact thresholds from StrategyConfig.Global (verified against the
+    // real source - see class header) -----------------------------------
     private static final double BREAKEVEN_R_TRIGGER     = 1.5;
     private static final double TREND_TRAIL_TRIGGER_R   = 2.0;
     private static final double PARTIAL_EXIT_R          = 3.0;
     private static final double PARTIAL_EXIT_LUNCH_R    = 1.0;
 
-    // ── Exact @Value defaults from PaperTradeManagementService ───────────
+    // -- Exact @Value defaults from PaperTradeManagementService -----------
     private static final double TRAIL_ATR_MULTIPLIER       = 1.0;
     private static final double TRAIL_TIGHT_ATR_MULTIPLIER = 0.5;
     private static final boolean SKIP_TRAIL_ON_MOMENTUM     = true;
-    // REMOVED: EXIT_ON_MARKET_TURN / EXIT_ON_SECTOR_TURN — by explicit
+    // REMOVED: EXIT_ON_MARKET_TURN / EXIT_ON_SECTOR_TURN - by explicit
     // decision, News relies only on SL/target/EOD. Market/sector-turn
     // exits were inherited from PaperTradeManagementService's design for
     // longer-holding trend strategies; unproven benefit for News's fast,
     // catalyst-driven trades, and risked cutting good trades short on
     // unrelated market noise.
 
-    // ── Exact slippage constants ──────────────────────────────────────────
+    // -- Exact slippage constants ------------------------------------------
     private static final double SL_SLIP     = 0.001;
     private static final double TARGET_SLIP = 0.0005;
     private static final double EOD_SLIP    = 0.0015;
 
-    // ── NSE 5-paise tick ───────────────────────────────────────────────────
+    // -- NSE 5-paise tick ---------------------------------------------------
     private static final BigDecimal TICK = new BigDecimal("0.05");
 
     private final Map<String, ManagedNewsTrade> activeTrades = new ConcurrentHashMap<>();
@@ -119,9 +120,9 @@ public class NewsTradeManagementEngine {
         liveOrderService.setOnExitRejected("NEWS_CATALYST_V1", this::onLiveExitRejected);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // ManagedNewsTrade — mirrors PaperTradeManagementService.ManagedTrade
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // ManagedNewsTrade - mirrors PaperTradeManagementService.ManagedTrade
+    // =======================================================================
 
     public static class ManagedNewsTrade {
         public final Trade           trade;
@@ -136,7 +137,7 @@ public class NewsTradeManagementEngine {
         public final MarketTimingService.TimeWindow entryWindow;
         public final boolean         strongTrend;
         public final Instant         entryInstant;
-        // AtomicBoolean, not volatile boolean — closes the same race
+        // AtomicBoolean, not volatile boolean - closes the same race
         // AiTradeManagementEngine had: two near-simultaneous ticks for the
         // same symbol (separate tickExecutor threads) could otherwise both
         // pass a plain "if (flag) return; flag = true;" check before
@@ -162,9 +163,9 @@ public class NewsTradeManagementEngine {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // PERSISTENCE — restart-safety, same pattern as AiTradeManagementEngine
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // PERSISTENCE - restart-safety, same pattern as AiTradeManagementEngine
+    // =======================================================================
 
     private void ensureTableExists() {
         try {
@@ -191,7 +192,7 @@ public class NewsTradeManagementEngine {
                 )
                 """);
         } catch (Exception e) {
-            log.warn("[NEWS-MGMT] Could not create news_open_positions table — " +
+            log.warn("[NEWS-MGMT] Could not create news_open_positions table - " +
                     "persistence disabled this session: {}", e.getMessage());
         }
     }
@@ -210,7 +211,7 @@ public class NewsTradeManagementEngine {
                   current_sl = ?, sl_at_breakeven = ?, trail_active = ?,
                   half_exited = ?, remaining_qty = ?, updated_at = ?
                 """,
-                    t.getTradingSymbol(), LocalDate.now(), t.getDirection().name(),
+                    t.getTradingSymbol(), LocalDate.now(ZoneId.of("Asia/Kolkata")), t.getDirection().name(),
                     t.getInstrumentToken(), t.getEntryPrice(), t.getQuantity(),
                     mt.originalSl, t.getStopLoss(), t.getTarget(), mt.atr,
                     mt.slAtBreakeven, mt.trailActive, mt.halfExited, mt.remainingQty,
@@ -238,7 +239,7 @@ public class NewsTradeManagementEngine {
     public void reconcileFromDatabase() {
         try {
             List<Map<String, Object>> rows = jdbc.queryForList(
-                    "SELECT * FROM news_open_positions WHERE trade_date = ?", LocalDate.now());
+                    "SELECT * FROM news_open_positions WHERE trade_date = ?", LocalDate.now(ZoneId.of("Asia/Kolkata")));
             if (rows.isEmpty()) {
                 log.info("[NEWS-MGMT] Reconciliation: no open positions found in database.");
                 return;
@@ -246,7 +247,7 @@ public class NewsTradeManagementEngine {
             for (Map<String, Object> row : rows) {
                 String symbol = (String) row.get("symbol");
                 Trade trade = Trade.builder()
-                        .tradeDate(LocalDate.now())
+                        .tradeDate(LocalDate.now(ZoneId.of("Asia/Kolkata")))
                         .tradingSymbol(symbol)
                         .instrumentToken(row.get("instrument_token") != null
                                 ? ((Number) row.get("instrument_token")).longValue() : 0L)
@@ -277,17 +278,17 @@ public class NewsTradeManagementEngine {
                         symbol, trade.getDirection(), mt.remainingQty, trade.getStopLoss(),
                         mt.slAtBreakeven, mt.trailActive, mt.halfExited);
             }
-            log.info("[NEWS-MGMT] ✅ Reconciliation complete — {} position(s) restored", rows.size());
+            log.info("[NEWS-MGMT] [OK] Reconciliation complete - {} position(s) restored", rows.size());
         } catch (Exception e) {
-            log.warn("[NEWS-MGMT] reconcileFromDatabase failed — starting with empty " +
+            log.warn("[NEWS-MGMT] reconcileFromDatabase failed - starting with empty " +
                     "activeTrades: {}", e.getMessage());
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // REGISTER — entry. estimatedAtr computed exactly as
-    // PaperTradeExecutionService does: |entry-SL| × 2.0
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // REGISTER - entry. estimatedAtr computed exactly as
+    // PaperTradeExecutionService does: |entry-SL| x 2.0
+    // =======================================================================
 
     public void register(Trade trade) {
         double estimatedAtr = trade.getEntryPrice() != null && trade.getStopLoss() != null
@@ -312,10 +313,10 @@ public class NewsTradeManagementEngine {
     public int getOpenCount() { return activeTrades.size(); }
     public boolean hasPosition(String symbol) { return activeTrades.containsKey(symbol); }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // TICK-LEVEL MONITORING — Phase 1 (SL/Target) + Phase 4 (partial exit)
+    // =======================================================================
+    // TICK-LEVEL MONITORING - Phase 1 (SL/Target) + Phase 4 (partial exit)
     // Exact same structure as PaperTradeManagementService.onTick/manageTrade
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     @EventListener
     @Async("tickExecutor")
@@ -366,10 +367,10 @@ public class NewsTradeManagementEngine {
         handlePartialExit(sym, mt, ltp, rMultiple);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // PHASE 3: Trailing SL — every 5-min candle close. Exact same structure
+    // =======================================================================
+    // PHASE 3: Trailing SL - every 5-min candle close. Exact same structure
     // as PaperTradeManagementService.onCandle/updateTrailingSl.
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     @EventListener
     @Async("tradingExecutor")
@@ -380,7 +381,7 @@ public class NewsTradeManagementEngine {
         if (mt == null || mt.exitOrderPending.get()) return;
 
         if (SKIP_TRAIL_ON_MOMENTUM && isMomentumCandle(event.getCandle())) {
-            log.debug("[NEWS-MGMT] Momentum candle {} — skip trailing", sym);
+            log.debug("[NEWS-MGMT] Momentum candle {} - skip trailing", sym);
             return;
         }
         updateTrailingSl(sym, mt, event.getCandle().getClose());
@@ -429,11 +430,11 @@ public class NewsTradeManagementEngine {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // PHASE 4: Partial exit — exact same structure as
+    // =======================================================================
+    // PHASE 4: Partial exit - exact same structure as
     // PaperTradeManagementService.handlePartialExit, including the identical
     // brokerage/STT/exchange/SEBI/GST cost calculation for net P&L accuracy.
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     private void handlePartialExit(String sym, ManagedNewsTrade mt, BigDecimal ltp, double rMultiple) {
         if (mt.halfExited) return;
@@ -445,7 +446,7 @@ public class NewsTradeManagementEngine {
         } else if (!mt.strongTrend) {
             halfExitAt = PARTIAL_EXIT_R;
         }
-        // strongTrend=true and not LUNCH → halfExitAt stays 0 → partial exit
+        // strongTrend=true and not LUNCH -> halfExitAt stays 0 -> partial exit
         // skipped entirely, exactly matching PaperTradeManagementService.
 
         if (halfExitAt > 0 && rMultiple >= halfExitAt) {
@@ -489,20 +490,20 @@ public class NewsTradeManagementEngine {
         persistPosition(mt);
         log.info("[NEWS-MGMT] Phase-2 BREAKEVEN: {} entry={} triggered at {}R",
                 sym, t.getEntryPrice(), BREAKEVEN_R_TRIGGER);
-        // INDEPENDENCE: omits riskManagement.notifyPhase2Migration(sym) — that
+        // INDEPENDENCE: omits riskManagement.notifyPhase2Migration(sym) - that
         // notifies the shared RiskManagementService for OTHER strategies'
         // cross-strategy awareness, not needed for News's own independent logic.
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // EOD force close — 3:15 PM, standardized across both AI and News
+    // =======================================================================
+    // EOD force close - 3:15 PM, standardized across both AI and News
     // (previously 15:00; AI's EOD also moved to 15:15 to match)
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     @Scheduled(cron = "0 15 15 * * MON-FRI", zone = "Asia/Kolkata")
     public void forceCloseAll() {
         if (activeTrades.isEmpty()) return;
-        log.warn("[NEWS-MGMT] FORCE CLOSE 15:00 — {} positions", activeTrades.size());
+        log.warn("[NEWS-MGMT] FORCE CLOSE 15:00 - {} positions", activeTrades.size());
         new ArrayList<>(activeTrades.keySet()).forEach(sym -> {
             ManagedNewsTrade mt = activeTrades.get(sym);
             if (mt == null || mt.exitOrderPending.get()) return;
@@ -512,10 +513,10 @@ public class NewsTradeManagementEngine {
         });
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // CLOSE — router (LIVE places a real exit order, PAPER closes directly)
+    // =======================================================================
+    // CLOSE - router (LIVE places a real exit order, PAPER closes directly)
     // Same dual-mode pattern as AiTradeManagementEngine.
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     public void close(String symbol, BigDecimal exitPrice, String reason) {
         ManagedNewsTrade mt = activeTrades.get(symbol);
@@ -523,7 +524,7 @@ public class NewsTradeManagementEngine {
 
         if (isLiveMode()) {
             // compareAndSet(false, true) atomically checks-and-sets in ONE
-            // operation — the actual fix for the race a plain
+            // operation - the actual fix for the race a plain
             // "if (flag) return; flag = true;" pattern has.
             if (!mt.exitOrderPending.compareAndSet(false, true)) return;
             mt.pendingExitReason = reason;
@@ -537,7 +538,7 @@ public class NewsTradeManagementEngine {
                 mt.exitOrderPending.set(false);
                 mt.pendingExitReason = null;
                 log.error("[NEWS-MGMT] LIVE exit order placement did not succeed for {} " +
-                        "({}) — position remains open, will retry next cycle.", symbol, reason);
+                        "({}) - position remains open, will retry next cycle.", symbol, reason);
             }
             return;
         }
@@ -570,7 +571,7 @@ public class NewsTradeManagementEngine {
                 entryPrice.multiply(BigDecimal.valueOf(mt.qty)),
                 netPnl, netPnl.compareTo(BigDecimal.ZERO) > 0);
 
-        log.info("[NEWS-MGMT] CLOSED: {} {} @ {} | P&L=₹{} reason={}",
+        log.info("[NEWS-MGMT] CLOSED: {} {} @ {} | P&L=Rs.{} reason={}",
                 symbol, trade.getDirection(), exitPrice, netPnl, reason);
 
         if (onClosedCallback != null) {
@@ -579,13 +580,13 @@ public class NewsTradeManagementEngine {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // LIVE CALLBACKS
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     private void onLiveExitFilled(String symbol, AiLiveOrderExecutionService.FillResult fill) {
         ManagedNewsTrade mt = activeTrades.get(symbol);
-        if (mt == null) return; // belongs to AI, not News — AiTradeManagementEngine handles it
+        if (mt == null) return; // belongs to AI, not News - AiTradeManagementEngine handles it
         String reason = mt.pendingExitReason != null ? mt.pendingExitReason : "LIVE_EXIT";
         log.info("[NEWS-MGMT] LIVE exit fill confirmed: {} avgPrice={} qty={} reason={}",
                 symbol, fill.avgFillPrice(), fill.filledQty(), reason);
@@ -595,7 +596,7 @@ public class NewsTradeManagementEngine {
     private void onLiveExitRejected(String symbol, String statusMessage) {
         ManagedNewsTrade mt = activeTrades.get(symbol);
         if (mt == null) return;
-        log.error("[NEWS-MGMT] ⚠️ LIVE exit order rejected/cancelled for {} — position " +
+        log.error("[NEWS-MGMT] [WARN] LIVE exit order rejected/cancelled for {} - position " +
                 "remains open. Reason: {}. Clearing exit-pending flag.", symbol, statusMessage);
         mt.exitOrderPending.set(false);
         mt.pendingExitReason = null;
@@ -603,7 +604,7 @@ public class NewsTradeManagementEngine {
 
     /**
      * NOTE: AiLiveOrderExecutionService dispatches callbacks keyed by the
-     * strategyName persisted with each order (see its class header) — so
+     * strategyName persisted with each order (see its class header) - so
      * this handler only ever fires for News's own exit orders, never AI's,
      * even though both strategies share this same execution service. The
      * defensive activeTrades.get(symbol)==null check below remains as a
@@ -614,9 +615,9 @@ public class NewsTradeManagementEngine {
         this.onClosedCallback = callback;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // Daily reset
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
@@ -626,32 +627,32 @@ public class NewsTradeManagementEngine {
             activeTrades.clear();
         }
         try {
-            jdbc.update("DELETE FROM news_open_positions WHERE trade_date < ?", LocalDate.now());
+            jdbc.update("DELETE FROM news_open_positions WHERE trade_date < ?", LocalDate.now(ZoneId.of("Asia/Kolkata")));
         } catch (Exception e) {
             log.debug("[NEWS-MGMT] Daily DB cleanup failed (non-fatal): {}", e.getMessage());
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // Dashboard accessors
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     public Collection<ManagedNewsTrade> getActiveTrades() {
         return Collections.unmodifiableCollection(activeTrades.values());
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // NSE tick alignment — exact same formula as PaperTradeManagementService
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // NSE tick alignment - exact same formula as PaperTradeManagementService
+    // =======================================================================
 
     static BigDecimal alignToTick(BigDecimal price, RoundingMode mode) {
         BigDecimal ticks = price.multiply(BigDecimal.valueOf(20), MathContext.DECIMAL64).setScale(0, mode);
         return ticks.divide(BigDecimal.valueOf(20), 2, RoundingMode.UNNECESSARY);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Fill simulation — exact same formulas as PaperTradeManagementService
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // Fill simulation - exact same formulas as PaperTradeManagementService
+    // =======================================================================
 
     static BigDecimal simulateSlFill(BigDecimal slPrice, BigDecimal ltp, TradeDirection dir) {
         if (dir == TradeDirection.LONG) {
@@ -687,10 +688,10 @@ public class NewsTradeManagementEngine {
         return c.bodyPct().compareTo(new BigDecimal("0.80")) >= 0;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Brokerage — exact same formula as PaperTradeManagementService's
+    // =======================================================================
+    // Brokerage - exact same formula as PaperTradeManagementService's
     // NseBrokerageCalculator
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     static final class NewsBrokerageCalculator {
         private static final BigDecimal BROKERAGE_RATE    = new BigDecimal("0.0003");

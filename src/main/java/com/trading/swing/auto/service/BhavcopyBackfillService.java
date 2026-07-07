@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.DayOfWeek;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.List;
 
 /**
@@ -71,7 +72,7 @@ public class BhavcopyBackfillService {
     }
 
     private void runBackfill() {
-        LocalDate cursor = LocalDate.now().minusDays(1); // start from yesterday, walk backward
+        LocalDate cursor = LocalDate.now(ZoneId.of("Asia/Kolkata")).minusDays(1); // start from yesterday, walk backward
         int targetDays = config.getBackfillTargetDays();
         int fetched = 0;
         int consecutiveEmptyDays = 0;
@@ -125,7 +126,7 @@ public class BhavcopyBackfillService {
      * afternoon. Cheap (one file), unlike the gradual historical backfill.
      */
     public void fetchToday() {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
         if (repo.hasDataForDate(today)) return;
         byte[] zipBytes = nseClient.downloadBhavcopy(today);
         if (zipBytes == null) {

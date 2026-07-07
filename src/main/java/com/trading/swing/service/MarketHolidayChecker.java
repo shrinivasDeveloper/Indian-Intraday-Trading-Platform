@@ -64,8 +64,20 @@ public final class MarketHolidayChecker {
      * open (assuming this list is accurate and complete for the
      * current year - see class docstring's honest caveat).
      */
+    // FIX (found from a real production log: AutoSwingScheduler fired
+    // its full 3 PM trade logic at 1:03 AM IST immediately after a
+    // Railway restart). Confirmed root cause: bare LocalDate.now()/
+    // LocalTime.now() use the JVM's DEFAULT timezone - on Railway
+    // (Linux container), this defaults to UTC, NOT India time. This
+    // bug was invisible during local Windows testing purely because
+    // the developer's own Windows machine happens to already be set to
+    // IST - it only surfaces once deployed to a genuinely UTC-clocked
+    // server. Every date/time call in this class (and every scheduler
+    // that depends on it) must be explicitly Asia/Kolkata-zoned.
+    private static final java.time.ZoneId IST = java.time.ZoneId.of("Asia/Kolkata");
+
     public static boolean isMarketClosedToday() {
-        return isMarketClosed(LocalDate.now());
+        return isMarketClosed(LocalDate.now(IST));
     }
 
     public static boolean isMarketClosed(LocalDate date) {

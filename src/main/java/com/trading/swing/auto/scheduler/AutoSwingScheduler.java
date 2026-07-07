@@ -116,7 +116,19 @@ public class AutoSwingScheduler {
             return;
         }
 
-        LocalDate today = LocalDate.now();
+        // FIX (confirmed critical bug from a real production log - this
+        // scheduler fired its full 3 PM logic at 1:03 AM IST immediately
+        // after a Railway restart). Bare LocalDate.now()/LocalTime.now()
+        // use the JVM's default timezone - UTC on Railway - NOT India
+        // time. 19:33 UTC (the actual server time) IS past "15:00" when
+        // misinterpreted as UTC, causing an immediate, incorrect
+        // trigger. This bug was invisible during local Windows testing
+        // purely because the developer's own machine is already set to
+        // IST. Explicitly Asia/Kolkata-zoned now, matching what
+        // triggerTime was always intended to mean.
+        java.time.ZoneId ist = java.time.ZoneId.of("Asia/Kolkata");
+
+        LocalDate today = LocalDate.now(ist);
         if (!today.equals(lastRunDate)) {
             alreadyRanToday.set(false); // new day - reset the once-per-day guard
             lastRunDate = today;
@@ -127,7 +139,7 @@ public class AutoSwingScheduler {
             // this scheduler beyond resetting the once-per-day guard above.
         }
 
-        LocalTime now = LocalTime.now();
+        LocalTime now = LocalTime.now(ist);
         if (now.isBefore(triggerTime)) return;
         if (!alreadyRanToday.compareAndSet(false, true)) return; // already ran today
 

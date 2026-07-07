@@ -15,6 +15,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BiConsumer;
@@ -210,7 +211,7 @@ public class AiLiveOrderExecutionService {
                 INSERT INTO live_order_locks (symbol, trade_date, lock_type, locked_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                    symbol, LocalDate.now(), lockType, java.sql.Timestamp.from(Instant.now()));
+                    symbol, LocalDate.now(ZoneId.of("Asia/Kolkata")), lockType, java.sql.Timestamp.from(Instant.now()));
             return true;
         } catch (DataIntegrityViolationException e) {
             // Primary key violation — lock already held by an earlier attempt.
@@ -226,7 +227,7 @@ public class AiLiveOrderExecutionService {
     private void releaseLock(String symbol, String lockType) {
         try {
             jdbc.update("DELETE FROM live_order_locks WHERE symbol = ? AND trade_date = ? AND lock_type = ?",
-                    symbol, LocalDate.now(), lockType);
+                    symbol, LocalDate.now(ZoneId.of("Asia/Kolkata")), lockType);
         } catch (Exception e) {
             log.warn("[AI-LIVE-EXEC] releaseLock failed for {} {} (non-fatal, will retry " +
                     "via daily cleanup): {}", symbol, lockType, e.getMessage());
@@ -236,7 +237,7 @@ public class AiLiveOrderExecutionService {
     private void attachOrderIdToLock(String symbol, String lockType, String orderId) {
         try {
             jdbc.update("UPDATE live_order_locks SET order_id = ? WHERE symbol = ? AND trade_date = ? AND lock_type = ?",
-                    orderId, symbol, LocalDate.now(), lockType);
+                    orderId, symbol, LocalDate.now(ZoneId.of("Asia/Kolkata")), lockType);
         } catch (Exception e) {
             log.debug("[AI-LIVE-EXEC] attachOrderIdToLock failed (non-fatal): {}", e.getMessage());
         }
@@ -284,6 +285,19 @@ public class AiLiveOrderExecutionService {
             log.error("[AI-LIVE-EXEC] Entry order placement FAILED for {}: {}",
                     symbol, e.getMessage());
             releaseLock(symbol, "ENTRY"); // nothing pending — safe to release immediately
+            // FIX (found while confirming order-placement failures are
+            // visible on the dashboard - they weren't): this catch block
+            // previously only logged and returned null, silently. Now
+            // routes through the SAME onEntryRejectedByStrategy callback
+            // already used for genuine broker-side rejections, so a
+            // pre-flight failure (e.g. AccountMarginGuard's insufficient-
+            // margin check, added during the platform-wide cross-strategy
+            // safeguard review, or any other exception before the order
+            // ever reaches the broker) is now visible in exactly the
+            // same place genuine rejections already were - the
+            // strategy's own blockReasons map, shown on the dashboard.
+            BiConsumer<String, String> cb = onEntryRejectedByStrategy.get(strategyName);
+            if (cb != null) cb.accept(symbol, e.getMessage());
             return null;
         }
 
@@ -336,6 +350,12 @@ public class AiLiveOrderExecutionService {
                             "position remains open and unmanaged. Will retry on next cycle.",
                     symbol, exitReason, e.getMessage());
             releaseLock(symbol, "EXIT"); // allow retry on the next onCandle() cycle
+            // FIX (same visibility gap as the entry path, arguably more
+            // critical here - a failed exit leaves a real position open
+            // and unmanaged). Now routes through onExitRejectedByStrategy
+            // so this is visible on the dashboard, not just a log line.
+            BiConsumer<String, String> cb = onExitRejectedByStrategy.get(strategyName);
+            if (cb != null) cb.accept(symbol, e.getMessage());
             return null;
         }
 
@@ -357,7 +377,7 @@ public class AiLiveOrderExecutionService {
                    exit_reason, placed_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 """,
-                    orderId, symbol, LocalDate.now(), strategyName, purpose,
+                    orderId, symbol, LocalDate.now(ZoneId.of("Asia/Kolkata")), strategyName, purpose,
                     txType, qty, bd(price), "PENDING", exitReason,
                     java.sql.Timestamp.from(Instant.now()));
         } catch (Exception e) {
@@ -397,7 +417,7 @@ public class AiLiveOrderExecutionService {
                     "SELECT order_id, symbol, order_purpose, strategy_name, transaction_type, " +
                             "requested_qty, exit_reason FROM live_orders " +
                             "WHERE trade_date = ? AND status IN ('PENDING','OPEN','PARTIALLY_FILLED')",
-                    LocalDate.now());
+                    LocalDate.now(ZoneId.of("Asia/Kolkata")));
         } catch (Exception e) {
             log.debug("[AI-LIVE-EXEC] pollPendingOrders query failed (non-fatal): {}", e.getMessage());
             return;
@@ -558,8 +578,8 @@ public class AiLiveOrderExecutionService {
     @Scheduled(cron = "0 0 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyCleanup() {
         try {
-            jdbc.update("DELETE FROM live_order_locks WHERE trade_date < ?", LocalDate.now());
-            jdbc.update("DELETE FROM live_orders WHERE trade_date < ?", LocalDate.now());
+            jdbc.update("DELETE FROM live_order_locks WHERE trade_date < ?", LocalDate.now(ZoneId.of("Asia/Kolkata")));
+            jdbc.update("DELETE FROM live_orders WHERE trade_date < ?", LocalDate.now(ZoneId.of("Asia/Kolkata")));
         } catch (Exception e) {
             log.debug("[AI-LIVE-EXEC] Daily cleanup failed (non-fatal): {}", e.getMessage());
         }

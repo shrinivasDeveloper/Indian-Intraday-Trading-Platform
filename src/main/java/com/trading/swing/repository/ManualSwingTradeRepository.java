@@ -11,6 +11,7 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
 
@@ -156,7 +157,7 @@ public class ManualSwingTradeRepository {
         Integer count = jdbc.queryForObject("""
             SELECT COUNT(*) FROM manual_swing_trades
             WHERE buy_date = ? AND trade_source = 'MANUAL'
-            """, Integer.class, java.sql.Date.valueOf(LocalDate.now()));
+            """, Integer.class, java.sql.Date.valueOf(LocalDate.now(ZoneId.of("Asia/Kolkata"))));
         return count != null && count > 0;
     }
 
@@ -164,7 +165,7 @@ public class ManualSwingTradeRepository {
         Integer count = jdbc.queryForObject("""
             SELECT COUNT(*) FROM manual_swing_trades
             WHERE buy_date = ? AND trade_source = 'AUTO'
-            """, Integer.class, java.sql.Date.valueOf(LocalDate.now()));
+            """, Integer.class, java.sql.Date.valueOf(LocalDate.now(ZoneId.of("Asia/Kolkata"))));
         return count != null && count > 0;
     }
 

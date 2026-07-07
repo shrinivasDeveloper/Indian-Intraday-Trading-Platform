@@ -49,8 +49,14 @@ public final class HeroZeroHolidayChecker {
         return false;
     }
 
+    // FIX (same confirmed critical bug found in Swing's MarketHolidayChecker
+    // - a real production log showed AutoSwingScheduler firing at 1:03 AM
+    // IST instead of 3 PM, root-caused to bare LocalDate.now()/LocalTime.now()
+    // using the JVM's default timezone, UTC on Railway, not India time).
+    private static final java.time.ZoneId IST = java.time.ZoneId.of("Asia/Kolkata");
+
     public static boolean isMarketClosedToday() {
-        return isMarketClosed(LocalDate.now());
+        return isMarketClosed(LocalDate.now(IST));
     }
 
     /** Walks backward from the given date until it lands on a genuine

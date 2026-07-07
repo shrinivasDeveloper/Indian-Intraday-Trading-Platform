@@ -7,6 +7,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.*;
 
 /**
@@ -23,10 +24,10 @@ import java.util.*;
  *   6. Adapts strategy parameters based on 30-day rolling performance
  *
  * ADAPTATION RULES:
- *   - Win rate < 40% over 20 trades → tighten confidence threshold
- *   - Win rate > 65% over 20 trades → can slightly relax threshold
- *   - Expected RR drifting down → adjust min RR requirement
- *   - Specific regime underperforming → increase quality filter for that regime
+ *   - Win rate < 40% over 20 trades -> tighten confidence threshold
+ *   - Win rate > 65% over 20 trades -> can slightly relax threshold
+ *   - Expected RR drifting down -> adjust min RR requirement
+ *   - Specific regime underperforming -> increase quality filter for that regime
  *
  * FULLY INDEPENDENT:
  *   No imports from highrr, smc, or news packages.
@@ -40,12 +41,12 @@ public class AiContinuousImprovementEngine {
     private final AiLearningEngine learningEngine;
     private final AiProbabilityEngine probabilityEngine;
 
-    // ── Adaptive thresholds ────────────────────────────────────────────────
+    // -- Adaptive thresholds ------------------------------------------------
     private volatile double minConfidenceThreshold = 0.40;  // Phase 1: numeric only. Rises to 0.60 after 50 samples
     private volatile double minExpectedRR          = 2.0;
     private volatile int    minQualityScore        = 50;
 
-    // ── Improvement log ────────────────────────────────────────────────────
+    // -- Improvement log ----------------------------------------------------
     private final List<ImprovementEntry> improvementLog = Collections.synchronizedList(new ArrayList<>());
 
     public AiContinuousImprovementEngine(JdbcTemplate jdbc,
@@ -57,9 +58,9 @@ public class AiContinuousImprovementEngine {
         createTablesIfNeeded();
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // DAILY ANALYSIS — 19:00 IST every trading day
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // DAILY ANALYSIS - 19:00 IST every trading day
+    // =======================================================================
 
     @Scheduled(cron = "0 0 19 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyAnalysis() {
@@ -74,9 +75,9 @@ public class AiContinuousImprovementEngine {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // PERFORMANCE ANALYSIS
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     private void analyseRecentPerformance() {
         try {
@@ -89,7 +90,7 @@ public class AiContinuousImprovementEngine {
                 """);
 
             if (recent.isEmpty()) {
-                log.info("[AI-IMPROVE] No trades yet — nothing to analyse");
+                log.info("[AI-IMPROVE] No trades yet - nothing to analyse");
                 return;
             }
 
@@ -143,9 +144,9 @@ public class AiContinuousImprovementEngine {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // ADAPTIVE THRESHOLD MANAGEMENT
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     private void adaptThresholds() {
         try {
@@ -168,28 +169,28 @@ public class AiContinuousImprovementEngine {
 
             String change = "NONE";
 
-            // Win rate too low → tighten confidence threshold
+            // Win rate too low -> tighten confidence threshold
             if (winRate < 0.40 && minConfidenceThreshold < 0.75) {
                 minConfidenceThreshold = Math.min(0.75, minConfidenceThreshold + 0.02);
                 change = String.format("confidence UP to %.2f (winRate=%.0f%% < 40%%)",
                         minConfidenceThreshold, winRate * 100);
             }
-            // Win rate healthy → can slightly relax
+            // Win rate healthy -> can slightly relax
             else if (winRate > 0.65 && total >= 30 && minConfidenceThreshold > 0.55) {
                 minConfidenceThreshold = Math.max(0.55, minConfidenceThreshold - 0.01);
                 change = String.format("confidence DOWN to %.2f (winRate=%.0f%% > 65%%)",
                         minConfidenceThreshold, winRate * 100);
             }
 
-            // Expected RR drifting down → raise min RR
+            // Expected RR drifting down -> raise min RR
             if (avgR < 1.0 && minExpectedRR < 2.5) {
                 minExpectedRR = Math.min(2.5, minExpectedRR + 0.1);
-                change += String.format(" | minRR ↑ to %.1f (avgR=%.2f)", minExpectedRR, avgR);
+                change += String.format(" | minRR ^ to %.1f (avgR=%.2f)", minExpectedRR, avgR);
             }
 
             if (!"NONE".equals(change)) {
                 log.info("[AI-IMPROVE] Threshold adapted: {}", change);
-                improvementLog.add(new ImprovementEntry(LocalDate.now(), change,
+                improvementLog.add(new ImprovementEntry(LocalDate.now(ZoneId.of("Asia/Kolkata")), change,
                         winRate, avgR, minConfidenceThreshold, minExpectedRR));
             } else {
                 log.info("[AI-IMPROVE] Thresholds OK: conf={} minRR={} WR={}% AvgR={}",
@@ -204,25 +205,25 @@ public class AiContinuousImprovementEngine {
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
     // DAILY PERFORMANCE REPORT
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
 
     private void generateDailyReport() {
         int total  = learningEngine.getTotalTrades();
         int wins   = learningEngine.getTotalWins();
         double pnl = learningEngine.getTotalPnl();
 
-        log.info("[AI-IMPROVE] ═══════ Daily AI Performance Report ═══════");
-        log.info("[AI-IMPROVE] All-time: {} trades | WR={}% | P&L=₹{} | MaxDD=₹{}",
+        log.info("[AI-IMPROVE] ======= Daily AI Performance Report =======");
+        log.info("[AI-IMPROVE] All-time: {} trades | WR={}% | P&L=Rs.{} | MaxDD=Rs.{}",
                 total,
                 total > 0 ? (double) wins / total * 100 : 0,
                 pnl,
                 learningEngine.getMaxDrawdown());
-        log.info("[AI-IMPROVE] Model: {} | Conf≥{} | MinRR≥{}",
+        log.info("[AI-IMPROVE] Model: {} | Conf>={} | MinRR>={}",
                 probabilityEngine.getPhaseLabel(),
                 minConfidenceThreshold, minExpectedRR);
-        log.info("[AI-IMPROVE] ═════════════════════════════════════════════");
+        log.info("[AI-IMPROVE] =============================================");
     }
 
     private void persistImprovementState() {
@@ -244,14 +245,14 @@ public class AiContinuousImprovementEngine {
         } catch (Exception ignored) {}
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // ACCESSORS — used by AiTradingSystem for gate thresholds
-    // ═══════════════════════════════════════════════════════════════════════
+    // =======================================================================
+    // ACCESSORS - used by AiTradingSystem for gate thresholds
+    // =======================================================================
 
     /**
      * FIX: Phase-aware confidence threshold.
-     * Phase 1 (< 50 samples): 0.40 — permissive, collecting data
-     * Phase 2 (50-200 samples): 0.50 — ML model active, moderate filter
+     * Phase 1 (< 50 samples): 0.40 - permissive, collecting data
+     * Phase 2 (50-200 samples): 0.50 - ML model active, moderate filter
      * Phase 3 (200+ samples): adapts via adaptThresholds() from 0.55+
      * Previously this was always 0.40 regardless of ML phase.
      */
@@ -261,11 +262,11 @@ public class AiContinuousImprovementEngine {
     public void onPhaseChange(int samplesCount) {
         if (samplesCount >= 200 && minConfidenceThreshold < 0.55) {
             minConfidenceThreshold = 0.55;
-            log.info("[AI-IMPROVE] Phase 3 active ({} samples) → confidence threshold raised to 0.55",
+            log.info("[AI-IMPROVE] Phase 3 active ({} samples) -> confidence threshold raised to 0.55",
                     samplesCount);
         } else if (samplesCount >= 50 && minConfidenceThreshold < 0.50) {
             minConfidenceThreshold = 0.50;
-            log.info("[AI-IMPROVE] Phase 2 active ({} samples) → confidence threshold raised to 0.50",
+            log.info("[AI-IMPROVE] Phase 2 active ({} samples) -> confidence threshold raised to 0.50",
                     samplesCount);
         }
     }

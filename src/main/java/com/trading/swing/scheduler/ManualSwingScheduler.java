@@ -97,7 +97,11 @@ public class ManualSwingScheduler {
             return;
         }
 
-        LocalTime now = LocalTime.now();
+        // FIX (same confirmed critical timezone bug found platform-wide -
+        // bare LocalTime.now() uses the JVM default zone, UTC on Railway,
+        // not India time. This scheduler's own market-hours window
+        // (09:15-15:30) was being compared against UTC instead of IST).
+        LocalTime now = LocalTime.now(java.time.ZoneId.of("Asia/Kolkata"));
         boolean inMarketHours = !now.isBefore(marketOpen) && !now.isAfter(marketClose);
 
         if (!inMarketHours) {

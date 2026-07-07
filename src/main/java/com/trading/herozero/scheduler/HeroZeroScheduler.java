@@ -39,7 +39,12 @@ public class HeroZeroScheduler {
     // window multiple times.
     private final java.util.Map<String, AtomicBoolean> entryFiredToday = new java.util.concurrent.ConcurrentHashMap<>();
     private final AtomicBoolean exitFiredToday = new AtomicBoolean(false);
-    private java.time.LocalDate lastResetDate = java.time.LocalDate.now().minusDays(1);
+    // FIX (same confirmed critical timezone bug found platform-wide -
+    // bare LocalDate.now()/LocalTime.now() use the JVM default zone,
+    // UTC on Railway, not India time. Hero-or-Zero's 2:30/3:10 PM
+    // entry/exit timing depends entirely on this being correctly IST.)
+    private static final java.time.ZoneId IST = java.time.ZoneId.of("Asia/Kolkata");
+    private java.time.LocalDate lastResetDate = java.time.LocalDate.now(IST).minusDays(1);
 
     public HeroZeroScheduler(HeroZeroConfig config, HeroZeroTradingService service,
                              HeroZeroTradeRepository repo) {
@@ -87,7 +92,7 @@ public class HeroZeroScheduler {
         if (active.isEmpty()) return;
 
         if (HeroZeroHolidayChecker.isMarketClosedToday()
-                || LocalTime.now().isAfter(config.getExitTime())) {
+                || LocalTime.now(IST).isAfter(config.getExitTime())) {
             log.warn("[HERO-ZERO] Restart recovery: {} ACTIVE trade(s) found past the mandatory " +
                     "exit time or on a non-trading day - force-exiting immediately to avoid " +
                     "carrying an unintended overnight position", active.size());
@@ -119,7 +124,7 @@ public class HeroZeroScheduler {
     public void tick() {
         if (!config.isEnabled()) return;
 
-        java.time.LocalDate today = java.time.LocalDate.now();
+        java.time.LocalDate today = java.time.LocalDate.now(IST);
         if (!today.equals(lastResetDate)) {
             entryFiredToday.values().forEach(b -> b.set(false));
             exitFiredToday.set(false);
@@ -130,7 +135,7 @@ public class HeroZeroScheduler {
             return; // weekend/holiday - nothing to do today
         }
 
-        LocalTime now = LocalTime.now();
+        LocalTime now = LocalTime.now(IST);
 
         // ENTRY WINDOW - fire once per index, at or after entry time
         if (!now.isBefore(config.getEntryTime())) {

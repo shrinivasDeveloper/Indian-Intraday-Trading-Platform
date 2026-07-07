@@ -11,19 +11,20 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * SectorStrengthService — intraday sector strength tracking and direction engine.
+ * SectorStrengthService - intraday sector strength tracking and direction engine.
  *
  * BUGS FIXED vs previous version:
  *
- *   BUG 1 (PRIMARY — sectors always show 0):
+ *   BUG 1 (PRIMARY - sectors always show 0):
  *     recalculateSectors() rate-limiter was broken:
  *       if (lastCalcEpoch.compareAndSet(lastCalcEpoch.get(), now))
- *     lastCalcEpoch.get() is called TWICE — once for the expected value, once inside
+ *     lastCalcEpoch.get() is called TWICE - once for the expected value, once inside
  *     compareAndSet. Another thread can change it between the two reads, making the
  *     CAS always fail in practice on a busy system. Sectors NEVER recalculated from
  *     live ticks, so every sector permanently showed changePercent=0, totalStocks=0.
@@ -35,8 +36,8 @@ import java.util.concurrent.atomic.AtomicLong;
  *     isSectorAligned(String sectorName, boolean isBull) was called from
  *     TradeManagementService and PaperTradeManagementService with `symbol` (e.g. "RELIANCE")
  *     instead of `sectorName` (e.g. "Banking & Finance"). Since sectorMap is keyed by
- *     sector name, sectorMap.get("RELIANCE") always returned null → always returned true
- *     → Gate 2 alignment check was completely disabled silently.
+ *     sector name, sectorMap.get("RELIANCE") always returned null -> always returned true
+ *     -> Gate 2 alignment check was completely disabled silently.
  *     FIX: Added isSectorAlignedForSymbol(String symbol, boolean isBull) overload that
  *     resolves the sector internally via symbolSector map. Callers should use this.
  *     The original isSectorAligned(sectorName, isBull) is preserved for direct sector lookups.
@@ -51,7 +52,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *     Also: recalculateSectors() now skips sectors where no price data exists yet
  *     (count == 0) instead of writing empty SectorData records.
  *
- *   BUG 4 (NEW — mid-day restart shows wrong sector %, this session's fix):
+ *   BUG 4 (NEW - mid-day restart shows wrong sector %, this session's fix):
  *     openPrices.putIfAbsent(sym, open) inside onCandle() captures whichever 5-minute
  *     candle this service instance happens to see FIRST as the symbol's "day open"
  *     reference price. openPrices was pure in-memory (ConcurrentHashMap), with zero
@@ -62,7 +63,7 @@ import java.util.concurrent.atomic.AtomicLong;
  *         market open (9:15 AM) already happened hours ago. The first candle THIS NEW
  *         INSTANCE sees (e.g. 11:35 AM) gets wrongly captured as "day open" via
  *         putIfAbsent, even though it isn't. Every changePercent computed afterward
- *         measures change-since-restart instead of change-since-actual-market-open —
+ *         measures change-since-restart instead of change-since-actual-market-open -
  *         a completely different, wrong number. This is the exact symptom reported:
  *         "before market deploy = okay, mid-day deploy = different calculation."
  *     FIX: Added JdbcTemplate-backed persistence for openPrices. Every NEWLY-captured
@@ -70,21 +71,21 @@ import java.util.concurrent.atomic.AtomicLong;
  *     to sector_open_prices (symbol, trade_date, open_price). On startup
  *     (ApplicationReadyEvent, fires on every restart including mid-day),
  *     reconcileOpenPricesFromDatabase() pre-loads today's already-known opens BEFORE
- *     any live candle can incorrectly overwrite them — since openPrices is then
+ *     any live candle can incorrectly overwrite them - since openPrices is then
  *     already populated for those symbols, the live onCandle()'s putIfAbsent
  *     correctly becomes a no-op instead of capturing a wrong restart-time price.
- *     All DB operations are wrapped in try/catch — a DB hiccup never blocks live
+ *     All DB operations are wrapped in try/catch - a DB hiccup never blocks live
  *     sector tracking, it only loses the restart-recovery safety net for that run.
  *
- *   ADDED: getSectorDirection(sectorName) — unchanged from previous version.
- *   ADDED: symbolSector map for reverse lookup (symbol → sector name).
+ *   ADDED: getSectorDirection(sectorName) - unchanged from previous version.
+ *   ADDED: symbolSector map for reverse lookup (symbol -> sector name).
  *          Populated by registerSymbol(), enables isSectorAlignedForSymbol().
  */
 @Service
 @Slf4j
 public class SectorStrengthService {
 
-    // ── Thresholds ──────────────────────────────────────────────────────────────
+    // -- Thresholds --------------------------------------------------------------
 
     private static final double BULL_CHG_THRESHOLD = 0.30;
     private static final double BEAR_CHG_THRESHOLD = 0.30;
@@ -92,7 +93,7 @@ public class SectorStrengthService {
     private static final double GREEN_BEAR_MAX      = 45.0;
     private static final double RS_NEUTRAL          = 0.0;
 
-    // ── Internal state ──────────────────────────────────────────────────────────
+    // -- Internal state ----------------------------------------------------------
 
     private final Map<String, Double>        openPrices      = new ConcurrentHashMap<>();
     private final Map<String, Double>        latestPrices    = new ConcurrentHashMap<>();
@@ -100,14 +101,14 @@ public class SectorStrengthService {
     private final Map<String, List<String>>  symbolsBySector = new ConcurrentHashMap<>();
 
     /**
-     * BUG 2 FIX: Reverse lookup — symbol → sector name.
+     * BUG 2 FIX: Reverse lookup - symbol -> sector name.
      * Populated by registerSymbol() so isSectorAlignedForSymbol() works correctly.
      */
     private final Map<String, String>        symbolSector    = new ConcurrentHashMap<>();
 
     private final AtomicLong lastCalcEpoch = new AtomicLong(0);
 
-    // ── BUG 4 FIX: persistence for openPrices ───────────────────────────────────
+    // -- BUG 4 FIX: persistence for openPrices -----------------------------------
     private final JdbcTemplate jdbc;
 
     public SectorStrengthService(JdbcTemplate jdbc) {
@@ -126,7 +127,7 @@ public class SectorStrengthService {
                 )
                 """);
         } catch (Exception e) {
-            log.warn("[SECTOR] Could not create sector_open_prices table — " +
+            log.warn("[SECTOR] Could not create sector_open_prices table - " +
                     "restart-recovery disabled this session, live tracking still " +
                     "works normally: {}", e.getMessage());
         }
@@ -135,7 +136,7 @@ public class SectorStrengthService {
     /**
      * BUG 4 FIX: Runs on every application startup (including mid-day restarts).
      * Pre-loads today's already-known day-open prices from the database BEFORE
-     * any live candle event can run — this is what prevents onCandle()'s
+     * any live candle event can run - this is what prevents onCandle()'s
      * putIfAbsent from wrongly capturing a restart-time price as "day open".
      */
     @EventListener(ApplicationReadyEvent.class)
@@ -143,7 +144,7 @@ public class SectorStrengthService {
         try {
             List<Map<String, Object>> rows = jdbc.queryForList(
                     "SELECT symbol, open_price FROM sector_open_prices WHERE trade_date = ?",
-                    LocalDate.now());
+                    LocalDate.now(ZoneId.of("Asia/Kolkata")));
             if (rows.isEmpty()) {
                 log.info("[SECTOR] Reconciliation: no day-open prices found in database " +
                         "yet today (normal for a before-market start).");
@@ -154,11 +155,11 @@ public class SectorStrengthService {
                 double open   = ((Number) row.get("open_price")).doubleValue();
                 openPrices.putIfAbsent(symbol, open);
             }
-            log.info("[SECTOR] ✅ Reconciled {} day-open price(s) from database — " +
+            log.info("[SECTOR] [OK] Reconciled {} day-open price(s) from database - " +
                     "mid-day restart will compute correct change% from true market " +
                     "open, not from restart time.", rows.size());
         } catch (Exception e) {
-            log.warn("[SECTOR] reconcileOpenPricesFromDatabase failed — falling back " +
+            log.warn("[SECTOR] reconcileOpenPricesFromDatabase failed - falling back " +
                             "to capturing day-open from the next live candle, as before this " +
                             "fix existed (correct before market open, wrong if mid-day): {}",
                     e.getMessage());
@@ -172,14 +173,14 @@ public class SectorStrengthService {
                 VALUES (?, ?, ?)
                 ON DUPLICATE KEY UPDATE open_price = open_price
                 """,
-                    symbol, LocalDate.now(), open);
+                    symbol, LocalDate.now(ZoneId.of("Asia/Kolkata")), open);
         } catch (Exception e) {
             log.debug("[SECTOR] persistOpenPrice failed for {} (non-fatal): {}",
                     symbol, e.getMessage());
         }
     }
 
-    // ── Public direction enum ───────────────────────────────────────────────────
+    // -- Public direction enum ---------------------------------------------------
 
     public enum SectorTrendDirection { BULLISH, BEARISH, NEUTRAL }
 
@@ -196,7 +197,7 @@ public class SectorStrengthService {
         public boolean isTradeable() { return direction != SectorTrendDirection.NEUTRAL; }
     }
 
-    // ── Core direction logic ────────────────────────────────────────────────────
+    // -- Core direction logic ----------------------------------------------------
 
     public SectorDirectionResult getSectorDirection(String sectorName) {
         SectorData sd = sectorMap.get(sectorName);
@@ -215,7 +216,7 @@ public class SectorStrengthService {
         if (chg >= BULL_CHG_THRESHOLD && gp >= GREEN_BULL_MIN && rs >= RS_NEUTRAL) {
             double conf = computeConfidence(chg, BULL_CHG_THRESHOLD, gp, GREEN_BULL_MIN, 100.0);
             String reason = String.format("BULLISH: change=+%.2f%% greenPct=%.0f%% RS=%.2f", chg, gp, rs);
-            log.debug("[SECTOR-DIR] {} → BULLISH (conf={:.2f}) {}", sectorName, conf, reason);
+            log.debug("[SECTOR-DIR] {} -> BULLISH (conf={:.2f}) {}", sectorName, conf, reason);
             return new SectorDirectionResult(sectorName,
                     SectorTrendDirection.BULLISH, true, chg, gp, rs, conf, reason);
         }
@@ -223,13 +224,13 @@ public class SectorStrengthService {
         if (chg <= -BEAR_CHG_THRESHOLD && gp <= GREEN_BEAR_MAX && rs <= RS_NEUTRAL) {
             double conf = computeConfidence(-chg, BEAR_CHG_THRESHOLD, 100.0 - gp, 100.0 - GREEN_BEAR_MAX, 100.0);
             String reason = String.format("BEARISH: change=%.2f%% greenPct=%.0f%% RS=%.2f", chg, gp, rs);
-            log.debug("[SECTOR-DIR] {} → BEARISH (conf={:.2f}) {}", sectorName, conf, reason);
+            log.debug("[SECTOR-DIR] {} -> BEARISH (conf={:.2f}) {}", sectorName, conf, reason);
             return new SectorDirectionResult(sectorName,
                     SectorTrendDirection.BEARISH, false, chg, gp, rs, conf, reason);
         }
 
         String reason = String.format(
-                "NEUTRAL: change=%.2f%% (need ≥±%.2f%%) greenPct=%.0f%% RS=%.2f",
+                "NEUTRAL: change=%.2f%% (need >=+/-%.2f%%) greenPct=%.0f%% RS=%.2f",
                 chg, BULL_CHG_THRESHOLD, gp, rs);
         return new SectorDirectionResult(sectorName,
                 SectorTrendDirection.NEUTRAL, false, chg, gp, rs, 0.0, reason);
@@ -242,11 +243,11 @@ public class SectorStrengthService {
         return Math.min(1.0, (chgScore + gpScore) / 2.0);
     }
 
-    // ── Existing API ────────────────────────────────────────────────────────────
+    // -- Existing API ------------------------------------------------------------
 
     /**
      * Called by SectorClassificationService for each instrument during build.
-     * Populates both the sector→symbols map and the symbol→sector reverse map.
+     * Populates both the sector->symbols map and the symbol->sector reverse map.
      */
     public void registerSymbol(String symbol, String sectorName) {
         symbolsBySector.computeIfAbsent(sectorName,
@@ -266,14 +267,14 @@ public class SectorStrengthService {
      */
     public boolean isSectorAlignedForSymbol(String symbol, boolean isBull) {
         String sector = symbolSector.get(symbol.toUpperCase());
-        if (sector == null) return true; // not classified → give benefit of the doubt
+        if (sector == null) return true; // not classified -> give benefit of the doubt
         return isSectorAligned(sector, isBull);
     }
 
     /**
      * Check sector alignment using SECTOR NAME (e.g. "Banking & Finance").
      * Use this when you already have the sector name.
-     * Called from checkAllTradesAlignment() in management services — but those
+     * Called from checkAllTradesAlignment() in management services - but those
      * services currently pass `symbol`. Use isSectorAlignedForSymbol() instead.
      *
      * @param sectorName  the sector name (key in sectorMap)
@@ -282,7 +283,7 @@ public class SectorStrengthService {
      */
     public boolean isSectorAligned(String sectorName, boolean isBull) {
         SectorData sd = sectorMap.get(sectorName);
-        if (sd == null) return true; // no data yet → benefit of the doubt
+        if (sd == null) return true; // no data yet -> benefit of the doubt
         if (isBull)  return sd.changePercent() >= -0.10;
         else         return sd.changePercent() <=  0.10;
     }
@@ -311,7 +312,7 @@ public class SectorStrengthService {
                 .toList();
     }
 
-    // ── Candle event — price tracking ───────────────────────────────────────────
+    // -- Candle event - price tracking -------------------------------------------
 
     @EventListener
     @Async("tradingExecutor")
@@ -324,13 +325,13 @@ public class SectorStrengthService {
         double open  = c.getOpen().doubleValue();
 
         // BUG 4 FIX: only persist when this is a GENUINE first-capture (i.e. the
-        // symbol truly had no day-open yet — either real start-of-day, or the
+        // symbol truly had no day-open yet - either real start-of-day, or the
         // database reconciliation above hasn't covered it). If reconciliation
         // already populated this symbol's true 9:15 AM open, this putIfAbsent
         // correctly becomes a no-op and nothing gets overwritten.
         Double previousOpen = openPrices.putIfAbsent(sym, open);
         if (previousOpen == null) {
-            // This call genuinely inserted a new value — persist it so a future
+            // This call genuinely inserted a new value - persist it so a future
             // mid-day restart can recover this exact day-open price.
             persistOpenPrice(sym, open);
         }
@@ -344,11 +345,11 @@ public class SectorStrengthService {
         }
     }
 
-    // ── Sector recalculation ────────────────────────────────────────────────────
+    // -- Sector recalculation ----------------------------------------------------
 
     private void recalculateSectors() {
         if (symbolsBySector.isEmpty()) {
-            log.debug("[SECTOR] symbolsBySector empty — instrument cache not built yet");
+            log.debug("[SECTOR] symbolsBySector empty - instrument cache not built yet");
             return;
         }
 
@@ -373,7 +374,7 @@ public class SectorStrengthService {
                 else if (chg < 0) red++;
             }
 
-            // BUG 3 FIX: skip sectors with no price data — don't write empty records
+            // BUG 3 FIX: skip sectors with no price data - don't write empty records
             if (count == 0) return;
 
             double avgChg  = totalChg / count;
@@ -435,7 +436,7 @@ public class SectorStrengthService {
         return count > 0 ? total / count : 0;
     }
 
-    // ── Initialisation ──────────────────────────────────────────────────────────
+    // -- Initialisation ----------------------------------------------------------
 
     /**
      * BUG 3 FIX: No longer calls recalculateSectors() at startup.
@@ -444,7 +445,7 @@ public class SectorStrengthService {
      * Sector data will populate naturally once the first 5M candles arrive.
      */
     public void buildFromInstruments(List<com.zerodhatech.models.Instrument> instruments) {
-        log.info("[SECTOR] Sector strength engine ready — {} sectors, {} symbols registered",
+        log.info("[SECTOR] Sector strength engine ready - {} sectors, {} symbols registered",
                 symbolsBySector.size(),
                 symbolsBySector.values().stream().mapToInt(List::size).sum());
         // Intentionally NOT calling recalculateSectors() here:
@@ -452,7 +453,7 @@ public class SectorStrengthService {
         // Live candle events will trigger recalculation once ticks start flowing.
     }
 
-    // ── Daily reset ─────────────────────────────────────────────────────────────
+    // -- Daily reset -------------------------------------------------------------
 
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")
     public void dailyReset() {
@@ -460,19 +461,19 @@ public class SectorStrengthService {
         latestPrices.clear();
         sectorMap.clear();
         lastCalcEpoch.set(0);
-        // NOTE: symbolsBySector and symbolSector are NOT cleared —
-        // sector↔symbol mappings are built once at startup from instruments.
+        // NOTE: symbolsBySector and symbolSector are NOT cleared -
+        // sector<->symbol mappings are built once at startup from instruments.
         // BUG 4 FIX: clear stale (yesterday's or older) persisted open prices
         // so they can never be reconciled into a future day by mistake.
         try {
-            jdbc.update("DELETE FROM sector_open_prices WHERE trade_date < ?", LocalDate.now());
+            jdbc.update("DELETE FROM sector_open_prices WHERE trade_date < ?", LocalDate.now(ZoneId.of("Asia/Kolkata")));
         } catch (Exception e) {
             log.debug("[SECTOR] Daily DB cleanup failed (non-fatal): {}", e.getMessage());
         }
-        log.info("[SECTOR] Daily reset complete — prices cleared, sector mappings retained");
+        log.info("[SECTOR] Daily reset complete - prices cleared, sector mappings retained");
     }
 
-    // ── Data record ─────────────────────────────────────────────────────────────
+    // -- Data record -------------------------------------------------------------
 
     public record SectorData(
             String  name,

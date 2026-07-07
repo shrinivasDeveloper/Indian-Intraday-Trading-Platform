@@ -22,6 +22,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.LocalTime;
 import java.util.Date;
 import java.util.*;
@@ -101,7 +102,7 @@ public class HeroZeroTradingService {
     }
 
     private void doAttemptEntry(String index) {
-        LocalDate today = LocalDate.now();
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
 
         // STEP 1: Validate Monthly Expiry
         MonthlyExpiryCalculator.ExpiryResult expiry = expiryCalculator.calculate(index, today);
@@ -232,7 +233,7 @@ public class HeroZeroTradingService {
                     .pePremium(pePremium)
                     .totalPremium(totalPremium)
                     .quantity(qty)
-                    .entryTime(LocalTime.now())
+                    .entryTime(LocalTime.now(ZoneId.of("Asia/Kolkata")))
                     .ceBuyOrderId(ceOrderId)
                     .peBuyOrderId(peOrderId)
                     .tradeStatus(ceFill != null && peFill != null ? "ACTIVE" : "ENTRY_PENDING")
@@ -317,7 +318,7 @@ public class HeroZeroTradingService {
 
         if (ceExitPrice != null && peExitPrice != null) {
             repo.recordExit(trade.getTradeId(), ceExitPrice, peExitPrice, pnl,
-                    ceSellOrderId, peSellOrderId, LocalTime.now(), "MANDATORY_3_10_EXIT");
+                    ceSellOrderId, peSellOrderId, LocalTime.now(ZoneId.of("Asia/Kolkata")), "MANDATORY_3_10_EXIT");
             log.info("[HERO-ZERO] {} EXIT COMPLETE - tradeId={} P&L={}", trade.getIndex(),
                     trade.getTradeId(), pnl);
         } else {
