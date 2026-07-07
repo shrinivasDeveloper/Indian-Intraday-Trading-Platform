@@ -193,23 +193,31 @@ public class AutoStockSelectionEngine {
 
             String symbol = SymbolNormalizer.normalize(inst.getTradingsymbol());
 
+            // FIX (confirmed real Railway log rate-limit issue: "Messages
+            // dropped: 214/290" - this loop runs across ~9,900 instruments
+            // every cycle, and a per-symbol DEBUG line for each rejection
+            // was flooding Railway's log pipeline badly enough that
+            // messages were being silently DROPPED - a real risk, since a
+            // genuine ERROR line could be lost in that same flood.
+            // Removed per-symbol logging here entirely - the exact same
+            // information is already captured losslessly via the
+            // aggregate SelectionRunSummary counters below (and visible
+            // on the dashboard's "Why didn't it trade?" card) without
+            // needing thousands of individual log lines. Zero change to
+            // the actual counting or decision logic - only the log
+            // volume is reduced.
             StockQualificationService.QualificationResult qual = qualificationService.check(symbol);
             if (!qual.qualifies()) {
-                log.debug("[AUTO-SELECT] {} does not qualify: {}", symbol, qual.reason());
                 failedQualification++;
                 continue;
             }
 
             if (!momentumService.passesMomentumCheck(symbol)) {
-                log.debug("[AUTO-SELECT] {} qualified on performance but failed mandatory " +
-                        "momentum check", symbol);
                 failedMomentum++;
                 continue;
             }
 
             if (isInCoolingPeriod(symbol)) {
-                log.debug("[AUTO-SELECT] {} skipped - within {}-trading-day cooling period",
-                        symbol, COOLING_PERIOD_TRADING_DAYS);
                 skippedCooling++;
                 continue;
             }
