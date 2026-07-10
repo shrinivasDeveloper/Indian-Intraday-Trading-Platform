@@ -516,6 +516,24 @@ public class AiTradingSystem {
                         conf.dominantPattern(), executionThreshold);
             }
 
+            // FIX (found via direct, repeated user report: the exact same
+            // handful of stocks - FINCABLES, CAMS, IGIL, ELECON,
+            // LICHSGFIN, GVT&D - showing "Eligible" across MANY
+            // consecutive cycles with zero trade, zero blockReasons entry,
+            // and zero AI-REASON log activity, even after the staleness
+            // fix. This is an explicit, unmissable INFO-level checkpoint
+            // at the exact moment a candidate becomes genuinely eligible
+            // (score >= threshold, non-choppy) - every subsequent stage
+            // this candidate passes through will now also log explicitly,
+            // so grepping for this symbol shows its COMPLETE, unbroken
+            // path from here through to either execution or final
+            // rejection - nothing can be silently lost anymore.
+            if (!choppy && effectiveScore >= executionThreshold) {
+                log.info("[AI-TRACE] {} ELIGIBLE checkpoint reached: score={} threshold={} " +
+                                "regime={} - proceeding to direction/risk/confidence checks",
+                        candidate.getSymbol(), effectiveScore, executionThreshold, currentRegime);
+            }
+
             // CHOPPY market: scan and watchlist only - never execute
             if (choppy) continue;
 
@@ -566,7 +584,10 @@ public class AiTradingSystem {
             AiTradeDecision decision = riskEngine.assess(
                     candidate, prediction, currentRegime);
             if (decision == null) {
-                log.debug("[AI-SYSTEM] {} risk assessment null - skip", candidate.getSymbol());
+                log.info("[AI-TRACE] {} REJECTED at risk assessment - decision was null " +
+                                "(riskEngine.assess returned null - see AiRiskAssessmentEngine for exact " +
+                                "cause: invalid live price or position size rounds to zero)",
+                        candidate.getSymbol());
                 // FIX: this was a completely silent continue - no blockReasons entry,
                 // so "Eligible" stocks blocked here had zero explanation on the
                 // dashboard. Now records exactly why. riskEngine.assess() returns
@@ -608,8 +629,8 @@ public class AiTradingSystem {
             // based 0-1) and both should hold for a trade to qualify.
             double minConf = improvementEngine.getMinConfidenceThreshold();
             if (decision.getConfidence() < minConf) {
-                log.debug("[AI-SYSTEM] {} confidence {} below adaptive floor {} - skip",
-                        candidate.getSymbol(),
+                log.info("[AI-TRACE] {} REJECTED at ML confidence floor: confidence={} " +
+                                "adaptive_floor={}", candidate.getSymbol(),
                         String.format("%.2f", decision.getConfidence()),
                         String.format("%.2f", minConf));
                 blockReasons.put(candidate.getSymbol(), String.format(
@@ -618,6 +639,10 @@ public class AiTradingSystem {
                 continue;
             }
             blockReasons.remove(candidate.getSymbol()); // cleared this gate - wasn't the blocker
+
+            log.info("[AI-TRACE] {} survived ALL gates - entering ranking pool " +
+                            "(will be decided by reasoningEngine.selectBest this cycle)",
+                    candidate.getSymbol());
 
             scoredCandidates.add(candidate);
             allDecisions.add(decision);
