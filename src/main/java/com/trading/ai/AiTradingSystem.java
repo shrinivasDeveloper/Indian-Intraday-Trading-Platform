@@ -565,10 +565,22 @@ public class AiTradingSystem {
                 // risk:reward setup, or the risk parameters fall outside the
                 // engine's configured bounds) - a legitimate, real gate, just
                 // previously invisible.
+                // FIX (found via direct user cross-check): the previous message
+                // mentioned "ATR too compressed" and "risk:reward outside bounds"
+                // - neither is actually checked by AiRiskAssessmentEngine at this
+                // stage (confirmed by reading its complete source twice). The
+                // ONLY 2 real conditions that produce a null result here are:
+                // riskPerShare<=0 (entry/SL came out equal - almost always a
+                // stale/invalid live price at that exact moment) or qty<=0
+                // (position size rounds to zero - capital too small for this
+                // stock's price). Message now accurately reflects only these
+                // 2 real, code-verified causes, not speculative language.
                 blockReasons.put(candidate.getSymbol(),
-                        "Pattern scored OK and cleared all gates, but risk engine could not " +
-                                "compute a valid SL/T1/T2 setup (ATR too compressed, risk:reward " +
-                                "outside bounds, or price action not clean enough for a safe entry)");
+                        "Pattern scored OK and cleared all gates, but the risk engine " +
+                                "could not size a valid trade - either the live price feed " +
+                                "returned an invalid/stale tick at that exact moment (entry and " +
+                                "stop-loss came out equal), or the computed position size rounded " +
+                                "to zero shares for this stock's price at current capital");
                 continue;
             }
 

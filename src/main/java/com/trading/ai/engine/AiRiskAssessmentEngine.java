@@ -96,6 +96,33 @@ public class AiRiskAssessmentEngine {
         boolean isLong  = "LONG".equals(candidate.getSuggestedDirection());
         double  capital = resolveCapital();
 
+        // FIX (found via direct user investigation of repeated "risk engine
+        // could not size a valid trade" blocks on genuinely good candidates
+        // like UTIAMC, PNB, ULTRACEMCO, BANKBARODA - later confirmed one of
+        // these, UTIAMC, DID trade successfully later that same day,
+        // proving the block was a momentary data issue, not a permanent
+        // one). candidate.getLtp() is a SNAPSHOTTED price from earlier in
+        // the pipeline (discovery/scoring stage) - by the time this method
+        // runs, that snapshot can occasionally be stale, zero, or otherwise
+        // invalid, which makes entry and SL both compute to the same
+        // degenerate value below (riskPerShare=0). Rather than immediately
+        // rejecting a genuinely good, high-scoring candidate on a
+        // momentary data hiccup, re-fetch a FRESH live price directly
+        // before giving up - using the same aiData dependency this class
+        // already has, zero new wiring needed.
+        if (ltp <= 0) {
+            log.warn("[AI-RISK] {} snapshotted LTP was invalid ({}) - re-fetching a fresh " +
+                    "live price before rejecting", symbol, ltp);
+            ltp = aiData.getLtp(symbol);
+            if (ltp <= 0) {
+                log.warn("[AI-RISK] {} - fresh live price also invalid ({}) - genuinely " +
+                        "no valid price available right now, rejecting", symbol, ltp);
+                return null;
+            }
+            log.info("[AI-RISK] {} - fresh live price Rs.{} is valid, proceeding with sizing",
+                    symbol, ltp);
+        }
+
         // ── Entry: 0.05% buffer for market order slippage ────────────────
         double     entryDbl = isLong ? ltp * 1.0005 : ltp * 0.9995;
         BigDecimal entry    = bd(entryDbl, 2);

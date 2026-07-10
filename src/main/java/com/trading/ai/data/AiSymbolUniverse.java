@@ -4,23 +4,50 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
  * AiSymbolUniverse
  *
- * Manages the universe of 253 Nifty500 symbols the AI module scans.
- * Owned entirely by the AI module — no dependency on other strategies.
+ * Manages the universe of Nifty500 symbols the AI module scans.
  *
- * The list mirrors the Nifty500 constituents. The AI module makes its
- * own independent decision about which symbols to evaluate.
+ * FIX (found via direct user cross-check: confirmed via precise
+ * comparison that of this class's 527 hardcoded symbols, 293 (55%!)
+ * had ZERO live WebSocket price coverage - meaning AI could scan
+ * their historical daily patterns but could NEVER pass the mandatory
+ * live confirmation-candle gate or get a valid live entry price for
+ * them. Real, liquid stocks like ABB, ACC, ADANIPOWER, 3MINDIA were
+ * silently unable to ever actually trade, despite being scored.
+ *
+ * Now sources from the SAME shared Nifty500ConstituentService already
+ * built for News's identical gap - this guarantees AI only ever scans
+ * symbols it genuinely has live price coverage for, since both AI and
+ * the WebSocket subscription now read from the identical, real,
+ * dynamically-refreshed NSE constituent list. Falls back to the
+ * original static list ONLY if the dynamic service hasn't fetched
+ * successfully yet (e.g. very first startup before its own
+ * @PostConstruct completes, or if niftyindices.com is unreachable) -
+ * this class's own independence from other STRATEGIES (AI/News/Swing
+ * business logic) is preserved; Nifty500ConstituentService lives in a
+ * neutral, shared package (com.trading.shared.marketdata), not inside
+ * any other strategy's own module - it's genuinely shared
+ * infrastructure, not a cross-strategy dependency.
  */
 @Component
 @ConditionalOnProperty(name = "ai.trading.enabled", havingValue = "true")
 @Slf4j
 public class AiSymbolUniverse {
 
-    // 532 symbols — Zerodha verified, all high-liquidity Nifty500
+    private final com.trading.shared.marketdata.Nifty500ConstituentService nifty500Service;
+
+    public AiSymbolUniverse(com.trading.shared.marketdata.Nifty500ConstituentService nifty500Service) {
+        this.nifty500Service = nifty500Service;
+    }
+
+    // Original 527-symbol hardcoded list - KEPT UNCHANGED, now used only
+    // as a safety-net fallback, exactly the same pattern already proven
+    // for News's identical fix.
     private static final List<String> SYMBOLS = List.of(
             "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC","SBIN",
             "BAJFINANCE","BHARTIARTL","KOTAKBANK","LT","AXISBANK","ASIANPAINT","MARUTI","NESTLEIND",
@@ -93,14 +120,21 @@ public class AiSymbolUniverse {
             "TIMKEN","TMPV","TRAVELFOOD","TRITURBINE","TTML","URBANCO","VTL","ZYDUSWELL"
     );
     public List<String> getSymbols() {
+        java.util.Set<String> dynamic = nifty500Service.getConstituents();
+        if (!dynamic.isEmpty()) {
+            return new ArrayList<>(dynamic);
+        }
+        log.warn("[AI-UNIVERSE] Dynamic Nifty 500 list not yet available - falling back to " +
+                "the static {}-symbol list this cycle (may include symbols without live " +
+                "WebSocket price coverage)", SYMBOLS.size());
         return SYMBOLS;
     }
 
     public int size() {
-        return SYMBOLS.size();
+        return getSymbols().size();
     }
 
     public boolean contains(String symbol) {
-        return SYMBOLS.contains(symbol);
+        return getSymbols().contains(symbol);
     }
 }

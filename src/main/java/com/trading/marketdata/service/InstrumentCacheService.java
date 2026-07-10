@@ -49,6 +49,7 @@ public class InstrumentCacheService {
     private final ZerodhaMarketDataClient     client;
     private final StringRedisTemplate         redis;
     private final SectorClassificationService sectorService;
+    private final com.trading.shared.marketdata.Nifty500ConstituentService nifty500Service;
 
     private final Map<String, String> localTokenMap  = new HashMap<>();
     private final Map<String, String> localSymbolMap = new HashMap<>();
@@ -223,7 +224,24 @@ public class InstrumentCacheService {
         int resolved = 0;
         int missing  = 0;
 
-        for (String symbol : NIFTY500_SYMBOLS) {
+        // FIX (found via direct user cross-check: "we have more than 500
+        // stocks mapped... why aren't all of them being added?"). The
+        // hardcoded NIFTY500_SYMBOLS list below is kept ONLY as a safety-
+        // net fallback now - confirmed it only ever had 297 symbols,
+        // despite its name, directly causing real gaps (e.g. NH showing
+        // "live price unavailable" on News's dashboard). Prefer the
+        // genuinely dynamic, real, current constituent list when
+        // available; only fall back to the static list if the dynamic
+        // service hasn't successfully fetched anything yet.
+        Set<String> symbolSource = nifty500Service.getConstituents();
+        boolean usingDynamicList = !symbolSource.isEmpty();
+        if (!usingDynamicList) {
+            symbolSource = NIFTY500_SYMBOLS;
+            log.warn("[INSTRUMENT-CACHE] Dynamic Nifty 500 list not yet available - falling " +
+                    "back to the static {}-symbol list this cycle", NIFTY500_SYMBOLS.size());
+        }
+
+        for (String symbol : symbolSource) {
             Instrument inst = equityInstruments.get(symbol.toUpperCase());
             if (inst != null) {
                 tokens.add(inst.getInstrument_token());
@@ -245,8 +263,8 @@ public class InstrumentCacheService {
             }
         }
 
-        log.info("Nifty500 subscription: {} resolved, {} missing, {} total",
-                resolved, missing, tokens.size());
+        log.info("Nifty500 subscription: {} resolved, {} missing, {} total (source={})",
+                resolved, missing, tokens.size(), usingDynamicList ? "dynamic NSE fetch" : "static fallback");
         return tokens;
     }
 
