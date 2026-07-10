@@ -637,6 +637,20 @@ public class AiTradingSystem {
         AiReasoningEngine.AiReasoningResult reasoned = reasoningEngine.selectBest(
                 scoredCandidates, allDecisions, snapshot);
 
+        // FIX (found via direct user report: genuinely eligible watchlist
+        // stocks producing zero trades AND zero "why didn't it trade"
+        // entries, vanishing without any trace). Confirmed root cause in
+        // AiReasoningEngine: a candidate with a null/malformed feature
+        // vector was silently dropped from ranking consideration entirely,
+        // regardless of whether OTHER candidates still won this cycle.
+        // Record the real, specific reason now, instead of that silent gap.
+        java.util.Map<String, String> silentlySkipped = reasoningEngine.getLastSkippedSymbols();
+        for (var entry : silentlySkipped.entrySet()) {
+            blockReasons.put(entry.getKey(),
+                    "Was marked Eligible on the watchlist, but a data issue prevented it from " +
+                            "being ranked for execution: " + entry.getValue());
+        }
+
         if (reasoned == null) {
             log.debug("[AI-SYSTEM] Reasoning engine: no trade | regime={}", currentRegime);
             // Pure observability: every candidate that made it this far
@@ -645,6 +659,7 @@ public class AiTradingSystem {
             // ALL of them this cycle - record that, distinctly from a
             // candidate that lost out to a single better one (handled below).
             for (AiCandidate c : scoredCandidates) {
+                if (silentlySkipped.containsKey(c.getSymbol())) continue; // already recorded above, more specifically
                 blockReasons.put(c.getSymbol(),
                         "Cleared all individual gates, but reasoning engine selected " +
                                 "no trade at all this cycle (regime/market-context check failed)");

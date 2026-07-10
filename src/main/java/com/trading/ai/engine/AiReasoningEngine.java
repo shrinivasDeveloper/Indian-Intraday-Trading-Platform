@@ -94,6 +94,27 @@ public class AiReasoningEngine {
      * @param decisions   their corresponding risk decisions (SL/T1/T2 computed)
      * @param snapshot    market context from AiMarketUnderstandingEngine
      */
+    /**
+     * FIX (found via direct user report: genuinely eligible stocks -
+     * scored >=80, non-choppy - were producing zero trades AND zero
+     * "why didn't it trade" entries, vanishing without any trace).
+     * CONFIRMED root cause: candidates with a null or malformed feature
+     * vector were being silently dropped inside the loop below with a
+     * bare "continue" - no logging, no reason recorded anywhere. Since
+     * the watchlist's "Eligible" label is written earlier, in a
+     * completely different method (AiTradingSystem's scanning loop),
+     * before this check even runs, a stock could show "Eligible" on
+     * the dashboard while being silently discarded here moments later.
+     * This map now records exactly which symbols were skipped this way
+     * and why, so AiTradingSystem can surface a real, visible reason
+     * instead of the silent gap.
+     */
+    private volatile java.util.Map<String, String> lastSkippedSymbols = new java.util.HashMap<>();
+
+    public java.util.Map<String, String> getLastSkippedSymbols() {
+        return lastSkippedSymbols;
+    }
+
     public AiReasoningResult selectBest(
             List<AiCandidate>     candidates,
             List<AiTradeDecision> decisions,
@@ -103,12 +124,23 @@ public class AiReasoningEngine {
 
         LocalTime now = LocalTime.now(IST);
         List<AiReasoningResult> results = new ArrayList<>();
+        java.util.Map<String, String> skipped = new java.util.HashMap<>();
 
         for (int i = 0; i < candidates.size(); i++) {
             AiCandidate     candidate = candidates.get(i);
             AiTradeDecision decision  = decisions.get(i);
             double[]        f         = candidate.getFeatureVector().getFeatures();
-            if (f == null || f.length < 60) continue;
+            if (f == null || f.length < 60) {
+                String reason = f == null
+                        ? "Feature vector was null at ranking stage - likely a data/computation " +
+                        "timing issue right after scoring"
+                        : "Feature vector had only " + f.length + " of the required 60+ values - " +
+                        "likely incomplete data for this symbol at this exact moment";
+                log.warn("[AI-REASON] {} silently dropped from ranking (was previously marked " +
+                        "Eligible on the watchlist): {}", candidate.getSymbol(), reason);
+                skipped.put(candidate.getSymbol(), reason);
+                continue;
+            }
 
             double moveScore        = computeMoveScore(f, candidate);
             double timingScore      = computeTimingScore(now, f, candidate);
@@ -135,6 +167,7 @@ public class AiReasoningEngine {
                     String.format("%.2f", qualityScore));
         }
 
+        lastSkippedSymbols = skipped;
         if (results.isEmpty()) return null;
 
         results.sort(Comparator.comparingDouble(AiReasoningResult::composite).reversed());
