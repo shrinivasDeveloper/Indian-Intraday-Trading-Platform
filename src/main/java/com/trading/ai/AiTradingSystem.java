@@ -494,8 +494,18 @@ public class AiTradingSystem {
                 } else {
                     skipReason = "ELIGIBLE";           // passes score, waiting direction/window check
                 }
+                // FIX (found via direct user report: stocks showing
+                // "Eligible" for 40+ minutes with zero new activity or
+                // explanation - confirmed root cause: watchlist only
+                // clears at midnight, so a stale entry from an EARLIER
+                // cycle just sits there unchanged if the discovery engine
+                // stops including that symbol in later cycles' candidate
+                // list). Appending a timestamp as a 5th field so staleness
+                // can be detected and filtered when the dashboard reads
+                // this data - see getStatus() below.
                 watchlist.put(candidate.getSymbol(),
-                        dp + "|" + skipReason + "|" + effectiveScore + "|" + executionThreshold);
+                        dp + "|" + skipReason + "|" + effectiveScore + "|" + executionThreshold
+                                + "|" + System.currentTimeMillis());
             }
 
             // Log watchlist entry
@@ -532,14 +542,14 @@ public class AiTradingSystem {
                     log.debug("[AI-SYSTEM] {} SHORT skipped - TRENDING market is BULLISH, no counter-trend",
                             candidate.getSymbol());
                     String dp = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
-                    watchlist.put(candidate.getSymbol(), dp + "|DIRECTION|" + conf.totalScore() + "|" + executionThreshold);
+                    watchlist.put(candidate.getSymbol(), dp + "|DIRECTION|" + conf.totalScore() + "|" + executionThreshold + "|" + System.currentTimeMillis());
                     continue;
                 }
                 if (marketBear && "LONG".equals(stockDir)) {
                     log.debug("[AI-SYSTEM] {} LONG skipped - TRENDING market is BEARISH, no counter-trend",
                             candidate.getSymbol());
                     String dp = conf.dominantPattern() != null ? conf.dominantPattern() : "Pattern";
-                    watchlist.put(candidate.getSymbol(), dp + "|DIRECTION|" + conf.totalScore() + "|" + executionThreshold);
+                    watchlist.put(candidate.getSymbol(), dp + "|DIRECTION|" + conf.totalScore() + "|" + executionThreshold + "|" + System.currentTimeMillis());
                     continue;
                 }
                 if (!marketBull && !marketBear) {
@@ -1000,6 +1010,10 @@ public class AiTradingSystem {
         try { return Integer.parseInt(s.trim()); } catch (Exception e) { return 0; }
     }
 
+    private static long safeLong(String s) {
+        try { return Long.parseLong(s.trim()); } catch (Exception e) { return 0; }
+    }
+
     /**
      * Returns the current trade window name based on IST time.
      * Returns null if outside trading hours.
@@ -1162,9 +1176,29 @@ public class AiTradingSystem {
         status.put("watchlistCount", watchlist.size());
         // Parse encoded watchlist value: "pattern|skipReason|score|threshold"
         // Returns [{symbol, pattern, skipReason, score, threshold}] for dashboard
+        // FIX (found via direct user report: stocks showing "Eligible"
+        // for 40+ minutes with zero new activity - confirmed root cause
+        // was watchlist only clearing at midnight, so a stale entry from
+        // an earlier cycle just sits there unchanged once the discovery
+        // engine stops including that symbol in later cycles). Filters
+        // out any entry older than STALE_THRESHOLD_MS - the dashboard
+        // will now only ever show genuinely current, actively-being-
+        // considered watchlist entries, never a possibly hour-old
+        // "Eligible" masquerading as live.
+        final long STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 min ~= 2 scan cycles, safe buffer
+        long nowMs = System.currentTimeMillis();
         status.put("watchlist", watchlist.entrySet().stream()
+                .filter(e -> {
+                    String[] parts = e.getValue().split("\\|", 5);
+                    if (parts.length < 5) return true; // no timestamp (shouldn't happen in
+                    // practice - in-memory map is always
+                    // fresh since last restart - but fail
+                    // safe rather than hide valid data)
+                    long ts = safeLong(parts[4]);
+                    return ts == 0 || (nowMs - ts) <= STALE_THRESHOLD_MS;
+                })
                 .map(e -> {
-                    String[] parts = e.getValue().split("\\|", 4);
+                    String[] parts = e.getValue().split("\\|", 5);
                     String  pattern   = parts[0];
                     String  reason    = parts.length > 1 ? parts[1] : "ELIGIBLE";
                     int     score     = parts.length > 2 ? safeInt(parts[2]) : 0;
