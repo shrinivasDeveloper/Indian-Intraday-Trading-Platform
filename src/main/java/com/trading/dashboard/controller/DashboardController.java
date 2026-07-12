@@ -31,16 +31,16 @@ import java.time.LocalDate;
 import java.util.*;
 
 /**
- * DashboardController — v9.2 (cleanup)
+ * DashboardController - v9.2 (cleanup)
  *
  * CLEANUP (this revision): removed all SmartChannelPullback, HighRR, ORB-
  * strategy-engine, SMC, and BestTrade dependencies, plus the shared
  * PaperTradeExecutionService/PaperTradeManagementService/RiskManagementService
- * — those strategies have been permanently removed from the application.
+ * - those strategies have been permanently removed from the application.
  * OrbDataService is kept: NewsTradingStrategy depends on it directly for
  * live tick prices (getLivePrice()), independent of the ORB strategy engine
  * that was removed. AI and News sections (newsCatalyst, ai/status, news/all,
- * and the news block inside scanner()) are completely unchanged — every
+ * and the news block inside scanner()) are completely unchanged - every
  * edit in this revision only removes code that was exclusively serving the
  * now-deleted strategies.
  *
@@ -56,43 +56,45 @@ import java.util.*;
 @RequiredArgsConstructor
 public class DashboardController {
 
-    // ── Core services ─────────────────────────────────────────────────────
+    // -- Core services -----------------------------------------------------
     private final MarketDataService           marketDataService;
     private final VixService                  vixService;
     private final MarketTimingService         timingService;
     private final MarketDirectionService      marketDir;
     private final CircuitBreakerService       circuitBreaker;
+    private final com.trading.herozero.repository.HeroZeroTradeRepository heroZeroRepo;
+    private final com.trading.momentumstockofday.repository.MomentumTradeRepository momentumRepo;
     private final SectorStrengthService       sectorStrength;
     private final SectorClassificationService sectorClassify;
 
-    // ── Mode engines ──────────────────────────────────────────────────────
+    // -- Mode engines ------------------------------------------------------
     private final MarketModeEngine            marketModeEngine;
     private final MarketPhaseEngine           marketPhaseEngine;
     private final BankNiftyModeEngine         bankNiftyModeEngine;
 
-    // ── v7+ services ──────────────────────────────────────────────────────
+    // -- v7+ services ------------------------------------------------------
     private final StockRankingEngine          rankingEngine;
     private final LatencyMonitor              latencyMonitor;
     private final StrategyValidationTracker   validationTracker;
 
-    // ── News strategy ──────────────────────────────────────────────────────
+    // -- News strategy ------------------------------------------------------
     private final NewsTradingStrategy          newsTradingStrategy; // NEWS_CATALYST_V1
     private final NewsIngestionService         newsIngestionService; // raw ingested articles
 
-    // ── OrbDataService — KEPT: NewsTradingStrategy depends on it directly
+    // -- OrbDataService - KEPT: NewsTradingStrategy depends on it directly
     // for live tick prices (getLivePrice()). The ORB strategy engine that
     // used to consume the rest of this service's data has been removed.
     private final OrbDataService               orbDataService;
 
-    // ── Per-strategy capital ledger — for the UI-editable capital control
+    // -- Per-strategy capital ledger - for the UI-editable capital control
     private final com.trading.ai.execution.AiNewsCapitalLedger capitalLedger;
 
     @Value("${trading.capital:100000}") private BigDecimal capital;
     @Value("${trading.mode:PAPER}")     private String     tradingMode;
 
-    // ══════════════════════════════════════════════════════════════════════
+    // ======================================================================
     // GET /api/dashboard/snapshot
-    // ══════════════════════════════════════════════════════════════════════
+    // ======================================================================
 
     @GetMapping("/snapshot")
     public ResponseEntity<Map<String, Object>> snapshot() {
@@ -153,7 +155,28 @@ public class DashboardController {
         data.put("marketDirection", md);
 
         // 5. P&L
-        BigDecimal dailyPnl   = circuitBreaker.getDailyPnl();
+        // FIX (per explicit user request: "Hero-zero and momentum, all
+        // the strategies will show, not only AI and News"). AI+News
+        // P&L/trade count come from the circuit breaker (now correctly
+        // fed real data - see AiTradeManagementEngine/
+        // NewsTradeManagementEngine fixes). Hero-Zero and Momentum are
+        // deliberately NOT wired into CircuitBreakerService itself -
+        // that would break the "fully independent" requirement both
+        // were explicitly built under. Instead, their own, separately-
+        // tracked P&L/trade counts are added here, at the dashboard
+        // layer only - the correct place for cross-strategy visibility
+        // without creating any real dependency between strategies.
+        java.time.LocalDate today = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata"));
+        BigDecimal aiNewsDailyPnl = circuitBreaker.getDailyPnl();
+        BigDecimal heroZeroPnl    = heroZeroRepo.getTodaysRealisedPnl(today);
+        BigDecimal momentumPnl    = momentumRepo.getTodaysRealisedPnl();
+        BigDecimal dailyPnl       = aiNewsDailyPnl.add(heroZeroPnl).add(momentumPnl);
+
+        int aiNewsTradesToday  = circuitBreaker.getTradesToday();
+        int heroZeroTrades     = heroZeroRepo.getTodaysTradeCount(today);
+        int momentumTrades     = momentumRepo.getTodaysTradeCount();
+        int totalTradesToday   = aiNewsTradesToday + heroZeroTrades + momentumTrades;
+
         BigDecimal weeklyPnl  = circuitBreaker.getWeeklyPnl();
         BigDecimal monthlyPnl = circuitBreaker.getMonthlyPnl();
         Map<String, Object> pnl = new LinkedHashMap<>();
@@ -162,10 +185,17 @@ public class DashboardController {
         pnl.put("weeklyPnl",       weeklyPnl);
         pnl.put("monthlyPnl",      monthlyPnl);
         pnl.put("dailyPct",        pct(dailyPnl, capital));
-        pnl.put("tradesToday",     circuitBreaker.getTradesToday());
+        pnl.put("tradesToday",     totalTradesToday);
         pnl.put("maxTradesPerDay", circuitBreaker.getMaxPerDay());
         pnl.put("cbActive",        circuitBreaker.isActive());
         pnl.put("cbReason",        nullSafe(circuitBreaker.getDisableReason()));
+        // Breakdown, so the dashboard can show per-strategy contribution
+        // if desired, without losing the combined total above.
+        pnl.put("breakdown", Map.of(
+                "aiNews",    Map.of("pnl", aiNewsDailyPnl, "trades", aiNewsTradesToday),
+                "heroZero",  Map.of("pnl", heroZeroPnl,    "trades", heroZeroTrades),
+                "momentum",  Map.of("pnl", momentumPnl,    "trades", momentumTrades)
+        ));
         data.put("pnl", pnl);
 
         // 6. sectors
@@ -209,7 +239,7 @@ public class DashboardController {
         data.put("validationFailureFrequency", validationTracker.getFailureFrequency());
         data.put("validationSymbolsTracked",   validationTracker.getTotalSymbolsTracked());
 
-        // 15. AI and News sections — completely independent of anything above
+        // 15. AI and News sections - completely independent of anything above
         data.put("newsCatalyst",     buildNewsCatalystSummary());
 
         return ResponseEntity.ok(data);
@@ -285,9 +315,9 @@ public class DashboardController {
         return ResponseEntity.ok("Circuit breaker reset acknowledged");
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // PER-STRATEGY CAPITAL — UI-editable, AI and News independently
-    // ══════════════════════════════════════════════════════════════════════
+    // ======================================================================
+    // PER-STRATEGY CAPITAL - UI-editable, AI and News independently
+    // ======================================================================
 
     /**
      * Returns today's capital summary for AI and News, for the UI to
@@ -313,7 +343,7 @@ public class DashboardController {
     /**
      * Sets a strategy's capital allocation. Body: {"strategyName": "...",
      * "capital": 6000}. strategyName must be exactly "AI_TRADING_V2" or
-     * "NEWS_CATALYST_V1" — rejects anything else rather than silently
+     * "NEWS_CATALYST_V1" - rejects anything else rather than silently
      * creating a ledger row for a typo'd strategy name.
      */
     @PostMapping("/capital")
@@ -336,7 +366,7 @@ public class DashboardController {
             resp.put("success", ok);
             resp.put("strategyName", strategyName);
             resp.put("capital", capitalAmt);
-            log.warn("[DASHBOARD] Capital changed via UI: {} -> ₹{}", strategyName, capitalAmt);
+            log.warn("[DASHBOARD] Capital changed via UI: {} -> Rs.{}", strategyName, capitalAmt);
             return ResponseEntity.ok(resp);
         } catch (Exception e) {
             resp.put("success", false);
@@ -345,7 +375,7 @@ public class DashboardController {
         }
     }
 
-    // ── Private builders ───────────────────────────────────────────────────
+    // -- Private builders ---------------------------------------------------
 
     private Map<String, Object> buildMarketModeMap(MarketModeEngine.MarketModeResult mm) {
         Map<String, Object> m = new LinkedHashMap<>();
@@ -440,9 +470,9 @@ public class DashboardController {
         if (sd.alignedBearish()) return "WEAK";
         return "NEUTRAL";
     }
-    // ══════════════════════════════════════════════════════════════════════════
-    // NEWS CATALYST SUMMARY — read-only snapshot for dashboard
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
+    // NEWS CATALYST SUMMARY - read-only snapshot for dashboard
+    // ==========================================================================
 
     private Map<String, Object> buildNewsCatalystSummary() {
         Map<String, Object> out = new LinkedHashMap<>();
@@ -454,7 +484,7 @@ public class DashboardController {
             out.put("totalIngested",       newsTradingStrategy.getTotalIngested());
             out.put("firedToday",          newsTradingStrategy.getFiredToday());
             // Pure observability, mirrors the same fix already applied to
-            // AI — see NewsTradingStrategy.blockReasons docstring.
+            // AI - see NewsTradingStrategy.blockReasons docstring.
             out.put("blockReasons",        newsTradingStrategy.getBlockReasons());
             out.put("sessionCapReached",   newsTradingStrategy.isSessionCapReachedThisCycle());
 
@@ -474,27 +504,27 @@ public class DashboardController {
             }
             out.put("recentEvents", events);
 
-            // ── scoredItems: ALL scored stocks from last cycle ──────────────────
+            // -- scoredItems: ALL scored stocks from last cycle ------------------
             // This powers the "All Scored News Items" table in the dashboard News tab.
-            // Includes every stock above threshold — traded, eligible, skipped, and below.
+            // Includes every stock above threshold - traded, eligible, skipped, and below.
             // The dashboard renders TRADED (green), ELIGIBLE (gold), SKIPPED, BELOW 65.
             List<Map<String, Object>> scoredList = new ArrayList<>();
             for (NewsScore ns : newsTradingStrategy.getLastCycleScores()) {
                 Map<String, Object> si = new LinkedHashMap<>();
                 si.put("symbol",     ns.symbol());
                 si.put("score",      ns.totalScore());
-                si.put("category",   ns.primaryCategory() != null ? ns.primaryCategory().name() : "—");
-                si.put("sentiment",  ns.dominantSentiment() != null ? ns.dominantSentiment().name() : "—");
-                // direction is null when unclear — dashboard shows SKIPPED row
-                si.put("direction",  ns.direction() != null ? ns.direction().name() : "—");
+                si.put("category",   ns.primaryCategory() != null ? ns.primaryCategory().name() : "-");
+                si.put("sentiment",  ns.dominantSentiment() != null ? ns.dominantSentiment().name() : "-");
+                // direction is null when unclear - dashboard shows SKIPPED row
+                si.put("direction",  ns.direction() != null ? ns.direction().name() : "-");
                 si.put("ageMinutes", ns.ageMinutes());
                 si.put("source",     ns.sourceArticles() != null && !ns.sourceArticles().isEmpty()
-                        ? ns.sourceArticles().get(0).source() : "—");
+                        ? ns.sourceArticles().get(0).source() : "-");
                 si.put("headline",   ns.primaryHeadline() != null
                         ? (ns.primaryHeadline().length() > 120
-                        ? ns.primaryHeadline().substring(0, 120) + "…"
+                        ? ns.primaryHeadline().substring(0, 120) + "..."
                         : ns.primaryHeadline())
-                        : "—");
+                        : "-");
                 // skipReason: shown as tooltip on SKIPPED pill in dashboard
                 String skipReason = "";
                 if (ns.direction() == null) skipReason = "direction unclear";
@@ -504,17 +534,17 @@ public class DashboardController {
             }
             out.put("scoredItems", scoredList);
 
-            // ── ingestedItems: ALL raw articles regardless of symbol match ──────
+            // -- ingestedItems: ALL raw articles regardless of symbol match ------
             // scoredItems only contains symbol-matched scores.
             // General market news (BSE filings, Moneycontrol) that don't mention
             // a specific NSE stock never appear in scoredItems.
-            // ingestedItems shows EVERYTHING that was ingested — for full visibility.
+            // ingestedItems shows EVERYTHING that was ingested - for full visibility.
             //
             // FIX: Suppress pure regulatory boilerplate from DISPLAY only.
             // Most BSE ingestion is routine compliance filings (Reg 29(2)/30/44(3),
             // Postal Ballot results, Analyst Meeting intimations) that carry zero
             // tradeable signal and clutter the dashboard. This filter only affects
-            // what's RENDERED here — newsIngestionService.getActiveItems() itself,
+            // what's RENDERED here - newsIngestionService.getActiveItems() itself,
             // scoring, and trading logic are completely untouched.
             List<Map<String, Object>> ingestedList = new ArrayList<>();
             int suppressedBoilerplate = 0;
@@ -527,12 +557,12 @@ public class DashboardController {
                 Map<String, Object> ai = new LinkedHashMap<>();
                 ai.put("headline",   item.headline() != null
                         ? (item.headline().length() > 120
-                        ? item.headline().substring(0, 120) + "…"
+                        ? item.headline().substring(0, 120) + "..."
                         : item.headline())
-                        : "—");
-                ai.put("category",   item.category() != null ? item.category().name() : "—");
-                ai.put("sentiment",  item.sentiment() != null ? item.sentiment().name() : "—");
-                ai.put("source",     item.source() != null ? item.source() : "—");
+                        : "-");
+                ai.put("category",   item.category() != null ? item.category().name() : "-");
+                ai.put("sentiment",  item.sentiment() != null ? item.sentiment().name() : "-");
+                ai.put("source",     item.source() != null ? item.source() : "-");
                 ai.put("ageMinutes", java.time.Duration.between(
                         item.publishedAt(),
                         java.time.Instant.now()).toMinutes());
@@ -555,9 +585,9 @@ public class DashboardController {
             out.put("ingestedItems", ingestedList);
             out.put("suppressedBoilerplateCount", suppressedBoilerplate);
 
-            // ── globalNewsItems: macro/global articles always shown ────────────
+            // -- globalNewsItems: macro/global articles always shown ------------
             // Filtered to GLOBAL_EVENT, RBI_POLICY, ECONOMIC_DATA categories
-            // from ET Economy / RBI sources — shown regardless of symbol match
+            // from ET Economy / RBI sources - shown regardless of symbol match
             // These never appear in scoredItems (no NSE stock name in headline)
             // but are important macro context for the trader
             List<Map<String, Object>> globalList = new ArrayList<>();
@@ -571,12 +601,12 @@ public class DashboardController {
                 Map<String, Object> gi = new LinkedHashMap<>();
                 gi.put("headline",  item.headline() != null
                         ? (item.headline().length() > 100
-                        ? item.headline().substring(0, 100) + "…"
+                        ? item.headline().substring(0, 100) + "..."
                         : item.headline())
-                        : "—");
+                        : "-");
                 gi.put("category",  category.replace("_", " "));
                 gi.put("sentiment", item.sentiment() != null ? item.sentiment().name() : "NEUTRAL");
-                gi.put("source",    item.source() != null ? item.source() : "—");
+                gi.put("source",    item.source() != null ? item.source() : "-");
                 gi.put("ageMinutes", java.time.Duration.between(
                         item.publishedAt(),
                         java.time.Instant.now()).toMinutes());
@@ -596,7 +626,7 @@ public class DashboardController {
 
     /**
      * Identifies routine SEBI/BSE regulatory boilerplate that carries zero
-     * tradeable signal — used ONLY to declutter the dashboard's ingestedItems
+     * tradeable signal - used ONLY to declutter the dashboard's ingestedItems
      * display. Does NOT affect NewsScoreEngine, NewsKeywordFilter, category/
      * sentiment classification, or any trading decision. A purely cosmetic
      * display filter applied after scoring/categorization already happened.
@@ -605,7 +635,7 @@ public class DashboardController {
         String combined = ((headline != null ? headline : "") + " "
                 + (description != null ? description : "")).toLowerCase();
         // Each phrase below is routine compliance text seen verbatim across
-        // hundreds of BSE filings daily — never carries a trading signal.
+        // hundreds of BSE filings daily - never carries a trading signal.
         return combined.contains("regulation 29(2)")
                 || combined.contains("regulation 29 (2)")
                 || combined.contains("reg 29(2)")
@@ -624,17 +654,17 @@ public class DashboardController {
                 || combined.contains("intimation of analyst");
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // MANUAL SCANNER — exposes top News candidates plus generic market context
+    // ==========================================================================
+    // MANUAL SCANNER - exposes top News candidates plus generic market context
     // Used by the scanner UI (/scanner.html) for manual trade decisions
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
     @GetMapping("/scanner")
     public ResponseEntity<Map<String, Object>> scanner() {
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         Map<String, java.math.BigDecimal> prices = marketDataService.getLastPricesSimple();
 
-        // ── News candidates ──────────────────────────────────────────────────
+        // -- News candidates --------------------------------------------------
         try {
             List<com.trading.strategy.news.NewsScore> scores = newsTradingStrategy.getLastCycleScores();
             List<Map<String, Object>> newsItems = new java.util.ArrayList<>();
@@ -649,9 +679,9 @@ public class DashboardController {
                 item.put("recencyScore",    s.recencyScore());
                 item.put("sourceScore",     s.sourceScore());
                 item.put("keywordScore",    s.keywordScore());
-                item.put("direction",       s.direction() != null ? s.direction().name() : "—");
-                item.put("category",        s.primaryCategory() != null ? s.primaryCategory().name() : "—");
-                item.put("sentiment",       s.dominantSentiment() != null ? s.dominantSentiment().name() : "—");
+                item.put("direction",       s.direction() != null ? s.direction().name() : "-");
+                item.put("category",        s.primaryCategory() != null ? s.primaryCategory().name() : "-");
+                item.put("sentiment",       s.dominantSentiment() != null ? s.dominantSentiment().name() : "-");
                 item.put("headline",        s.primaryHeadline());
                 item.put("ageMinutes",      s.ageMinutes());
                 item.put("corroborated",    s.corroborated());
@@ -671,16 +701,16 @@ public class DashboardController {
             out.put("news", Map.of("error", e.getMessage()));
         }
 
-        // ── Market context ───────────────────────────────────────────────────
+        // -- Market context ---------------------------------------------------
         try {
             var dir = marketDir.getCurrentDirection();
             out.put("market", Map.of(
-                    "direction",   dir != null ? dir.direction().name() : "—",
+                    "direction",   dir != null ? dir.direction().name() : "-",
                     "niftyAtrPct", dir != null ? dir.niftyAtrPct() : 0.0,
-                    "label",       dir != null ? dir.direction().name() : "—"
+                    "label",       dir != null ? dir.direction().name() : "-"
             ));
         } catch (Exception e) {
-            out.put("market", Map.of("direction", "—"));
+            out.put("market", Map.of("direction", "-"));
         }
 
         out.put("timestamp", java.time.Instant.now().toString());
@@ -691,7 +721,7 @@ public class DashboardController {
     public ResponseEntity<Map<String, Object>> getAllNewsItems() {
         Map<String, Object> out = new java.util.LinkedHashMap<>();
         try {
-            // getLastCycleScores() uses scoreAllForDashboard() — NO threshold, NO direction filter
+            // getLastCycleScores() uses scoreAllForDashboard() - NO threshold, NO direction filter
             // Returns every symbol mentioned in any active news article, regardless of score
             List<com.trading.strategy.news.NewsScore> all = newsTradingStrategy.getLastCycleScores();
             Map<String, java.math.BigDecimal> prices = marketDataService.getLastPricesSimple();
@@ -709,8 +739,8 @@ public class DashboardController {
                 item.put("sourceScore",     s.sourceScore());
                 item.put("keywordScore",    s.keywordScore());
                 item.put("direction",       s.direction() != null ? s.direction().name() : "UNCLEAR");
-                item.put("category",        s.primaryCategory() != null ? s.primaryCategory().name() : "—");
-                item.put("sentiment",       s.dominantSentiment() != null ? s.dominantSentiment().name() : "—");
+                item.put("category",        s.primaryCategory() != null ? s.primaryCategory().name() : "-");
+                item.put("sentiment",       s.dominantSentiment() != null ? s.dominantSentiment().name() : "-");
                 item.put("headline",        s.primaryHeadline());
                 item.put("ageMinutes",      s.ageMinutes());
                 item.put("corroborated",    s.corroborated());
@@ -752,10 +782,10 @@ public class DashboardController {
         return ResponseEntity.ok(out);
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
-    // AI TRADING MODULE — read-only status endpoint
+    // ==========================================================================
+    // AI TRADING MODULE - read-only status endpoint
     // Returns null-safe data when AI module is disabled
-    // ══════════════════════════════════════════════════════════════════════════
+    // ==========================================================================
 
     @Autowired(required = false)
     private com.trading.ai.AiTradingSystem aiModule;
@@ -771,26 +801,26 @@ public class DashboardController {
         try {
             out.put("enabled", true);
 
-            // ── Core status from AiTradingSystem ─────────────────────────────
+            // -- Core status from AiTradingSystem -----------------------------
             // Contains: tradesToday, maxTradesPerDay, regime, phase, positions,
             //           watchlistCount, watchlist, bootstrapComplete, samplesCount
             Map<String, Object> status = aiModule.getStatus();
             out.putAll(status);
 
-            // ── Regime and execution threshold ────────────────────────────────
+            // -- Regime and execution threshold --------------------------------
             String regime = String.valueOf(status.getOrDefault("regime", "UNKNOWN"));
             int threshold = "TRENDING".equals(regime) ? 70
                     : "RANGING".equals(regime)  ? 80
                     : 999;
             out.put("executionThreshold", threshold);
             out.put("thresholdLabel",
-                    "TRENDING".equals(regime) ? "Score ≥ 70 + direction match"
-                            : "RANGING".equals(regime)  ? "Score ≥ 80 (both directions)"
-                            : "CHOPPY — watchlist only, no execution");
+                    "TRENDING".equals(regime) ? "Score >= 70 + direction match"
+                            : "RANGING".equals(regime)  ? "Score >= 80 (both directions)"
+                            : "CHOPPY - watchlist only, no execution");
 
-            // ── Watchlist (stocks with confirmed daily patterns) ──────────────
-            // ── Watchlist already included via out.putAll(status) above ──────────
-            // watchlist is now List<Map<symbol,pattern>> — no cast needed
+            // -- Watchlist (stocks with confirmed daily patterns) --------------
+            // -- Watchlist already included via out.putAll(status) above ----------
+            // watchlist is now List<Map<symbol,pattern>> - no cast needed
             // Just ensure watchlistCount is correct
             @SuppressWarnings("unchecked")
             java.util.List<?> watchlist =
@@ -798,7 +828,7 @@ public class DashboardController {
             out.put("watchlist",      watchlist);
             out.put("watchlistCount", watchlist.size());
 
-            // ── Recent AI decisions with full confidence breakdown ────────────
+            // -- Recent AI decisions with full confidence breakdown ------------
             out.put("recentDecisions", aiModule.getTodayDecisions().stream().limit(10).map(d -> {
                 Map<String, Object> m = new java.util.LinkedHashMap<>();
 
@@ -817,7 +847,7 @@ public class DashboardController {
 
                 // Pattern info
                 m.put("dominantPattern",  d.getDominantFactor());
-                m.put("patternScore",     "50/50");  // binary — if here, pattern passed
+                m.put("patternScore",     "50/50");  // binary - if here, pattern passed
                 m.put("bullishPatterns",  d.getNumericPreScore()); // reused field
 
                 // Probability and RR from risk engine
@@ -837,17 +867,17 @@ public class DashboardController {
                 return m;
             }).collect(java.util.stream.Collectors.toList()));
 
-            // ── Pipeline stage summary ────────────────────────────────────────
+            // -- Pipeline stage summary ----------------------------------------
             Map<String, Object> pipeline = new java.util.LinkedHashMap<>();
             pipeline.put("stage1", "Daily qualification (252-day data, EMA/ADR/52wk)");
-            pipeline.put("stage2", "REMOVED — daily patterns are the only qualification layer");
+            pipeline.put("stage2", "REMOVED - daily patterns are the only qualification layer");
             pipeline.put("stage3", "Feature build + 16 daily pattern gate (min 1 required)");
             pipeline.put("gate1",  "Daily pattern confirmed (mandatory)");
             pipeline.put("gate2",  "5m candle confirms direction (mandatory, >25% body)");
             pipeline.put("scoring","Pattern=50pts + Candle=20 + Volume=10 + Trend=10 + PA=10");
             out.put("pipeline", pipeline);
 
-            // ── Daily patterns reference ──────────────────────────────────────
+            // -- Daily patterns reference --------------------------------------
             out.put("patterns", java.util.List.of(
                     "BOS (f60)", "CHOCH (f61)", "OrderBlock (f62)", "FVG (f63)",
                     "AccumDist (f64)", "TriplePattern (f65)", "H&S (f66)",

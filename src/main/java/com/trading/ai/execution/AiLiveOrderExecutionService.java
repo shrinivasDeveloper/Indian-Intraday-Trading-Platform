@@ -558,7 +558,25 @@ public class AiLiveOrderExecutionService {
                 int brokerQty = p.netQuantity;
                 if (brokerQty == 0) continue; // closed/flat on broker side
                 Integer ourQty = ours.get(p.tradingSymbol);
-                if (ourQty == null || ourQty != brokerQty) {
+                // FIX (per explicit user clarification: "i have taken
+                // manually from zerodha... no need to track, only auto
+                // trade taken from our app only need to track, manual
+                // from zerodha app ignore"). Confirmed real issue: this
+                // previously flagged EVERY broker position the app never
+                // opened (ourQty == null) as a "tracking bug" - including
+                // completely legitimate positions the user took manually,
+                // directly in Zerodha, with zero relation to this app at
+                // all. Now only compares positions this app genuinely
+                // tracks (ourQty != null) - a manually-taken position the
+                // app never touched is correctly ignored entirely, not
+                // treated as an error requiring review.
+                if (ourQty == null) {
+                    log.debug("[AI-LIVE-EXEC] {} exists at broker (qty={}) but this app never " +
+                            "opened it - ignoring (likely a manual position taken directly in " +
+                            "Zerodha, outside this app's tracking scope)", p.tradingSymbol, brokerQty);
+                    continue;
+                }
+                if (ourQty != brokerQty) {
                     log.error("[AI-LIVE-EXEC] ⚠️ POSITION MISMATCH for {}: broker shows qty={}, " +
                                     "our records show qty={}. Manual review required — this could mean " +
                                     "a missed fill, an external order, or a tracking bug.",

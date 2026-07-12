@@ -62,7 +62,16 @@ public class NewsKeywordFilter {
     // -- Tier 2: High-impact macro/policy keywords (weight 70-89) -------------
     private static final Set<String> TIER2_RBI = Set.of(
             "rbi", "repo rate", "reverse repo", "crr", "slr", "monetary policy",
-            "mpc", "rbi governor", "rate cut", "rate hike", "liquidity",
+            "rbi governor", "rate cut", "rate hike", "liquidity",
+            // FIX (found via direct user report): removed standalone "mpc" -
+            // it's a literal substring of "MPCB" (Maharashtra Pollution
+            // Control Board, a completely unrelated state environmental
+            // regulator), causing a company-specific pollution/closure
+            // notice to be misclassified as RBI monetary policy news.
+            // "monetary policy" above already safely covers genuine RBI
+            // Monetary Policy Committee announcements without this
+            // collision risk - real MPC news headlines virtually always
+            // also say "monetary policy" or "RBI" directly.
             "inflation target", "rbi announcement", "rbi decision"
     );
 

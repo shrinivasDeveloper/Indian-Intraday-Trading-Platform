@@ -235,7 +235,7 @@ public class AiRiskAssessmentEngine {
     // ═══════════════════════════════════════════════════════════════════════
 
     private double resolveCapital() {
-        try { return capitalLedger.getAvailableCapital("AI_TRADING_V2").doubleValue(); }
+        try { return capitalLedger.getFixedCapitalPerTrade("AI_TRADING_V2").doubleValue(); }
         catch (Exception e) { return defaultCapital; }
     }
 

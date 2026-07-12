@@ -311,6 +311,37 @@ public class AiNewsCapitalLedger {
      * realised P&L - AI's available capital is completely unaffected by
      * News's trades, and vice versa.
      */
+    /**
+     * FIX (per explicit user specification): "the capital entered in the
+     * UI should act as the fixed capital per trade, not as a running
+     * balance that decreases after every trade." Confirmed real problem:
+     * getAvailableCapital() below subtracts margin_used (capital tied up
+     * in currently-open positions) - meaning a user who set Rs.100,000
+     * would see it silently shrink toward zero as trades opened during
+     * the day, with position sizing shrinking right along with it. This
+     * new method deliberately returns ONLY starting_capital - exactly
+     * what the user entered, always, regardless of how many trades have
+     * opened or closed today. Used specifically for POSITION SIZING
+     * (AiRiskAssessmentEngine); getAvailableCapital() below is left
+     * completely unchanged for any other legitimate real-margin-tracking
+     * purpose (e.g. circuit breaker checks) that genuinely needs to know
+     * real, currently-committed exposure.
+     */
+    public BigDecimal getFixedCapitalPerTrade(String strategyName) {
+        try {
+            ensureRowExists(strategyName);
+            Map<String, Object> row = jdbc.queryForMap(
+                    "SELECT starting_capital " +
+                            "FROM ai_news_capital_ledger WHERE trade_date = ? AND strategy_name = ?",
+                    LocalDate.now(ZoneId.of("Asia/Kolkata")), strategyName);
+            return (BigDecimal) row.get("starting_capital");
+        } catch (Exception e) {
+            log.warn("[AI-LEDGER] getFixedCapitalPerTrade failed for {} - returning configured " +
+                    "default as a safe fallback: {}", strategyName, e.getMessage());
+            return defaultStartingCapital.get();
+        }
+    }
+
     public BigDecimal getAvailableCapital(String strategyName) {
         try {
             ensureRowExists(strategyName);

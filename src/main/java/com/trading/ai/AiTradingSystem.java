@@ -640,6 +640,40 @@ public class AiTradingSystem {
             }
             blockReasons.remove(candidate.getSymbol()); // cleared this gate - wasn't the blocker
 
+            // FIX (new enhancement, per explicit user specification):
+            // "Before placing a trade, check whether the stock has
+            // already moved 1.5% in the SAME direction as the signal -
+            // if so, skip, since the move has already happened."
+            // Deliberately directional, unlike the old, removed
+            // TOO_EXTENDED gate (which blocked on ANY 1.5%+ move
+            // regardless of direction, even one favorable to entry).
+            // A BUY signal is only skipped if the stock ALREADY gained
+            // 1.5%+ today; a SELL signal is only skipped if it ALREADY
+            // fell 1.5%+ - the opposite-direction case is explicitly
+            // allowed through, since that's not "chasing" a move.
+            if (!dailyCandles.isEmpty()) {
+                double refPrice = dailyCandles.get(dailyCandles.size() - 1)
+                        .getClose().doubleValue();
+                if (refPrice > 0) {
+                    double movePct = (candidate.getLtp() - refPrice) / refPrice;
+                    boolean isLong = "LONG".equals(candidate.getSuggestedDirection());
+                    boolean alreadyMovedSameDirection =
+                            (isLong && movePct >= 0.015) || (!isLong && movePct <= -0.015);
+                    if (alreadyMovedSameDirection) {
+                        log.info("[AI-TRACE] {} SKIPPED - already moved {}% in the {} direction " +
+                                        "today (>= 1.5% threshold) - the move has already happened, " +
+                                        "chasing it now is not taken", candidate.getSymbol(),
+                                String.format("%.2f", movePct * 100), isLong ? "BUY" : "SELL");
+                        blockReasons.put(candidate.getSymbol(), String.format(
+                                "Cleared all individual gates, but stock already moved %.2f%% " +
+                                        "in the %s direction today (>= 1.5%% threshold) - the move has " +
+                                        "already happened, not entering a chase", movePct * 100,
+                                isLong ? "BUY" : "SELL"));
+                        continue;
+                    }
+                }
+            }
+
             log.info("[AI-TRACE] {} survived ALL gates - entering ranking pool " +
                             "(will be decided by reasoningEngine.selectBest this cycle)",
                     candidate.getSymbol());

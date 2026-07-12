@@ -168,4 +168,28 @@ public class HeroZeroTradeRepository {
     public List<HeroZeroTrade> findAll() {
         return jdbc.query("SELECT * FROM hero_zero_trades ORDER BY created_at DESC", MAPPER);
     }
+
+    /** FIX (per explicit user request: "Hero-zero and momentum, all
+     *  the strategies will show, not only AI and News"). Returns
+     *  today's realised P&L (from CLOSED trades only - an open
+     *  position's P&L isn't "realised" yet) and today's trade count,
+     *  for the dashboard's cross-strategy aggregation. Uses
+     *  LocalDate.now(IST) passed as a parameter - same proven,
+     *  timezone-safe pattern already used throughout this codebase,
+     *  rather than relying on MySQL's own server-timezone date
+     *  functions. */
+    public java.math.BigDecimal getTodaysRealisedPnl(java.time.LocalDate today) {
+        java.math.BigDecimal pnl = jdbc.queryForObject(
+                "SELECT COALESCE(SUM(pnl), 0) FROM hero_zero_trades " +
+                        "WHERE DATE(created_at) = ? AND trade_status = 'CLOSED'",
+                java.math.BigDecimal.class, java.sql.Date.valueOf(today));
+        return pnl != null ? pnl : java.math.BigDecimal.ZERO;
+    }
+
+    public int getTodaysTradeCount(java.time.LocalDate today) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM hero_zero_trades WHERE DATE(created_at) = ?",
+                Integer.class, java.sql.Date.valueOf(today));
+        return count != null ? count : 0;
+    }
 }

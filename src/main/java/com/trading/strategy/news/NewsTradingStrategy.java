@@ -388,33 +388,29 @@ public class NewsTradingStrategy {
                                 ", but ATR is frozen (market volatility gate) and this isn't an EARNINGS/M&A event");
                         return false;
                     }
-                    // SIDEWAYS bypass: only for very high conviction non-company news
-                    if (isSideways && s.totalScore() >= SIDEWAYS_BYPASS_SCORE) {
-                        log.info("[NEWS] {} bypassing SIDEWAYS gate - score={} >= {}",
-                                s.symbol(), s.totalScore(), SIDEWAYS_BYPASS_SCORE);
-                        blockReasons.remove(s.symbol());
-                        return true;
-                    }
-                    // SIDEWAYS with normal score -> block macro/sector news
-                    if (isSideways) {
-                        blockReasons.put(s.symbol(), String.format(
-                                "Scored %d, but market is SIDEWAYS and this needs >= %d to bypass " +
-                                        "(only EARNINGS/M&A events skip this check)",
-                                s.totalScore(), SIDEWAYS_BYPASS_SCORE));
-                        return false;
-                    }
-                    // Bullish/Bearish: REMOVED per explicit instruction -
-                    // this was rejecting a stock-specific news catalyst
-                    // purely because NIFTY's broad index direction (tide/
-                    // wave/ripple EMA20/50/200 alignment, computed by
-                    // MarketDirectionService - confirmed NOT specific to
-                    // this symbol or even to News) happened to disagree.
-                    // A sufficiently-scored, independently-verified
-                    // company-specific signal should fire on its own
-                    // merit, not be vetoed by the wider index's mood.
-                    // isDirectionAligned() is kept defined below (now
-                    // unused) rather than deleted, so this change is
-                    // visible/reversible without re-deriving the logic.
+                    // Both SIDEWAYS and Bullish/Bearish gates: REMOVED per
+                    // explicit instruction. A sufficiently-scored,
+                    // independently-verified news catalyst should fire on
+                    // its own merit, not be vetoed purely because Nifty's
+                    // broad index happens to be range-bound (SIDEWAYS) or
+                    // because the wider index's EMA20/50/200 direction
+                    // (tide/wave/ripple, computed by MarketDirectionService
+                    // - confirmed NOT specific to this symbol or even to
+                    // News) happens to disagree with this stock's own
+                    // signal. SIDEWAYS_BYPASS_SCORE and isDirectionAligned()
+                    // are kept defined (now unused) rather than deleted, so
+                    // this change is visible/reversible without re-deriving
+                    // the logic.
+                    //
+                    // FIX (compile error found by user: "Unreachable
+                    // statement"): this used to be TWO separate blocks, each
+                    // independently ending in "blockReasons.remove(...);
+                    // return true;" - functionally identical to each other.
+                    // Since the first one's return already exits
+                    // unconditionally, the second (leftover from an earlier,
+                    // separate removal) could never execute. Merged into
+                    // one single removal block - same behavior, no
+                    // duplicate/dead code.
                     blockReasons.remove(s.symbol());
                     return true;
                 })
@@ -600,6 +596,49 @@ public class NewsTradingStrategy {
             sectorChg = sectorStrength.getSector(sectorName).changePercent();
         } catch (Exception ignored) {}
 
+        // FIX (new enhancement, per explicit user specification, same
+        // logic as AI's identical fix in AiTradingSystem.java but with a
+        // 2% threshold instead of AI's 1.5%, matching News's own tighter
+        // SL/T1/T2 profile - 0.8%/1.6%/2.4% vs AI's wider bands):
+        // "Before placing a trade, check whether the stock has already
+        // moved [threshold]% in the SAME direction as the signal - if
+        // so, skip, since the move has already happened." Directional,
+        // not absolute - a BUY only skipped if already gained 2%+, a
+        // SELL only skipped if already fell 2%+; the opposite-direction
+        // case is explicitly allowed through. Uses orbDataService's
+        // existing prevClose data - already an existing dependency, zero
+        // new data source. Fails safe: if ORB data isn't available for
+        // this specific symbol (News trades a broader universe than
+        // ORB's own tracked subset), the check is simply skipped rather
+        // than blocking a trade on missing data.
+        // FIX (compile error found by user, from yesterday's change):
+        // reuses the SAME orbData variable already fetched above (for
+        // the separate, pre-existing TOO_EXTENDED gate) instead of
+        // re-declaring it - same symbol, same object, no need to fetch
+        // twice. Also fixed entryPrice (BigDecimal) needing
+        // .doubleValue() for arithmetic, and fixed 'return;' to
+        // 'return false;' since fireSignal() returns boolean, not void.
+        try {
+            if (orbData != null && orbData.prevClose > 0) {
+                double movePct = (entryPrice.doubleValue() - orbData.prevClose) / orbData.prevClose;
+                boolean alreadyMovedSameDirection =
+                        (isBuy && movePct >= 0.02) || (!isBuy && movePct <= -0.02);
+                if (alreadyMovedSameDirection) {
+                    log.info("[NEWS] {} SKIPPED - already moved {}% in the {} direction today " +
+                                    "(>= 2% threshold) - the move has already happened, not entering " +
+                                    "a chase", symbol, String.format("%.2f", movePct * 100),
+                            isBuy ? "BUY" : "SELL");
+                    blockReasons.put(symbol, String.format(
+                            "Scored above threshold, but stock already moved %.2f%% in the %s " +
+                                    "direction today (>= 2%% threshold) - the move has already " +
+                                    "happened, not entering a chase", movePct * 100, isBuy ? "BUY" : "SELL"));
+                    return false;
+                }
+            }
+        } catch (Exception e) {
+            log.debug("[NEWS] {} already-moved check skipped (non-fatal): {}", symbol, e.getMessage());
+        }
+
         log.info("[NEWS] [LAUNCH] SIGNAL: {} | dir={} | entry={} | sl={} ({}%) | T1={} | T2={} | " +
                         "score={} | category={} | sentiment={} | age={}min | headline: \"{}\"",
                 symbol, score.direction(), entryPrice, stopLoss,
@@ -620,8 +659,23 @@ public class NewsTradingStrategy {
             if (orderId == null) {
                 log.warn("[NEWS] LIVE entry order not placed for {} (blocked or failed) - " +
                         "no position opened.", symbol);
-                blockReasons.put(symbol, "Passed all gates, live order placement returned " +
-                        "null (broker rejected, rate-limited, or network error - check logs)");
+                // FIX (permanent fix for the "check logs" generic message
+                // problem, found via direct user report on HYUNDAI):
+                // onLiveEntryRejected() already sets a REAL, specific
+                // reason into blockReasons synchronously, INSIDE
+                // placeEntryOrder()'s own exception handling, before this
+                // line ever runs - but this code was unconditionally
+                // OVERWRITING that real reason with a generic, useless
+                // "check logs" message every single time, regardless of
+                // whether a specific one had just been set. Now only
+                // falls back to the generic message if NO specific reason
+                // exists yet (e.g. the null came from the duplicate-order
+                // lock rather than a genuine exception, which doesn't go
+                // through the callback at all) - preserving the real,
+                // specific reason whenever the callback already provided one.
+                blockReasons.putIfAbsent(symbol, "Passed all gates, live order placement " +
+                        "returned null (broker rejected, rate-limited, or network error - " +
+                        "check logs)");
                 return false;
             }
             pendingEntryContext.put(orderId, new PendingNewsEntryContext(
@@ -782,8 +836,16 @@ public class NewsTradingStrategy {
         // never have reflected margin already committed to open positions
         // or today's realised P&L. Now uses the ledger in both modes,
         // matching how AiRiskAssessmentEngine already worked.
+        // FIX (per explicit user specification, applied consistently to
+        // both AI and News): "the capital entered in the UI should act
+        // as the fixed capital per trade, not as a running balance that
+        // decreases after every trade." Now uses getFixedCapitalPerTrade()
+        // instead of getAvailableCapital() - returns exactly what was
+        // entered via the dashboard, unaffected by margin currently tied
+        // up in other open positions or today's realised P&L. Keeps News
+        // consistent with AI's identical fix in AiRiskAssessmentEngine.
         try {
-            return capitalLedger.getAvailableCapital(STRATEGY_NAME);
+            return capitalLedger.getFixedCapitalPerTrade(STRATEGY_NAME);
         } catch (Exception e) {
             return configuredCapital;
         }
