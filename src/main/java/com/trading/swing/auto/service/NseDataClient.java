@@ -290,7 +290,21 @@ public class NseDataClient {
     }
 
     public byte[] downloadBhavcopy(java.time.LocalDate date) {
-        ensureSession();
+        // FIX (found via direct user report + confirmed from real
+        // production logs): ensureSession() was called here
+        // unconditionally, but proven unnecessary - bhavcopy downloads
+        // succeed even when session-establishment fails right before
+        // them (confirmed: "Could not establish session... 403" followed
+        // moments later by "Parsed 3141 equity bars... SUCCESS" for a
+        // different date in the same run). Bhavcopy comes from
+        // nsearchives.nseindia.com, a separate subdomain that doesn't
+        // need the www.nseindia.com session cookie at all. This call was
+        // pure wasted overhead and log noise on every single backfill
+        // cycle - removed. The genuine fundamental-data methods
+        // (getShareholdingPattern, getFinancialResults) still call
+        // ensureSession() themselves where it's actually needed - this
+        // change only affects the bhavcopy path, where it was never
+        // actually required.
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.set("User-Agent", USER_AGENT);
