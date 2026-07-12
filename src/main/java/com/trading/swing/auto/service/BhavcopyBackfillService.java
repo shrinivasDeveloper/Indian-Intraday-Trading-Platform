@@ -5,6 +5,7 @@ import com.trading.swing.auto.repository.DailyBarRepository;
 import com.trading.swing.config.ManualSwingConfig;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
@@ -25,6 +26,23 @@ import java.util.List;
  * blocked - NSE's anti-bot measures are real and this is an unofficial
  * access pattern, not a stable contract).
  *
+ * FIX (found via direct user report: "logs are not coming at all,
+ * other strategies' logs after deployment" - confirmed via production
+ * logs showing every backfill line running on thread [main], not the
+ * dedicated executor thread). Root cause: a well-known Spring AOP
+ * limitation - @Async only takes effect when a method is called from
+ * OUTSIDE the class, through Spring's proxy. init() was calling
+ * startBackfillAsync() directly (self-invocation), which bypasses the
+ * proxy entirely - the "async" backfill was actually running
+ * SYNCHRONOUSLY on the main startup thread, blocking Spring Boot's
+ * entire startup sequence (and therefore every other strategy's own
+ * initialization) until the full 252-day backfill completed. Fixed
+ * using Spring's standard @Lazy self-injection pattern - a proxied
+ * reference to this same bean, injected lazily to avoid a circular-
+ * construction error, so the call now genuinely goes through the
+ * proxy and dispatches to the dedicated background thread as
+ * originally intended.
+ *
  * Resumable: persists progress (earliest/latest date backfilled) so a
  * restart continues from where it left off rather than starting over.
  */
@@ -37,14 +55,24 @@ public class BhavcopyBackfillService {
     private final DailyBarRepository repo;
     private final ManualSwingConfig config;
 
+    // FIX: a lazily-injected, PROXIED self-reference - calling through
+    // this (rather than a direct "this.startBackfillAsync()" or bare
+    // "startBackfillAsync()" call) is what actually makes @Async take
+    // effect. @Lazy prevents a circular-construction error (Spring
+    // would otherwise need this bean fully built before it can inject
+    // a reference to itself).
+    private final BhavcopyBackfillService self;
+
     private volatile boolean backfillInProgress = false;
 
     public BhavcopyBackfillService(NseDataClient nseClient, BhavcopyParser parser,
-                                   DailyBarRepository repo, ManualSwingConfig config) {
+                                   DailyBarRepository repo, ManualSwingConfig config,
+                                   @Lazy BhavcopyBackfillService self) {
         this.nseClient = nseClient;
         this.parser = parser;
         this.repo = repo;
         this.config = config;
+        this.self = self;
     }
 
     @PostConstruct
@@ -53,7 +81,7 @@ public class BhavcopyBackfillService {
         log.info("[BHAVCOPY-BACKFILL] {} trading day(s) of history already stored. Target: {} days.",
                 existingDays, config.getBackfillTargetDays());
         if (existingDays < config.getBackfillTargetDays()) {
-            startBackfillAsync();
+            self.startBackfillAsync(); // FIX: through the proxy now, not self-invocation
         }
     }
 
