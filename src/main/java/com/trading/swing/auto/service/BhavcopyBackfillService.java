@@ -5,7 +5,6 @@ import com.trading.swing.auto.repository.DailyBarRepository;
 import com.trading.swing.config.ManualSwingConfig;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
@@ -55,24 +54,34 @@ public class BhavcopyBackfillService {
     private final DailyBarRepository repo;
     private final ManualSwingConfig config;
 
-    // FIX: a lazily-injected, PROXIED self-reference - calling through
-    // this (rather than a direct "this.startBackfillAsync()" or bare
-    // "startBackfillAsync()" call) is what actually makes @Async take
-    // effect. @Lazy prevents a circular-construction error (Spring
-    // would otherwise need this bean fully built before it can inject
-    // a reference to itself).
-    private final BhavcopyBackfillService self;
+    // FIX for the ORIGINAL self-invocation bug: calling through a
+    // properly-proxied reference (not a direct "this.startBackfillAsync()"
+    // or bare "startBackfillAsync()" call) is what makes @Async actually
+    // take effect.
+    //
+    // CORRECTED (found via real deployment failure: the first attempt
+    // used @Lazy constructor self-injection, which still created a
+    // detectable cycle in Spring's dependency graph - Spring Boot 3.2.3
+    // disables circular references by default and correctly refused to
+    // start: "APPLICATION FAILED TO START... dependencies form a cycle").
+    // Using ApplicationContext.getBean() instead - genuinely ZERO
+    // circular dependency, since ApplicationContext itself never
+    // depends on this bean. The lookup happens LAZILY, at call-time
+    // inside init() (by which point the full context, including this
+    // bean, is already built) - and getBean() correctly returns the
+    // PROXIED instance, so @Async still takes effect exactly as intended.
+    private final org.springframework.context.ApplicationContext applicationContext;
 
     private volatile boolean backfillInProgress = false;
 
     public BhavcopyBackfillService(NseDataClient nseClient, BhavcopyParser parser,
                                    DailyBarRepository repo, ManualSwingConfig config,
-                                   @Lazy BhavcopyBackfillService self) {
+                                   org.springframework.context.ApplicationContext applicationContext) {
         this.nseClient = nseClient;
         this.parser = parser;
         this.repo = repo;
         this.config = config;
-        this.self = self;
+        this.applicationContext = applicationContext;
     }
 
     @PostConstruct
@@ -81,7 +90,10 @@ public class BhavcopyBackfillService {
         log.info("[BHAVCOPY-BACKFILL] {} trading day(s) of history already stored. Target: {} days.",
                 existingDays, config.getBackfillTargetDays());
         if (existingDays < config.getBackfillTargetDays()) {
-            self.startBackfillAsync(); // FIX: through the proxy now, not self-invocation
+            // Look up the PROXIED bean instance through the application
+            // context, then call through THAT - not self-invocation,
+            // so @Async correctly dispatches to the background thread.
+            applicationContext.getBean(BhavcopyBackfillService.class).startBackfillAsync();
         }
     }
 
