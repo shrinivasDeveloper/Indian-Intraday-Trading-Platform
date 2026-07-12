@@ -432,7 +432,7 @@ public class AiTradeManagementEngine {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // EOD EXIT — 15:05 IST every trading day
+    // EOD EXIT — 15:15 IST every trading day (standardized with News)
     // ═══════════════════════════════════════════════════════════════════════
 
     @Scheduled(cron = "0 15 15 * * MON-FRI", zone = "Asia/Kolkata")
@@ -625,7 +625,7 @@ public class AiTradeManagementEngine {
     // FIX: Was missing entirely — caused ghost positions to survive midnight
     // and block the next trading session.
     // Clears all open positions at session start.
-    // Safe because EOD exit at 15:05 closes all positions the day before.
+    // Safe because EOD exit at 15:15 closes all positions the day before.
     // ═══════════════════════════════════════════════════════════════════════
 
     @Scheduled(cron = "0 10 9 * * MON-FRI", zone = "Asia/Kolkata")

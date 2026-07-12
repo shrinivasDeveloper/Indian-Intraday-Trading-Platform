@@ -149,28 +149,41 @@ public class MomentumTradingService {
 
             double entry = isLong ? ltp * 1.0005 : ltp * 0.9995; // same 0.05% slippage buffer
             // already proven elsewhere
-            double stopLoss = isLong ? consolidationLow : consolidationHigh;
+
+            // FIX (per explicit user request: "the current stop-loss is
+            // too small... can we use the same stop-loss approach as the
+            // AI Trading strategy"). Confirmed real issue: the previous
+            // consolidation-range-based SL could be extremely tight (a
+            // concrete example: Rs.850.55 entry, Rs.849.90 SL - only
+            // Rs.0.65 risk, genuinely too small for a real position).
+            // Replaced with AI's own proven, price-tiered % model
+            // (AiRiskAssessmentEngine.computeSlPct()) - same exact tiers,
+            // independently re-implemented here (computeSlPct() below) to
+            // preserve Momentum's required independence from AI's code.
+            // The consolidation high/low are UNCHANGED for their original
+            // purpose - they still correctly trigger the breakout ENTRY
+            // signal, and still size the trailing-stop distance later -
+            // only the STOP-LOSS DISTANCE itself now comes from this
+            // wider, price-proportional model instead of the tight
+            // consolidation range.
+            double slPct = computeSlPct(entry);
+            double stopLoss = isLong ? entry * (1 - slPct) : entry * (1 + slPct);
             double riskPerShare = isLong ? entry - stopLoss : stopLoss - entry;
             if (riskPerShare <= 0) {
                 throw new MomentumStrategyException(symbol + " - invalid risk (entry=" + entry +
-                        " sl=" + stopLoss + ") - consolidation range degenerate, skipping");
+                        " sl=" + stopLoss + ") - price-tiered SL computation degenerate, skipping");
             }
             double target = isLong
                     ? entry + riskPerShare * config.getRiskRewardRatio()
                     : entry - riskPerShare * config.getRiskRewardRatio();
 
-            // FIX (per explicit user request: "use the capital allocated
-            // from the UI... stop-loss should be calculated as 1% of the
-            // allocated capital... trade quantity determined
-            // accordingly"). Capital now comes from the UI-settable
-            // MomentumCapitalRepository, not the static config value.
-            // Quantity is now genuinely risk-based: 1% of allocated
-            // capital is the maximum amount risked on this trade -
-            // quantity = that risk amount / the actual risk-per-share
-            // (the real consolidation-range-based stop distance) -
-            // capped by what the capital can actually afford, same dual-
-            // check pattern already proven correct in AI's own risk
-            // engine.
+            // Capital comes from the UI-settable MomentumCapitalRepository.
+            // Quantity is genuinely risk-based: 1% of allocated capital is
+            // the maximum amount risked on this trade - quantity = that
+            // risk amount / the actual risk-per-share (now the price-
+            // tiered SL distance above) - capped by what the capital can
+            // actually afford, same dual-check pattern already proven
+            // correct in AI's own risk engine.
             double capital = capitalRepository.getCapital().doubleValue();
             double riskAmt = capital * 0.01; // 1% of allocated capital
             int riskBasedQty = (int) (riskAmt / riskPerShare);
@@ -213,14 +226,18 @@ public class MomentumTradingService {
             // actual fill differs from the pre-order estimate (entirely
             // possible during a fast breakout), the recorded risk:reward
             // must reflect what was ACTUALLY entered, not the estimate.
-            double realStopLoss = isLong ? consolidationLow : consolidationHigh;
+            // Uses the SAME price-tiered SL model as the pre-order
+            // estimate above - critical consistency, since a mismatched
+            // formula here would make the saved trade's risk:reward
+            // internally contradictory.
+            double realSlPct = computeSlPct(realEntry);
+            double realStopLoss = isLong ? realEntry * (1 - realSlPct) : realEntry * (1 + realSlPct);
             double realRiskPerShare = isLong ? realEntry - realStopLoss : realStopLoss - realEntry;
             double realTarget = realRiskPerShare > 0
                     ? (isLong ? realEntry + realRiskPerShare * config.getRiskRewardRatio()
                     : realEntry - realRiskPerShare * config.getRiskRewardRatio())
-                    : realEntry; // degenerate case (real fill moved past the consolidation
-            // range entirely) - target defaults to entry; the position
-            // will still be monitored and exited safely via SL below
+                    : realEntry; // should be unreachable now (a % of a positive price is
+            // always positive) - kept as a safety net regardless
 
             positionRegistry.registerPosition(symbol, "MOMENTUM_STOCK_OF_DAY");
 
@@ -355,6 +372,27 @@ public class MomentumTradingService {
                     "cycle): {}", trade.getSymbol(), e.getMessage());
             return true; // couldn't determine - assume still active, retry next cycle
         }
+    }
+
+    /**
+     * Price-tiered stop-loss percentage - the exact same model as
+     * AiRiskAssessmentEngine.computeSlPct(), independently re-implemented
+     * here (not imported) to preserve Momentum's required independence
+     * from AI's code. Per explicit user request: "can we use the same
+     * stop-loss approach as the AI Trading strategy for the Momentum
+     * strategy instead" - confirmed the previous consolidation-range-
+     * based SL could be far too tight (e.g. Rs.0.65 risk on an Rs.850
+     * stock); this gives a wider, price-proportional, genuinely tested
+     * distance instead.
+     */
+    private double computeSlPct(double price) {
+        if      (price <= 130)  return 0.020;  // 2.0%
+        else if (price <= 170)  return 0.017;  // 1.7%
+        else if (price <= 200)  return 0.013;  // 1.3%
+        else if (price <= 400)  return 0.010;  // 1.0%
+        else if (price <= 700)  return 0.007;  // 0.7%
+        else if (price <= 1200) return 0.006;  // 0.6%
+        else                    return 0.005;  // 0.5%
     }
 
     private double fetchLtp(String symbol) throws KiteException, java.io.IOException, org.json.JSONException {
