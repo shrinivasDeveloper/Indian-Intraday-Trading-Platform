@@ -233,13 +233,23 @@
                 <span class="il">News Capital</span>
                 <span class="iv" id="cap-news-avail">—</span>
             </div>
-            <div style="display:flex;gap:5px">
+            <div style="display:flex;gap:5px;margin-bottom:8px">
                 <input type="number" id="cap-news-input" placeholder="₹"
                        style="width:90px;padding:4px 6px;background:#0d1117;border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px">
                 <button class="btn" style="padding:4px 10px;font-size:11px" onclick="saveCapital('NEWS_CATALYST_V1','cap-news-input','cap-news-status')">Save</button>
             </div>
+            <div class="ir" style="margin-bottom:4px">
+                <span class="il">Momentum Capital</span>
+                <span class="iv" id="cap-momentum-avail">—</span>
+            </div>
+            <div style="display:flex;gap:5px">
+                <input type="number" id="cap-momentum-input" placeholder="₹"
+                       style="width:90px;padding:4px 6px;background:#0d1117;border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px">
+                <button class="btn" style="padding:4px 10px;font-size:11px" onclick="saveMomentumCapital()">Save</button>
+            </div>
             <div id="cap-ai-status" class="sub" style="margin-top:4px;min-height:14px"></div>
             <div id="cap-news-status" class="sub" style="min-height:14px"></div>
+            <div id="cap-momentum-status" class="sub" style="min-height:14px"></div>
         </div>
     </div>
 </div>
@@ -655,7 +665,7 @@
     }
 
     function render() {
-        renderHdr(); renderOv(); renderCapital();
+        renderHdr(); renderOv(); renderCapital(); loadMomentumCapital();
         renderSectors(); renderNews(); renderAI();
     }
 
@@ -699,6 +709,46 @@
             }
         } catch (e) {
             status.textContent = '❌ ' + e.message;
+            status.style.color = 'var(--red)';
+        }
+    }
+
+    // Momentum Stock of the Day - own, separate capital endpoint
+    // (per explicit user request), independent of AI/News's shared
+    // ledger - own dedicated table, own simpler request body (no
+    // strategyName needed, since it's a single-purpose endpoint).
+    async function loadMomentumCapital() {
+        try {
+            const res = await fetch('/api/momentum-stock-of-day/capital');
+            const data = await res.json();
+            const el = q('cap-momentum-avail');
+            if (el && data.capital != null) el.textContent = '₹' + Number(data.capital).toLocaleString();
+        } catch (e) { console.error('[MOMENTUM-CAPITAL] load failed', e); }
+    }
+
+    async function saveMomentumCapital() {
+        const input = q('cap-momentum-input'), status = q('cap-momentum-status');
+        const val = parseFloat(input.value);
+        if (!val || val <= 0) { status.textContent = 'Enter a valid amount'; status.style.color = 'var(--red)'; return; }
+        status.textContent = 'Saving…'; status.style.color = 'var(--muted)';
+        try {
+            const res = await fetch('/api/momentum-stock-of-day/capital', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ capital: val })
+            });
+            const data = await res.json();
+            if (data.capital != null) {
+                status.textContent = '✅ Saved ₹' + val.toLocaleString();
+                status.style.color = 'var(--green)';
+                input.value = '';
+                await loadMomentumCapital();
+            } else {
+                status.textContent = data.error || 'Save failed';
+                status.style.color = 'var(--red)';
+            }
+        } catch (e) {
+            status.textContent = 'Save failed - check connection';
             status.style.color = 'var(--red)';
         }
     }
