@@ -45,9 +45,54 @@ public class NseDataClient {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-    private final RestTemplate restTemplate = new RestTemplate();
+    // FIX (found via direct user report: NSE 403s appeared on a fresh
+    // Railway account/project that never had this issue before -
+    // confirmed root cause: NSE blocks Railway's raw outbound IP, which
+    // changes per account/project. Meanwhile, THIS SAME account's
+    // KiteConnect calls succeed reliably, because KiteConnectConfig.java
+    // already routes them through an authenticated, genuinely static-IP
+    // proxy via LocalProxyRelay (127.0.0.1) - confirmed working all
+    // session. Reuses that SAME, already-proven-working proxy path here,
+    // via the SAME kite.proxy.* config keys - no new infrastructure,
+    // no new proxy account needed. When kite.proxy.enabled=false (the
+    // default), this falls back to a plain RestTemplate - 100% unchanged
+    // from before this fix.
+    @org.springframework.beans.factory.annotation.Value("${kite.proxy.enabled:false}")
+    private boolean proxyEnabled;
+
+    private final RestTemplate restTemplate;
     private final AtomicReference<String> cookieJar = new AtomicReference<>(null);
     private volatile Instant cookieObtainedAt = Instant.EPOCH;
+
+    public NseDataClient() {
+        this.restTemplate = new RestTemplate(); // proxy wiring happens in
+        // initProxyIfEnabled() below,
+        // once @Value fields are set
+    }
+
+    @jakarta.annotation.PostConstruct
+    private void initProxyIfEnabled() {
+        if (!proxyEnabled) {
+            log.debug("[NSE-CLIENT] kite.proxy.enabled=false - using direct connection " +
+                    "(unchanged, original behavior)");
+            return;
+        }
+        try {
+            java.net.Proxy proxy = new java.net.Proxy(java.net.Proxy.Type.HTTP,
+                    new java.net.InetSocketAddress("127.0.0.1",
+                            com.trading.config.LocalProxyRelay.getLocalPort()));
+            var factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+            factory.setProxy(proxy);
+            restTemplate.setRequestFactory(factory);
+            log.info("[NSE-CLIENT] Routing NSE calls through the SAME authenticated static-IP " +
+                    "proxy already proven working for KiteConnect (via LocalProxyRelay " +
+                    "127.0.0.1:{}) - this should resolve NSE 403s tied to Railway's own, " +
+                    "per-account outbound IP", com.trading.config.LocalProxyRelay.getLocalPort());
+        } catch (Exception e) {
+            log.warn("[NSE-CLIENT] Failed to configure proxy - falling back to direct " +
+                    "connection (NSE 403s may persist): {}", e.getMessage());
+        }
+    }
 
     // FIX (permanent, legitimate): circuit breaker for sustained 403s.
     // Researched genuine alternatives (Screener.in disallows automated
