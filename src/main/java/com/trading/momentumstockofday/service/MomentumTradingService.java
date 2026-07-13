@@ -62,18 +62,21 @@ public class MomentumTradingService {
     private final AccountMarginGuard marginGuard;
     private final CrossStrategyPositionRegistry positionRegistry;
     private final com.trading.momentumstockofday.repository.MomentumCapitalRepository capitalRepository;
+    private final MomentumCandleService candleService;
 
     public MomentumTradingService(KiteConnect kiteConnect, MomentumConfig config,
                                   MomentumTradeRepository repository,
                                   AccountMarginGuard marginGuard,
                                   CrossStrategyPositionRegistry positionRegistry,
-                                  com.trading.momentumstockofday.repository.MomentumCapitalRepository capitalRepository) {
+                                  com.trading.momentumstockofday.repository.MomentumCapitalRepository capitalRepository,
+                                  MomentumCandleService candleService) {
         this.kiteConnect = kiteConnect;
         this.config = config;
         this.repository = repository;
         this.marginGuard = marginGuard;
         this.positionRegistry = positionRegistry;
         this.capitalRepository = capitalRepository;
+        this.candleService = candleService;
     }
 
     /** Result of a confirmed (or timed-out) fill check. filled=false
@@ -196,13 +199,27 @@ public class MomentumTradingService {
                         affordableQty + ")");
             }
 
-            BigDecimal estimatedCost = BigDecimal.valueOf(entry).multiply(BigDecimal.valueOf(qty));
+            BigDecimal estimatedCost = getRealMarginRequired(symbol, isLong ?
+                    Constants.TRANSACTION_TYPE_BUY : Constants.TRANSACTION_TYPE_SELL, qty, entry);
             var marginResult = marginGuard.checkSufficientMargin(estimatedCost, "MOMENTUM_STOCK_OF_DAY");
             if (!marginResult.sufficient()) {
                 throw new MomentumStrategyException(symbol + " - insufficient account margin " +
                         "(need ~Rs." + estimatedCost + ", available Rs." + marginResult.availableMargin() + ")");
             }
             positionRegistry.checkAndWarnIfHeldElsewhere(symbol, "MOMENTUM_STOCK_OF_DAY");
+
+            // FEATURE 3 (Mandatory Trend Confirmation Filters, per
+            // explicit user spec): the ABSOLUTE LAST gate, immediately
+            // before order placement - after every other existing
+            // validation (capital, risk, margin, position registry).
+            // "A trade should only be placed if every validation step
+            // passes successfully." Rejects clearly if either the 4H
+            // VWAP or 4H EMA alignment filter fails - both are mandatory.
+            var trendResult = candleService.checkTrendFilters(symbol, candidate.getDirection(), entry);
+            if (!trendResult.passed()) {
+                throw new MomentumStrategyException(symbol + " - " + trendResult.reason());
+            }
+            log.info("[MOMENTUM-TRADE] {} trend filters passed: {}", symbol, trendResult.reason());
 
             String orderId = placeMarketOrder(symbol, isLong ? Constants.TRANSACTION_TYPE_BUY
                     : Constants.TRANSACTION_TYPE_SELL, qty);
@@ -385,6 +402,39 @@ public class MomentumTradingService {
      * stock); this gives a wider, price-proportional, genuinely tested
      * distance instead.
      */
+    /**
+     * Calls Zerodha's own real order-margin calculation API - the exact
+     * same fix confirmed for AI/News's margin check (same systemic bug
+     * found independently here: naive price x quantity ignores real MIS
+     * leverage, causing genuinely valid trades to be rejected). Falls
+     * back to the conservative full-cash estimate ONLY if this real API
+     * call itself fails - never silently under-checks margin.
+     */
+    private BigDecimal getRealMarginRequired(String symbol, String txType, int qty, double price) {
+        try {
+            var params = new com.zerodhatech.models.MarginCalculationParams();
+            params.tradingSymbol = symbol;
+            params.exchange = Constants.EXCHANGE_NSE;
+            params.transactionType = txType;
+            params.variety = Constants.VARIETY_REGULAR;
+            params.product = Constants.PRODUCT_MIS;
+            params.orderType = Constants.ORDER_TYPE_MARKET;
+            params.quantity = qty;
+            params.price = 0;
+            params.triggerPrice = 0;
+
+            var results = kiteConnect.getMarginCalculation(java.util.List.of(params));
+            if (results != null && !results.isEmpty()) {
+                double realMargin = results.get(0).total;
+                if (realMargin > 0) return BigDecimal.valueOf(realMargin);
+            }
+        } catch (KiteException | Exception e) {
+            log.debug("[MOMENTUM-TRADE] Real margin calculation failed for {} - falling back " +
+                    "to conservative full-cash estimate: {}", symbol, e.getMessage());
+        }
+        return BigDecimal.valueOf(price).multiply(BigDecimal.valueOf(qty));
+    }
+
     private double computeSlPct(double price) {
         if      (price <= 130)  return 0.020;  // 2.0%
         else if (price <= 170)  return 0.017;  // 1.7%

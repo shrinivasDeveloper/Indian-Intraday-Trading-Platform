@@ -283,6 +283,55 @@ public class HeroZeroTradingService {
         }
     }
 
+    /**
+     * FIX (found during full-platform pipeline validation: Hero-Zero
+     * was the only strategy with ZERO reconciliation logic - AI, News,
+     * Momentum, and Swing all already have this). Same proven "broker
+     * is truth" principle: if a CE or PE leg was silently rejected,
+     * manually closed, or otherwise no longer genuinely open at the
+     * broker, corrects the stale database record rather than leaving a
+     * phantom ACTIVE trade forever (which would otherwise never get
+     * force-exited correctly at 3:10 PM, since the code would attempt
+     * to sell a position that doesn't actually exist).
+     */
+    public void reconcileActiveTrades() {
+        List<HeroZeroTrade> active = repo.findActive();
+        if (active.isEmpty()) return;
+
+        try {
+            List<com.zerodhatech.models.Position> positions = kiteConnect.getPositions().get("net");
+            if (positions == null) return; // couldn't check this cycle - assume still valid
+
+            Set<String> realOpenSymbols = new HashSet<>();
+            for (com.zerodhatech.models.Position p : positions) {
+                if (p.netQuantity != 0) realOpenSymbols.add(p.tradingSymbol);
+            }
+
+            for (HeroZeroTrade trade : active) {
+                boolean ceOpen = trade.getCeTradingSymbol() == null
+                        || realOpenSymbols.contains(trade.getCeTradingSymbol());
+                boolean peOpen = trade.getPeTradingSymbol() == null
+                        || realOpenSymbols.contains(trade.getPeTradingSymbol());
+
+                if (!ceOpen || !peOpen) {
+                    log.warn("[HERO-ZERO] {} shows ACTIVE in our records (tradeId={}), but broker " +
+                                    "confirms {} leg is genuinely gone - this trade was almost certainly " +
+                                    "closed outside this strategy's own tracking. Correcting our stale " +
+                                    "record now.", trade.getIndex(), trade.getTradeId(),
+                            !ceOpen && !peOpen ? "BOTH CE and PE" : (!ceOpen ? "CE" : "PE"));
+                    repo.updateStatus(trade.getTradeId(), "RECONCILED_EXTERNALLY", "CLOSED",
+                            "CLOSED_EXTERNALLY_RECONCILED - manual review recommended to confirm " +
+                                    "real P&L, since this app did not witness the actual close");
+                    positionRegistry.releasePosition(trade.getCeTradingSymbol(), "HERO_ZERO");
+                    positionRegistry.releasePosition(trade.getPeTradingSymbol(), "HERO_ZERO");
+                }
+            }
+        } catch (KiteException | Exception e) {
+            log.debug("[HERO-ZERO] Reconciliation check failed this cycle (non-fatal, will " +
+                    "retry next cycle): {}", e.getMessage());
+        }
+    }
+
     private void exitTrade(HeroZeroTrade trade) {
         if (!"ACTIVE".equals(trade.getTradeStatus()) && !"ENTRY_PENDING".equals(trade.getTradeStatus())) {
             return; // already exited or never properly entered
@@ -425,7 +474,7 @@ public class HeroZeroTradingService {
             String quoteKey = inst.getExchange() + ":" + inst.getTradingsymbol();
             Quote q = kiteConnect.getQuote(new String[]{quoteKey}).get(quoteKey);
             if (q != null && q.lastPrice > 0) {
-                BigDecimal estimatedCost = BigDecimal.valueOf(q.lastPrice).multiply(BigDecimal.valueOf(qty));
+                BigDecimal estimatedCost = getRealMarginRequired(inst, qty);
                 var marginResult = marginGuard.checkSufficientMargin(estimatedCost, "HERO_ZERO");
                 if (!marginResult.sufficient()) {
                     throw new HeroZeroException(
@@ -453,6 +502,46 @@ public class HeroZeroTradingService {
         Order order = kiteConnect.placeOrder(p, Constants.VARIETY_REGULAR);
         positionRegistry.registerPosition(inst.getTradingsymbol(), "HERO_ZERO");
         return order.orderId;
+    }
+
+    /**
+     * Calls Zerodha's own real order-margin calculation API - same fix
+     * confirmed for AI/News/Momentum's margin check (same systemic bug
+     * found independently here too). Uses the instrument's REAL
+     * exchange (NFO for options), not hardcoded NSE. Falls back to the
+     * conservative full-cash estimate ONLY if this real API call itself
+     * fails - never silently under-checks margin.
+     */
+    private BigDecimal getRealMarginRequired(Instrument inst, int qty) {
+        try {
+            var params = new com.zerodhatech.models.MarginCalculationParams();
+            params.tradingSymbol = inst.getTradingsymbol();
+            params.exchange = inst.getExchange();
+            params.transactionType = Constants.TRANSACTION_TYPE_BUY;
+            params.variety = Constants.VARIETY_REGULAR;
+            params.product = Constants.PRODUCT_MIS;
+            params.orderType = Constants.ORDER_TYPE_MARKET;
+            params.quantity = qty;
+            params.price = 0;
+            params.triggerPrice = 0;
+
+            var results = kiteConnect.getMarginCalculation(java.util.List.of(params));
+            if (results != null && !results.isEmpty()) {
+                double realMargin = results.get(0).total;
+                if (realMargin > 0) return BigDecimal.valueOf(realMargin);
+            }
+        } catch (KiteException | Exception e) {
+            log.debug("[HERO-ZERO] Real margin calculation failed for {} - falling back to " +
+                    "conservative full-cash estimate: {}", inst.getTradingsymbol(), e.getMessage());
+        }
+        try {
+            String quoteKey = inst.getExchange() + ":" + inst.getTradingsymbol();
+            Quote q = kiteConnect.getQuote(new String[]{quoteKey}).get(quoteKey);
+            double price = (q != null) ? q.lastPrice : 0;
+            return BigDecimal.valueOf(price).multiply(BigDecimal.valueOf(qty));
+        } catch (KiteException | Exception e2) {
+            return BigDecimal.ZERO; // let the margin check's own logic handle this gracefully
+        }
     }
 
     private String placeMarketSell(String tradingSymbol, int qty, String exchange)

@@ -84,6 +84,25 @@ public final class SectorTaxonomy {
             Map.entry("other consumer services", "Consumer Services"),
             // Retailing
             Map.entry("retailing", "Retailing"),
+            // FIX (per explicit user report: Retailing is the one
+            // remaining sector showing "No live data", after all other
+            // 21 sectors were confirmed fixed). Unlike those 21, I don't
+            // have a confirmed real raw string specifically for pure
+            // retail companies (DMART/TRENT/VMART) - real research found
+            // conflicting signals: one source shows DMart's own
+            // classification hierarchy as "Consumer Services > Retailing
+            // > Diversified Retail," suggesting genuine retail companies
+            // may often be tagged at the "Consumer Services" level in
+            // NSE's actual data, with "Retailing" itself being rarer or
+            // more specific than expected. Added the most plausible,
+            // safe variant aliases below rather than guess a single one
+            // with false confidence - the diagnostic logging already
+            // built into refreshMapping() will show the definitive,
+            // real answer on the next deployment if any of these still
+            // don't match.
+            Map.entry("retail", "Retailing"),
+            Map.entry("retailers", "Retailing"),
+            Map.entry("trading", "Retailing"),
             // Oil, Gas & Consumable Fuels
             Map.entry("gas", "Oil, Gas & Consumable Fuels"),
             Map.entry("oil", "Oil, Gas & Consumable Fuels"),

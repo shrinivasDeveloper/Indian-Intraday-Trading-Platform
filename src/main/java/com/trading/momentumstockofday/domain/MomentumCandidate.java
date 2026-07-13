@@ -48,7 +48,8 @@ public class MomentumCandidate {
     /** Simple candle record - open/high/low/close only, exactly what's
      *  needed for consolidation/breakout detection. Independent of any
      *  existing strategy's own Candle class. */
-    public record Candle(double open, double high, double low, double close, String timestamp) {
+    public record Candle(double open, double high, double low, double close, String timestamp,
+                         long volume) {
         public double body() { return Math.abs(close - open); }
         public double range() { return high - low; }
     }

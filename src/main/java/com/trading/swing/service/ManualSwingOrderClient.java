@@ -58,8 +58,7 @@ public class ManualSwingOrderClient {
             String quoteKey = exchange + ":" + symbol;
             Quote q = kiteConnect.getQuote(new String[]{quoteKey}).get(quoteKey);
             if (q != null && q.lastPrice > 0) {
-                BigDecimal estimatedCost = BigDecimal.valueOf(q.lastPrice)
-                        .multiply(BigDecimal.valueOf(qty));
+                BigDecimal estimatedCost = getRealMarginRequired(symbol, exchange, qty, q.lastPrice);
                 var marginResult = marginGuard.checkSufficientMargin(estimatedCost, "SWING");
                 if (!marginResult.sufficient()) {
                     throw new ManualSwingOrderException(
@@ -83,6 +82,39 @@ public class ManualSwingOrderClient {
         String orderId = doPlace(build(symbol, exchange, Constants.TRANSACTION_TYPE_SELL, qty));
         positionRegistry.releasePosition(symbol, "SWING");
         return orderId;
+    }
+
+    /**
+     * Calls Zerodha's own real order-margin calculation API - same fix
+     * confirmed for AI/News/Momentum/Hero-Zero's margin check, applied
+     * here using the CORRECT product type for this client (CNC -
+     * confirmed from build() below, NOT MIS) since Swing holds
+     * positions overnight, not intraday. Falls back to the conservative
+     * full-cash estimate ONLY if this real API call itself fails.
+     */
+    private BigDecimal getRealMarginRequired(String symbol, String exchange, int qty, double price) {
+        try {
+            var params = new com.zerodhatech.models.MarginCalculationParams();
+            params.tradingSymbol = symbol;
+            params.exchange = exchange;
+            params.transactionType = Constants.TRANSACTION_TYPE_BUY;
+            params.variety = Constants.VARIETY_REGULAR;
+            params.product = Constants.PRODUCT_CNC; // matches build() below - this client is ALWAYS CNC
+            params.orderType = Constants.ORDER_TYPE_MARKET;
+            params.quantity = qty;
+            params.price = 0;
+            params.triggerPrice = 0;
+
+            var results = kiteConnect.getMarginCalculation(java.util.List.of(params));
+            if (results != null && !results.isEmpty()) {
+                double realMargin = results.get(0).total;
+                if (realMargin > 0) return BigDecimal.valueOf(realMargin);
+            }
+        } catch (KiteException | Exception e) {
+            log.debug("[SWING] Real margin calculation failed for {} - falling back to " +
+                    "conservative full-cash estimate: {}", symbol, e.getMessage());
+        }
+        return BigDecimal.valueOf(price).multiply(BigDecimal.valueOf(qty));
     }
 
     private OrderParams build(String symbol, String exchange, String txType, int qty) {

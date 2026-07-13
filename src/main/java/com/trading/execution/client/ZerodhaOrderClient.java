@@ -124,7 +124,19 @@ public class ZerodhaOrderClient {
         try {
             double price = knownPrice != null ? knownPrice : fetchLtp(symbol);
             if (price > 0) {
-                BigDecimal estimatedCost = BigDecimal.valueOf(price).multiply(BigDecimal.valueOf(qty));
+                // FIX (found via direct user report: real Zerodha manual
+                // margin for a trade was ~Rs.20,000, but this code
+                // demanded Rs.99,756+ - roughly 5x too much, exactly
+                // matching typical MIS intraday leverage. Confirmed real
+                // root cause: estimatedCost was raw price x quantity -
+                // the FULL, UNLEVERAGED cash value - completely ignoring
+                // Zerodha's real MIS leverage. This caused genuinely
+                // valid trades to be rejected, costing real missed
+                // opportunities. Fixed by calling Zerodha's own real
+                // order-margin calculation API (getMarginCalculation) -
+                // the exact same calculation Kite itself uses for manual
+                // orders - instead of a naive, unleveraged cash estimate.
+                BigDecimal estimatedCost = getRealMarginRequired(symbol, txType, qty, price);
                 var marginResult = marginGuard.checkSufficientMargin(estimatedCost, "AI_NEWS_SHARED");
                 if (!marginResult.sufficient()) {
                     throw new IllegalStateException(
@@ -139,6 +151,46 @@ public class ZerodhaOrderClient {
                     e.getMessage());
         }
         positionRegistry.checkAndWarnIfHeldElsewhere(symbol, "AI_NEWS_SHARED");
+    }
+
+    /**
+     * Calls Zerodha's own real order-margin calculation API - the exact
+     * same calculation Kite itself uses for manual orders, correctly
+     * accounting for MIS intraday leverage (unlike a naive price x
+     * quantity estimate, which assumes full, unleveraged cash cost).
+     * Falls back to the conservative full-cash estimate ONLY if this
+     * real API call itself fails - never silently under-checks margin,
+     * just avoids the confirmed over-estimation bug in the common case.
+     */
+    private BigDecimal getRealMarginRequired(String symbol, String txType, int qty, double price) {
+        try {
+            var params = new com.zerodhatech.models.MarginCalculationParams();
+            params.tradingSymbol = symbol;
+            params.exchange = Constants.EXCHANGE_NSE;
+            params.transactionType = txType;
+            params.variety = Constants.VARIETY_REGULAR;
+            params.product = Constants.PRODUCT_MIS;
+            params.orderType = Constants.ORDER_TYPE_MARKET;
+            params.quantity = qty;
+            params.price = 0; // 0 for MARKET orders, matching the same convention used elsewhere
+            params.triggerPrice = 0;
+
+            var results = kiteConnect.getMarginCalculation(List.of(params));
+            if (results != null && !results.isEmpty()) {
+                double realMargin = results.get(0).total;
+                if (realMargin > 0) {
+                    log.debug("[AI-NEWS-ORDER] Real margin for {} qty={}: Rs.{} (vs naive cash " +
+                            "estimate Rs.{})", symbol, qty, realMargin, price * qty);
+                    return BigDecimal.valueOf(realMargin);
+                }
+            }
+        } catch (KiteException | Exception e) {
+            log.debug("[AI-NEWS-ORDER] Real margin calculation failed for {} - falling back to " +
+                    "conservative full-cash estimate: {}", symbol, e.getMessage());
+        }
+        // Fallback: the original, conservative (over-)estimate - never
+        // silently under-checks margin if the real API call fails.
+        return BigDecimal.valueOf(price).multiply(BigDecimal.valueOf(qty));
     }
 
     private void updateRegistryAfterOrder(String symbol, String txType) {

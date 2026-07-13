@@ -58,6 +58,7 @@ public class MomentumCandleService {
     public record EvaluationResult(
             boolean validConsolidation, boolean breakoutTriggered,
             double consolidationHigh, double consolidationLow,
+            double dayHigh, double dayLow,
             List<MomentumCandidate.Candle> candles, String note
     ) {}
 
@@ -69,49 +70,155 @@ public class MomentumCandleService {
      *      or highly volatile"
      *   - "Avoid taking trades if any consolidation candle is
      *      unusually large"
-     *   - "Enter only when price breaks above consolidation high (long)
-     *      or below consolidation low (short)"
+     *   - MANDATORY BREAKOUT CONFIRMATION (per explicit user spec):
+     *     "Long Trade: Enter only when the stock breaks above the
+     *     day's high. Short Trade: Enter only when the stock breaks
+     *     below the day's low." The consolidation pattern remains a
+     *     required PRECONDITION (must still exist and be valid), but
+     *     the actual breakout TRIGGER level is now the day's high/low,
+     *     not the tight consolidation window's own high/low.
      */
     public EvaluationResult evaluate(MomentumCandidate candidate) {
         List<MomentumCandidate.Candle> recent = fetchRecentCandles(candidate.getSymbol(),
                 config.getMaxConsolidationCandles() + 3); // small buffer for volatility comparison
-        if (recent.size() < config.getMinConsolidationCandles()) {
-            return new EvaluationResult(false, false, 0, 0, recent,
+        if (recent.size() < config.getMinConsolidationCandles() + 1) { // +1 for the separate breakout candle
+            return new EvaluationResult(false, false, 0, 0, 0, 0, recent,
                     "Not enough candle history yet (" + recent.size() + " available)");
         }
 
+        // FIX (Mandatory Breakout Confirmation, per explicit user spec):
+        // fetch the REAL day's high/low explicitly from market open
+        // (9:15 AM) to now - not derived from the small consolidation
+        // window, and not assumed from a fixed lookback window that
+        // could miss part of the session on a late-day check.
+        double[] dayHighLow = fetchDayHighLow(candidate.getSymbol());
+        double dayHigh = dayHighLow[0];
+        double dayLow = dayHighLow[1];
+        if (dayHigh <= 0 || dayLow <= 0) {
+            return new EvaluationResult(false, false, 0, 0, 0, 0, recent,
+                    "Could not determine today's real high/low yet - skipping this cycle");
+        }
+
         // Try consolidation windows from smallest to largest, per spec's
-        // explicit "2 to 4 candles" range - most recent candles only.
+        // Try consolidation windows from smallest to largest, per spec's
+        // explicit "2 to 4 candles" range.
+        // FIX (per explicit user request: "need to trade after day high
+        // or low breaks and WITH CONSOLIDATION COMPLETE"): the
+        // consolidation window is now the candles BEFORE the latest one
+        // - a genuinely COMPLETED pattern - and the breakout candle
+        // (the LATEST one) is checked SEPARATELY, no longer required to
+        // itself be small-bodied. This matches standard breakout logic:
+        // consolidation forms and completes first, THEN a subsequent
+        // candle breaks beyond it - rather than requiring the breakout
+        // candle to simultaneously satisfy the tight consolidation body
+        // limit itself (which previously only allowed quiet, barely-
+        // there breakouts to ever qualify).
+        MomentumCandidate.Candle breakoutCandle = recent.get(recent.size() - 1);
+
         for (int windowSize = config.getMinConsolidationCandles();
-             windowSize <= config.getMaxConsolidationCandles() && windowSize <= recent.size();
+             windowSize <= config.getMaxConsolidationCandles()
+                     && windowSize + 1 <= recent.size(); // +1 reserves room for the breakout candle
              windowSize++) {
 
-            List<MomentumCandidate.Candle> window =
-                    recent.subList(recent.size() - windowSize, recent.size());
+            // The consolidation window is the windowSize candles
+            // immediately BEFORE the breakout candle - NOT including it.
+            List<MomentumCandidate.Candle> window = recent.subList(
+                    recent.size() - windowSize - 1, recent.size() - 1);
 
             String rejectReason = checkConsolidationValidity(window);
             if (rejectReason != null) continue; // try a different window size
 
-            double high = window.stream().mapToDouble(MomentumCandidate.Candle::high).max().orElse(0);
-            double low = window.stream().mapToDouble(MomentumCandidate.Candle::low).min().orElse(0);
+            double consolHigh = window.stream().mapToDouble(MomentumCandidate.Candle::high).max().orElse(0);
+            double consolLow = window.stream().mapToDouble(MomentumCandidate.Candle::low).min().orElse(0);
 
-            double lastClose = recent.get(recent.size() - 1).close();
+            double lastClose = breakoutCandle.close();
             boolean isLong = "LONG".equals(candidate.getDirection());
-            boolean breakout = isLong ? lastClose > high : lastClose < low;
+            // Breakout confirmed against the DAY'S high/low, checked on
+            // the SEPARATE breakout candle (not part of the consolidation
+            // window itself).
+            boolean priceBreakout = isLong ? lastClose > dayHigh : lastClose < dayLow;
 
-            return new EvaluationResult(true, breakout, high, low, window,
+            // FEATURE (Volume Profile Confirmation, per explicit user
+            // spec's pipeline step 4): the breakout candle's volume must
+            // exceed 1.2x the window's average volume - confirms
+            // genuine market interest behind the move, not a thin,
+            // low-conviction breakout. Deliberately a MODERATE threshold
+            // (not an aggressive 2x+ requirement) per explicit user
+            // instruction to avoid losing valid opportunities - this
+            // filters obviously weak breakouts without being overly
+            // restrictive. Average is computed from the CONSOLIDATION
+            // window only (prior, calmer candles) - a cleaner, more
+            // meaningful baseline than including the breakout candle's
+            // own volume in its own comparison average.
+            double avgVolume = window.stream().mapToLong(MomentumCandidate.Candle::volume)
+                    .average().orElse(0);
+            long breakoutCandleVolume = breakoutCandle.volume();
+            boolean volumeConfirmed = avgVolume > 0 && breakoutCandleVolume >= avgVolume * 1.2;
+            boolean breakout = priceBreakout && volumeConfirmed;
+
+            String volumeNote = priceBreakout
+                    ? (volumeConfirmed
+                    ? String.format(" | Volume confirmed (%d vs %.0f avg, %.1fx)",
+                    breakoutCandleVolume, avgVolume,
+                    avgVolume > 0 ? breakoutCandleVolume / avgVolume : 0)
+                    : String.format(" | Volume NOT confirmed (%d vs %.0f avg, need 1.2x) - " +
+                            "price broke out but volume too thin, waiting for real conviction",
+                    breakoutCandleVolume, avgVolume))
+                    : "";
+
+            return new EvaluationResult(true, breakout, consolHigh, consolLow, dayHigh, dayLow,
+                    window,
                     breakout
-                            ? String.format("Valid %d-candle consolidation, BREAKOUT confirmed " +
-                                    "(close %.2f vs consolidation %s %.2f)", windowSize, lastClose,
-                            isLong ? "high" : "low", isLong ? high : low)
+                            ? String.format("Valid %d-candle consolidation COMPLETE, followed by DAY'S " +
+                                    "%s BREAKOUT confirmed (close %.2f vs day %s %.2f)%s", windowSize,
+                            isLong ? "HIGH" : "LOW", lastClose, isLong ? "high" : "low",
+                            isLong ? dayHigh : dayLow, volumeNote)
                             : String.format("Valid %d-candle consolidation forming, waiting for " +
-                                    "breakout (current=%.2f, need %s %.2f)", windowSize, lastClose,
-                            isLong ? "above" : "below", isLong ? high : low));
+                                    "day's %s breakout (current=%.2f, need %s %.2f)%s", windowSize,
+                            isLong ? "high" : "low", lastClose, isLong ? "above" : "below",
+                            isLong ? dayHigh : dayLow, volumeNote));
         }
 
-        return new EvaluationResult(false, false, 0, 0, recent,
+        return new EvaluationResult(false, false, 0, 0, dayHigh, dayLow, recent,
                 "No valid small-bodied consolidation found in the last " +
                         config.getMaxConsolidationCandles() + " candles");
+    }
+
+    /**
+     * Fetches today's real high/low explicitly from market open (9:15
+     * AM IST) to now - a dedicated fetch, not derived from the same
+     * short window used for consolidation detection, and not assumed
+     * from a fixed lookback that could miss part of the session on a
+     * late-day check.
+     */
+    private double[] fetchDayHighLow(String symbol) {
+        try {
+            long token = resolveToken(symbol);
+            if (token == 0) return new double[]{0, 0};
+
+            LocalDateTime now = LocalDateTime.now(IST);
+            LocalDateTime marketOpen = now.toLocalDate().atTime(9, 15);
+            if (now.isBefore(marketOpen)) return new double[]{0, 0};
+
+            HistoricalData data = kiteConnect.getHistoricalData(
+                    toDate(marketOpen), toDate(now), String.valueOf(token),
+                    config.getCandleInterval(), false, false);
+            if (data == null || data.dataArrayList == null || data.dataArrayList.isEmpty()) {
+                return new double[]{0, 0};
+            }
+
+            double high = 0, low = Double.MAX_VALUE;
+            for (Object obj : data.dataArrayList) {
+                HistoricalData d = (HistoricalData) obj;
+                if (d.high > high) high = d.high;
+                if (d.low < low) low = d.low;
+            }
+            return (high > 0 && low < Double.MAX_VALUE) ? new double[]{high, low} : new double[]{0, 0};
+        } catch (KiteException | Exception e) {
+            log.debug("[MOMENTUM-CANDLE] Failed to fetch today's high/low for {} (non-fatal, " +
+                    "will retry next cycle): {}", symbol, e.getMessage());
+            return new double[]{0, 0};
+        }
     }
 
     /**
@@ -166,7 +273,8 @@ public class MomentumCandleService {
             List<MomentumCandidate.Candle> all = new ArrayList<>();
             for (Object obj : data.dataArrayList) {
                 HistoricalData d = (HistoricalData) obj;
-                all.add(new MomentumCandidate.Candle(d.open, d.high, d.low, d.close, d.timeStamp));
+                all.add(new MomentumCandidate.Candle(d.open, d.high, d.low, d.close, d.timeStamp,
+                        d.volume));
             }
             if (all.size() <= count) return all;
             return all.subList(all.size() - count, all.size());
@@ -229,5 +337,151 @@ public class MomentumCandleService {
 
     private Date toDate(LocalDateTime ldt) {
         return Date.from(ldt.atZone(IST).toInstant());
+    }
+
+    // ========================================================================
+    // FEATURE 3 (Mandatory Trend Confirmation Filters, per explicit user
+    // spec): 4-hour VWAP and EMA(20/50/200). KiteConnect has no native
+    // 4-hour interval, so this fetches 60-minute candles and aggregates
+    // every 4 consecutive ones into a synthetic 4-hour candle - the
+    // standard way to build a higher timeframe from a lower one.
+    // ========================================================================
+
+    public record TrendFilterResult(boolean passed, String reason,
+                                    double vwap4h, double ema20, double ema50, double ema200) {}
+
+    /**
+     * Checks BOTH mandatory trend filters together, per explicit spec:
+     *   VWAP (4H): LONG needs price above 4H VWAP, SHORT needs price below.
+     *   EMA (4H):  LONG needs 20>50>200, SHORT needs 20<50<200.
+     * Rejects (passed=false) if EITHER condition fails - both are
+     * mandatory, checked together as the final gate immediately before
+     * trade execution, per spec: "applied after all existing
+     * validations and immediately before trade execution."
+     */
+    public TrendFilterResult checkTrendFilters(String symbol, String direction, double currentPrice) {
+        List<MomentumCandidate.Candle> fourHourCandles = fetch4HourCandles(symbol);
+        // Need at least 200 candles for a genuine EMA(200) - per spec's
+        // own mandatory requirement; a shorter series would produce a
+        // misleading, not-yet-converged EMA(200) value.
+        if (fourHourCandles.size() < 200) {
+            return new TrendFilterResult(false, "Not enough 4H candle history for EMA(200) - " +
+                    "have " + fourHourCandles.size() + ", need 200", 0, 0, 0, 0);
+        }
+
+        double vwap4h = computeVwap(fourHourCandles);
+        double ema20 = computeEma(fourHourCandles, 20);
+        double ema50 = computeEma(fourHourCandles, 50);
+        double ema200 = computeEma(fourHourCandles, 200);
+
+        boolean isLong = "LONG".equals(direction);
+
+        boolean vwapOk = isLong ? currentPrice > vwap4h : currentPrice < vwap4h;
+        if (!vwapOk) {
+            return new TrendFilterResult(false, String.format(
+                    "4H VWAP filter FAILED: price=%.2f %s required side of VWAP=%.2f (need %s)",
+                    currentPrice, isLong ? "not above" : "not below", vwap4h,
+                    isLong ? "price > VWAP" : "price < VWAP"),
+                    vwap4h, ema20, ema50, ema200);
+        }
+
+        boolean emaOk = isLong ? (ema20 > ema50 && ema50 > ema200) : (ema20 < ema50 && ema50 < ema200);
+        if (!emaOk) {
+            return new TrendFilterResult(false, String.format(
+                    "4H EMA trend filter FAILED: EMA20=%.2f EMA50=%.2f EMA200=%.2f - need %s",
+                    ema20, ema50, ema200, isLong ? "20>50>200" : "20<50<200"),
+                    vwap4h, ema20, ema50, ema200);
+        }
+
+        return new TrendFilterResult(true, String.format(
+                "4H trend filters PASSED: VWAP=%.2f (price %s) | EMA20=%.2f EMA50=%.2f " +
+                        "EMA200=%.2f (%s)", vwap4h, isLong ? "above" : "below", ema20, ema50, ema200,
+                isLong ? "20>50>200" : "20<50<200"), vwap4h, ema20, ema50, ema200);
+    }
+
+    /**
+     * Fetches 60-minute candles (35 trading days - generous enough for
+     * ~200+ real 4-hour candles after aggregation, satisfying EMA(200)'s
+     * genuine convergence requirement) and aggregates every 4
+     * consecutive ones into one synthetic 4-hour candle.
+     */
+    private List<MomentumCandidate.Candle> fetch4HourCandles(String symbol) {
+        try {
+            long token = resolveToken(symbol);
+            if (token == 0) return List.of();
+
+            LocalDateTime now = LocalDateTime.now(IST);
+            Date to = toDate(now);
+            Date from = toDate(now.minusDays(35));
+
+            HistoricalData data = kiteConnect.getHistoricalData(
+                    from, to, String.valueOf(token), "60minute", false, false);
+            if (data == null || data.dataArrayList == null) return List.of();
+
+            List<MomentumCandidate.Candle> hourly = new ArrayList<>();
+            for (Object obj : data.dataArrayList) {
+                HistoricalData d = (HistoricalData) obj;
+                hourly.add(new MomentumCandidate.Candle(d.open, d.high, d.low, d.close,
+                        d.timeStamp, d.volume));
+            }
+
+            // Aggregate every 4 consecutive 60-minute candles into one
+            // synthetic 4-hour candle: open=first, high=max, low=min,
+            // close=last, volume=sum - the standard higher-timeframe
+            // aggregation approach.
+            List<MomentumCandidate.Candle> fourHour = new ArrayList<>();
+            for (int i = 0; i + 4 <= hourly.size(); i += 4) {
+                List<MomentumCandidate.Candle> group = hourly.subList(i, i + 4);
+                double open = group.get(0).open();
+                double close = group.get(group.size() - 1).close();
+                double high = group.stream().mapToDouble(MomentumCandidate.Candle::high).max().orElse(0);
+                double low = group.stream().mapToDouble(MomentumCandidate.Candle::low).min().orElse(0);
+                long volume = group.stream().mapToLong(MomentumCandidate.Candle::volume).sum();
+                fourHour.add(new MomentumCandidate.Candle(open, high, low, close,
+                        group.get(0).timestamp(), volume));
+            }
+            return fourHour;
+        } catch (KiteException | Exception e) {
+            log.debug("[MOMENTUM-CANDLE] Failed to fetch 4H candles for {} (non-fatal, will " +
+                    "retry next cycle): {}", symbol, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * VWAP over the given candle series - cumulative (typical price x
+     * volume) / cumulative volume, using the standard typical price
+     * ((H+L+C)/3). Computed over the full fetched 4H series (not reset
+     * daily like an intraday VWAP), matching how a "higher timeframe
+     * VWAP" is conventionally used by traders on that timeframe.
+     */
+    private double computeVwap(List<MomentumCandidate.Candle> candles) {
+        double cumPV = 0;
+        long cumVol = 0;
+        for (MomentumCandidate.Candle c : candles) {
+            double typicalPrice = (c.high() + c.low() + c.close()) / 3.0;
+            cumPV += typicalPrice * c.volume();
+            cumVol += c.volume();
+        }
+        return cumVol > 0 ? cumPV / cumVol : 0;
+    }
+
+    /**
+     * Standard exponential moving average over the candle series'
+     * closes, seeded with a simple average of the first `period`
+     * closes (the conventional EMA seeding approach), then applying
+     * the standard smoothing multiplier (2/(period+1)) across the
+     * remaining candles.
+     */
+    private double computeEma(List<MomentumCandidate.Candle> candles, int period) {
+        if (candles.size() < period) return 0;
+        double multiplier = 2.0 / (period + 1);
+        double ema = candles.subList(0, period).stream()
+                .mapToDouble(MomentumCandidate.Candle::close).average().orElse(0);
+        for (int i = period; i < candles.size(); i++) {
+            double close = candles.get(i).close();
+            ema = (close - ema) * multiplier + ema;
+        }
+        return ema;
     }
 }

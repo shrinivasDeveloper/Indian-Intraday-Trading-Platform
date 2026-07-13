@@ -60,6 +60,13 @@ public class MomentumScheduler {
     private final AtomicBoolean selectionAttemptedToday = new AtomicBoolean(false);
     private volatile LocalDate lastResetDate = null;
 
+    // FEATURE 2 (Rescanning for New Momentum Stocks, per explicit user
+    // spec): tracks when the candidate list was last (re)scanned, so a
+    // fresh scan can run every 15 minutes during market hours,
+    // REPLACING the candidate list entirely each time.
+    private volatile java.time.LocalDateTime lastScanTime = null;
+    private static final long RESCAN_INTERVAL_MINUTES = 15;
+
     @Getter
     private volatile List<MomentumCandidate> todaysCandidates = List.of();
 
@@ -95,11 +102,17 @@ public class MomentumScheduler {
         if (!activeTrades.isEmpty()) {
             activeTrade.set(activeTrades.get(0));
             selectionAttemptedToday.set(true);
+            // FIX: without this, the 15-minute rescan would never
+            // trigger again after a restart (dueForRescan requires
+            // lastScanTime != null, and nothing else would ever set it
+            // once selectionAttemptedToday is already true).
+            lastScanTime = java.time.LocalDateTime.now(IST);
             log.info("[MOMENTUM-SCHEDULER] Restart recovery: found 1 ACTIVE trade ({}), " +
                             "{}/{} trades taken today - monitoring will resume automatically",
                     activeTrades.get(0).getSymbol(), tradesToday.get(), config.getMaxTradesPerDay());
         } else if (!todaysTrades.isEmpty()) {
             selectionAttemptedToday.set(true);
+            lastScanTime = java.time.LocalDateTime.now(IST);
             log.info("[MOMENTUM-SCHEDULER] Restart recovery: {}/{} trades already taken today",
                     tradesToday.get(), config.getMaxTradesPerDay());
         }
@@ -119,6 +132,7 @@ public class MomentumScheduler {
             selectionAttemptedToday.set(false);
             todaysCandidates = List.of();
             activeTrade.set(null);
+            lastScanTime = null; // FIX: reset rescan timer for the new day
             lastResetDate = today;
         }
 
@@ -165,19 +179,37 @@ public class MomentumScheduler {
             return;
         }
 
-        // Step 1: run selection ONCE, at (or just after) 9:25 AM - now
-        // correctly gated on selectionAttemptedToday, not the ambiguous
-        // isEmpty() check that caused a confirmed infinite-retry bug in
-        // an earlier review.
-        if (!selectionAttemptedToday.get() && !now.isBefore(selectionTime) && now.isBefore(forceExitTime)) {
+        // Step 1: run selection at the configured time, then RESCAN
+        // every 15 minutes thereafter - per explicit user spec: "A
+        // fresh momentum scan is performed every 15 minutes during
+        // market hours. Only newly identified momentum stocks from
+        // each scan should be added for monitoring. Stocks from
+        // previous scans should no longer be monitored after a new
+        // scan begins." Each rescan REPLACES todaysCandidates entirely.
+        // An active trade is never affected by this - the active-trade
+        // check above already returned early if one exists, so a
+        // rescan can only ever touch the WATCHLIST, never a live position.
+        boolean dueForFirstScan = !selectionAttemptedToday.get() && !now.isBefore(selectionTime);
+        boolean dueForRescan = selectionAttemptedToday.get() && lastScanTime != null &&
+                java.time.Duration.between(lastScanTime, java.time.LocalDateTime.now(IST))
+                        .toMinutes() >= RESCAN_INTERVAL_MINUTES;
+
+        if ((dueForFirstScan || dueForRescan) && now.isBefore(forceExitTime)) {
             selectionAttemptedToday.set(true); // set BEFORE calling out, so a slow/failed
             // call can never cause a repeat attempt
-            todaysCandidates = selectionService.selectCandidates();
-            if (todaysCandidates.isEmpty()) {
-                log.warn("[MOMENTUM-SCHEDULER] Selection ran but found 0 candidates today - " +
-                        "no monitoring will occur for the rest of today (this is correct, not " +
-                        "a bug - will not retry until tomorrow)");
+            List<MomentumCandidate> fresh = selectionService.selectCandidates();
+            lastScanTime = java.time.LocalDateTime.now(IST);
+            String scanType = dueForRescan ? "RESCAN" : "Initial scan";
+            if (fresh.isEmpty()) {
+                log.warn("[MOMENTUM-SCHEDULER] {} ran but found 0 candidates this cycle - " +
+                                "watchlist cleared, will rescan again in {} minutes",
+                        scanType, RESCAN_INTERVAL_MINUTES);
+            } else {
+                log.info("[MOMENTUM-SCHEDULER] {} complete - {} new candidate(s), replacing " +
+                        "previous watchlist entirely (previous candidates are no longer " +
+                        "monitored, per spec)", scanType, fresh.size());
             }
+            todaysCandidates = fresh; // REPLACES the previous list entirely - per spec
             return; // let the NEXT tick begin monitoring, keeps each tick simple/fast
         }
 

@@ -137,6 +137,17 @@ public class HeroZeroScheduler {
 
         LocalTime now = LocalTime.now(IST);
 
+        // FIX (found during full-platform pipeline validation): runs
+        // every cycle, independent of entry/exit windows - catches an
+        // externally-closed CE/PE leg promptly, same "broker is truth"
+        // principle already proven for Momentum and Swing.
+        try {
+            service.reconcileActiveTrades();
+        } catch (Exception e) {
+            log.debug("[HERO-ZERO] Reconciliation check failed this cycle (non-fatal): {}",
+                    e.getMessage());
+        }
+
         // ENTRY WINDOW - fire once per index, at or after entry time
         if (!now.isBefore(config.getEntryTime())) {
             for (String index : INDEXES) {

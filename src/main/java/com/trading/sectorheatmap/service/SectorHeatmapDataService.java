@@ -84,18 +84,32 @@ public class SectorHeatmapDataService {
 
     @PostConstruct
     public void loadPersistedMappingOnStartup() {
+        // Load any existing persisted data first, as a safety-net
+        // baseline - if the fresh fetch below fails (network issue,
+        // NSE temporarily down), refreshMapping() falls back to this
+        // rather than crashing or leaving the maps null.
         symbolToSector = repository.loadSymbolToSector();
         symbolToCompanyName = repository.loadSymbolToCompanyName();
-        if (symbolToSector.isEmpty()) {
-            log.info("[SECTOR-HEATMAP] No persisted mapping found - fetching for the first " +
-                    "time now (this is the ONLY startup-time fetch; all future startups will " +
-                    "load from the database instead)");
-            refreshMapping();
-        } else {
-            log.info("[SECTOR-HEATMAP] Loaded {} persisted stock-to-sector mappings from " +
-                            "database - consistent with every prior restart, per requirement",
-                    symbolToSector.size());
-        }
+
+        // FIX (per explicit user priority: "ensure all 22 sectors are
+        // mapped correctly... fix this first"). Root cause of the
+        // taxonomy fix never actually taking effect: this used to ONLY
+        // re-classify when the table was COMPLETELY empty - since 751
+        // stocks were already persisted from before any taxonomy
+        // improvement, every subsequent restart just reloaded the SAME
+        // stale, wrong classifications, no matter how many times the
+        // taxonomy code itself was fixed and redeployed. Now ALWAYS
+        // re-classifies on startup (after loading the safety-net
+        // baseline above), so the currently-deployed taxonomy genuinely
+        // gets applied every time - not just once, ever, on the very
+        // first run. The existing weekly scheduled refresh (see
+        // refreshMapping()'s @Scheduled annotation) remains in place
+        // too, as an ongoing safety net between restarts.
+        log.info("[SECTOR-HEATMAP] Startup - loaded {} existing mappings as a baseline, now " +
+                        "refreshing with the currently-deployed taxonomy (ensures any taxonomy fix " +
+                        "actually takes effect on this restart, rather than silently keeping stale data)",
+                symbolToSector.size());
+        refreshMapping();
     }
 
     /**
