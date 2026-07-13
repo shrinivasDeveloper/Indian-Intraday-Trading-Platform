@@ -129,6 +129,19 @@ public class SectorHeatmapDataService {
 
             log.info("[SECTOR-HEATMAP] Refreshed - {} stocks mapped across {} sectors",
                     newSymbolToSector.size(), new HashSet<>(newSymbolToSector.values()).size());
+
+            // FIX (found via direct user report: 60% of live stocks
+            // landing in "Diversified" - far more than a genuine catch-
+            // all should hold). Logs the REAL, exact industry strings
+            // that didn't match the taxonomy this cycle, with counts -
+            // real evidence to fix SectorTaxonomy.java correctly,
+            // instead of guessing without seeing NSE's actual data.
+            var unmatched = com.trading.sectorheatmap.domain.SectorTaxonomy.getAndClearUnmatchedIndustries();
+            if (!unmatched.isEmpty()) {
+                log.warn("[SECTOR-HEATMAP] {} distinct unrecognized industry values fell through " +
+                        "to 'Diversified' this cycle (this is the REAL data needed to fix the " +
+                        "taxonomy): {}", unmatched.size(), unmatched);
+            }
         } catch (Exception e) {
             log.error("[SECTOR-HEATMAP] Mapping refresh failed - keeping existing mapping " +
                     "({} stocks): {}", symbolToSector.size(), e.getMessage());

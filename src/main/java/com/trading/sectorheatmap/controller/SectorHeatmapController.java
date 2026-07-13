@@ -21,6 +21,25 @@ public class SectorHeatmapController {
         this.dataService = dataService;
     }
 
+    /**
+     * Manual, on-demand refresh - per explicit user need: the scheduled
+     * weekly refresh wouldn't fire again until next Sunday, and since
+     * the database already has cached data, a normal restart doesn't
+     * re-trigger the fetch (only runs on a genuinely empty table). This
+     * forces a fresh fetch right now, so the new diagnostic logging
+     * (which industry strings are falling through to "Diversified")
+     * produces real evidence immediately, not a week from now.
+     */
+    @PostMapping("/refresh")
+    public Map<String, Object> forceRefresh() {
+        dataService.refreshMapping();
+        return Map.of(
+                "message", "Refresh triggered - check server logs for " +
+                        "[SECTOR-HEATMAP] Refreshed and any unrecognized industry values",
+                "totalMappedStocks", dataService.getMappedStockCount()
+        );
+    }
+
     /** All 22 sectors with their current average % change - the main
      *  heatmap grid view. */
     @GetMapping

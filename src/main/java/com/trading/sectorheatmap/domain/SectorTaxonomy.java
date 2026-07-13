@@ -143,12 +143,39 @@ public final class SectorTaxonomy {
             Map.entry("diversified", "Diversified")
     );
 
+    // FIX (found via direct user report: 448 of 743 live stocks - 60%!
+    // - were landing in "Diversified", far more than a genuine
+    // catch-all sector should ever hold). Tracks every unrecognized
+    // raw industry string and how many stocks hit it, so the actual,
+    // real values from NSE's live data can be seen and mapped
+    // correctly - rather than guessing at fixes without real evidence.
+    private static final java.util.Map<String, Integer> unmatchedIndustryCounts =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     /** Case-insensitive, whitespace-tolerant lookup. Returns "Diversified"
      *  (NSE's own genuine catch-all sector) if the industry name isn't
      *  recognized - never returns null, never silently drops a stock. */
     public static String sectorFor(String rawIndustry) {
         if (rawIndustry == null || rawIndustry.isBlank()) return "Diversified";
         String key = rawIndustry.trim().toLowerCase();
-        return INDUSTRY_TO_SECTOR.getOrDefault(key, "Diversified");
+        String result = INDUSTRY_TO_SECTOR.get(key);
+        if (result == null) {
+            // Track the exact, real, unrecognized value - trimmed but
+            // NOT lowercased in the log, so the real casing/spacing from
+            // NSE's actual data is visible for fixing the taxonomy.
+            unmatchedIndustryCounts.merge(rawIndustry.trim(), 1, Integer::sum);
+            return "Diversified";
+        }
+        return result;
+    }
+
+    /** Called once per refresh cycle (see SectorHeatmapDataService) to
+     *  log a real, evidence-based summary of exactly which industry
+     *  strings are falling through, and how often - the actual data
+     *  needed to fix the taxonomy correctly instead of guessing. */
+    public static java.util.Map<String, Integer> getAndClearUnmatchedIndustries() {
+        java.util.Map<String, Integer> snapshot = new java.util.LinkedHashMap<>(unmatchedIndustryCounts);
+        unmatchedIndustryCounts.clear();
+        return snapshot;
     }
 }

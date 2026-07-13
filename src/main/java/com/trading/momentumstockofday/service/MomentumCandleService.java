@@ -40,6 +40,16 @@ public class MomentumCandleService {
     // getHistoricalData needs the numeric token, not the trading symbol.
     private final Map<String, Long> tokenCache = new ConcurrentHashMap<>();
 
+    // FIX (added during thorough production-readiness validation of
+    // the resolveToken fix below): tracks the last failure time per
+    // symbol, so a genuinely persistent failure (not just a transient
+    // one) doesn't retry the full ~9,946-instrument fetch every single
+    // 30-second monitoring cycle, forever. Guarantees eventual recovery
+    // from transient failures while avoiding excessive API load if a
+    // symbol truly, repeatedly cannot be resolved.
+    private final Map<String, Long> lastFailureTime = new ConcurrentHashMap<>();
+    private static final long RETRY_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes
+
     public MomentumCandleService(KiteConnect kiteConnect, MomentumConfig config) {
         this.kiteConnect = kiteConnect;
         this.config = config;
@@ -168,20 +178,53 @@ public class MomentumCandleService {
     }
 
     private long resolveToken(String symbol) {
-        return tokenCache.computeIfAbsent(symbol, s -> {
-            try {
-                List<Instrument> instruments = kiteConnect.getInstruments("NSE");
-                for (Instrument i : instruments) {
-                    if (s.equalsIgnoreCase(i.getTradingsymbol())) {
-                        return i.getInstrument_token();
-                    }
+        // FIX (found via direct user report: "Not enough candle history
+        // yet (0 available)" persisting all day for every stock).
+        // Confirmed real root cause: computeIfAbsent() permanently
+        // cached the 0L failure sentinel on ANY exception or lookup
+        // miss - since the map key is no longer "absent" once cached,
+        // a symbol that failed to resolve even ONCE (e.g. a transient
+        // network hiccup during the initial burst of 9 near-simultaneous
+        // lookups right after 9:25 AM selection) would NEVER be retried
+        // again for the rest of the day, permanently returning empty
+        // candles. Now only caches genuine, successful resolutions - a
+        // failed lookup gets a fresh retry on the very next evaluation
+        // cycle instead of being stuck forever.
+        Long cached = tokenCache.get(symbol);
+        if (cached != null && cached > 0) return cached;
+
+        // FIX (added during thorough production-readiness validation):
+        // guards against a genuinely persistent failure retrying the
+        // full ~9,946-instrument fetch every single 30-second cycle
+        // forever. After a failure, waits RETRY_BACKOFF_MS before
+        // trying again - still guarantees eventual recovery from a
+        // transient issue, without excessive API load if a symbol
+        // truly, repeatedly cannot be resolved.
+        Long lastFailure = lastFailureTime.get(symbol);
+        if (lastFailure != null && (System.currentTimeMillis() - lastFailure) < RETRY_BACKOFF_MS) {
+            return 0L; // still within backoff window - skip this cycle's attempt
+        }
+
+        try {
+            List<Instrument> instruments = kiteConnect.getInstruments("NSE");
+            for (Instrument i : instruments) {
+                if (symbol.equalsIgnoreCase(i.getTradingsymbol())) {
+                    long token = i.getInstrument_token();
+                    tokenCache.put(symbol, token); // only cache real successes
+                    lastFailureTime.remove(symbol); // clear any prior backoff
+                    return token;
                 }
-            } catch (KiteException | Exception e) {
-                log.warn("[MOMENTUM-CANDLE] Could not resolve instrument token for {}: {}",
-                        s, e.getMessage());
             }
-            return 0L;
-        });
+            lastFailureTime.put(symbol, System.currentTimeMillis());
+            log.warn("[MOMENTUM-CANDLE] {} not found in NSE instrument list - will retry " +
+                    "in {} minutes rather than every cycle", symbol, RETRY_BACKOFF_MS / 60000);
+        } catch (KiteException | Exception e) {
+            lastFailureTime.put(symbol, System.currentTimeMillis());
+            log.warn("[MOMENTUM-CANDLE] Could not resolve instrument token for {} - will retry " +
+                            "in {} minutes rather than every cycle: {}",
+                    symbol, RETRY_BACKOFF_MS / 60000, e.getMessage());
+        }
+        return 0L; // NOT cached - next call will genuinely retry
     }
 
     private Date toDate(LocalDateTime ldt) {

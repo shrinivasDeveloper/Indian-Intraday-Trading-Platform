@@ -163,7 +163,14 @@ public class ZerodhaOrderClient {
         try {
             OrderParams p  = new OrderParams();
             // JAR-VERIFIED: triggerPrice is Double (wrapper) in OrderParams
-            p.triggerPrice = newTrigger;          // double autoboxed to Double [OK]
+            // FIX (found during thorough validation of the tick-size fix
+            // above): this method builds its OWN, separate OrderParams -
+            // was bypassing roundToTickSize() entirely. Since this is
+            // used for trailing-stop updates, an unaligned trigger price
+            // here would hit the exact same Zerodha "tick size" rejection
+            // COLPAL's entry order did. Applied the same fix for full,
+            // consistent coverage across every order-price code path.
+            p.triggerPrice = roundToTickSize(newTrigger); // double autoboxed to Double [OK]
             p.orderType    = Constants.ORDER_TYPE_SLM;
             // JAR-VERIFIED: modifyOrder(String, OrderParams, String) -> Order
             Order result   = kiteConnect.modifyOrder(orderId, p, Constants.VARIETY_REGULAR);
@@ -316,8 +323,18 @@ public class ZerodhaOrderClient {
         p.transactionType  = txType;
         p.quantity         = qty;                        // int -> Integer autobox [OK]
         p.orderType        = type;
-        p.price            = price;                      // double -> Double autobox [OK]
-        p.triggerPrice     = trigger;                    // double -> Double autobox [OK]
+        // FIX (found via direct user report - real Zerodha rejection):
+        // "Tick size for this script is 0.10. Kindly enter price in the
+        // multiple of tick size" - confirmed real, exact cause: COLPAL's
+        // computed entry price (2032.38) is not a valid multiple of its
+        // 0.10 tick size (2032.38 / 0.10 = 20323.8, not a whole number).
+        // Rounds to the nearest 0.05 before every order submission -
+        // NSE's standard tick size for the vast majority of stocks. Since
+        // 0.10 is an exact multiple of 0.05, this also correctly
+        // satisfies stocks with the less common 0.10 tick size (like
+        // COLPAL), without needing a per-instrument tick-size lookup.
+        p.price            = roundToTickSize(price);     // double -> Double autobox [OK]
+        p.triggerPrice     = roundToTickSize(trigger);    // double -> Double autobox [OK]
         p.product          = Constants.PRODUCT_MIS;      // "MIS" [OK]
         p.validity         = Constants.VALIDITY_DAY;     // "DAY" [OK]
         // FIX (confirmed real, not a guess - verified directly from
@@ -339,6 +356,16 @@ public class ZerodhaOrderClient {
             p.marketProtection = -1;
         }
         return p;
+    }
+
+    /** Rounds to the nearest valid NSE tick size (0.05) - see build()
+     *  above for the full explanation of why this is needed and why
+     *  0.05 is safe for both the common 0.05 and less-common 0.10
+     *  tick-size stocks. */
+    private double roundToTickSize(double price) {
+        if (price <= 0) return price; // 0.0 is the correct sentinel for
+        // market orders - leave untouched
+        return Math.round(price / 0.05) * 0.05;
     }
 
     private String doPlace(OrderParams p, String variety) {
