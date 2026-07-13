@@ -140,7 +140,62 @@ public final class SectorTaxonomy {
             Map.entry("utilities", "Power"),
             Map.entry("other utilities", "Power"),
             // Diversified
-            Map.entry("diversified", "Diversified")
+            Map.entry("diversified", "Diversified"),
+
+            // ============================================================
+            // MAJOR FIX (per explicit user request for a complete,
+            // permanent fix, backed by real evidence): NSE's live CSV
+            // frequently uses the SECTOR NAME ITSELF directly as the
+            // Industry value for many stocks - confirmed from a real,
+            // current data source (containing 2025/2026-era companies
+            // like "PG Electroplast", "Alivus Life Sciences"). The
+            // taxonomy above only ever had granular SUB-industry names
+            // mapped (e.g. "banks" -> Financial Services) - it never had
+            // a SELF-MAPPING for when the raw value already equals the
+            // sector name directly. This was the dominant, systematic
+            // cause of the 60% "Diversified" miscategorization - not a
+            // few missing entries, but this entire class of case.
+            // (Note: several sector self-mappings - power, services,
+            // telecommunication, construction, healthcare, realty,
+            // information technology, consumer durables, fast moving
+            // consumer goods, retailing - were ALREADY present in the
+            // original taxonomy above and are correctly NOT repeated
+            // here, to avoid a duplicate-key error.)
+            // ============================================================
+            Map.entry("automobile and auto components", "Automobile and Auto Components"),
+            Map.entry("capital goods", "Capital Goods"),
+            Map.entry("financial services", "Financial Services"),
+            Map.entry("construction materials", "Construction Materials"),
+            Map.entry("chemicals", "Chemicals"),
+            Map.entry("consumer services", "Consumer Services"),
+            Map.entry("textiles", "Textiles"),
+            Map.entry("metals & mining", "Metals & Mining"),
+            Map.entry("forest materials", "Forest Materials"),
+            Map.entry("media, entertainment & publication", "Media, Entertainment & Publication"),
+            // "Oil Gas & Consumable Fuels" - confirmed real variant
+            // without the comma after "Oil", alongside the with-comma
+            // version already mapped above - both accepted.
+            Map.entry("oil gas & consumable fuels", "Oil, Gas & Consumable Fuels"),
+            // "Media Entertainment & Publication" - confirmed real
+            // variant without the comma after "Media".
+            Map.entry("media entertainment & publication", "Media, Entertainment & Publication"),
+
+            // ============================================================
+            // ADDITIONAL FIX: an OLDER, alternate GICS-style vocabulary
+            // (ALL-CAPS, simpler category names) confirmed present in a
+            // separate, real historical NSE data snapshot. Adding these
+            // as aliases too, for maximum robustness regardless of which
+            // exact format the live endpoint returns on any given day.
+            // ============================================================
+            Map.entry("it", "Information Technology"),
+            Map.entry("metals", "Metals & Mining"),
+            Map.entry("pharma", "Healthcare"),
+            Map.entry("telecom", "Telecommunication"),
+            Map.entry("automobile", "Automobile and Auto Components"),
+            Map.entry("media & entertainment", "Media, Entertainment & Publication"),
+            Map.entry("energy", "Power"),
+            Map.entry("consumer goods", "Consumer Durables"),
+            Map.entry("fertilisers & pesticides", "Chemicals") // British spelling variant
     );
 
     // FIX (found via direct user report: 448 of 743 live stocks - 60%!
