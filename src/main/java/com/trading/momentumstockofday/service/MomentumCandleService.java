@@ -100,7 +100,6 @@ public class MomentumCandleService {
         }
 
         // Try consolidation windows from smallest to largest, per spec's
-        // Try consolidation windows from smallest to largest, per spec's
         // explicit "2 to 4 candles" range.
         // FIX (per explicit user request: "need to trade after day high
         // or low breaks and WITH CONSOLIDATION COMPLETE"): the
@@ -400,10 +399,12 @@ public class MomentumCandleService {
     }
 
     /**
-     * Fetches 60-minute candles (35 trading days - generous enough for
-     * ~200+ real 4-hour candles after aggregation, satisfying EMA(200)'s
-     * genuine convergence requirement) and aggregates every 4
-     * consecutive ones into one synthetic 4-hour candle.
+     * Fetches 60-minute candles (220 calendar days - confirmed via
+     * Kite's own documented API limits to be safely within the
+     * 400-day maximum for this interval - producing enough real 4-hour
+     * candles after aggregation to satisfy EMA(200)'s genuine
+     * convergence requirement) and aggregates every 4 consecutive ones
+     * into one synthetic 4-hour candle.
      */
     private List<MomentumCandidate.Candle> fetch4HourCandles(String symbol) {
         try {
@@ -412,7 +413,19 @@ public class MomentumCandleService {
 
             LocalDateTime now = LocalDateTime.now(IST);
             Date to = toDate(now);
-            Date from = toDate(now.minusDays(35));
+            // FIX (found via direct user question, confirmed with exact
+            // math): 35 calendar days only produced ~39 real 4-hour
+            // candles after aggregation - far short of the 200 required
+            // for EMA(200) below, meaning this filter was unconditionally
+            // rejecting every single trade, every day, regardless of
+            // actual VWAP/EMA alignment. 220 calendar days (~157 trading
+            // days) produces ~246 four-hour candles - comfortably above
+            // 200, with margin for holidays/market closures. Zero change
+            // to the EMA/VWAP formulas or the 200-candle requirement
+            // itself - purely fixes the fetch window to actually supply
+            // enough real history for that existing requirement to ever
+            // be satisfiable.
+            Date from = toDate(now.minusDays(220));
 
             HistoricalData data = kiteConnect.getHistoricalData(
                     from, to, String.valueOf(token), "60minute", false, false);

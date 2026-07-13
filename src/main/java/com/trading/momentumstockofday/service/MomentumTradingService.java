@@ -136,7 +136,9 @@ public class MomentumTradingService {
 
     /**
      * Executes the actual breakout entry. Per spec:
-     *   - SL at consolidation low (long) / high (short)
+     *   - SL uses AI's price-tiered % model (computeSlPct below) - a
+     *     wider, price-proportional distance, not the tight
+     *     consolidation range
      *   - Target at 1:1.5 RR
      */
     public MomentumTrade enterBreakout(MomentumCandidate candidate, double consolidationHigh,
@@ -392,17 +394,6 @@ public class MomentumTradingService {
     }
 
     /**
-     * Price-tiered stop-loss percentage - the exact same model as
-     * AiRiskAssessmentEngine.computeSlPct(), independently re-implemented
-     * here (not imported) to preserve Momentum's required independence
-     * from AI's code. Per explicit user request: "can we use the same
-     * stop-loss approach as the AI Trading strategy for the Momentum
-     * strategy instead" - confirmed the previous consolidation-range-
-     * based SL could be far too tight (e.g. Rs.0.65 risk on an Rs.850
-     * stock); this gives a wider, price-proportional, genuinely tested
-     * distance instead.
-     */
-    /**
      * Calls Zerodha's own real order-margin calculation API - the exact
      * same fix confirmed for AI/News's margin check (same systemic bug
      * found independently here: naive price x quantity ignores real MIS
@@ -435,6 +426,17 @@ public class MomentumTradingService {
         return BigDecimal.valueOf(price).multiply(BigDecimal.valueOf(qty));
     }
 
+    /**
+     * Price-tiered stop-loss percentage - the exact same model as
+     * AiRiskAssessmentEngine.computeSlPct(), independently re-implemented
+     * here (not imported) to preserve Momentum's required independence
+     * from AI's code. Per explicit user request: "can we use the same
+     * stop-loss approach as the AI Trading strategy for the Momentum
+     * strategy instead" - confirmed the previous consolidation-range-
+     * based SL could be far too tight (e.g. Rs.0.65 risk on an Rs.850
+     * stock); this gives a wider, price-proportional, genuinely tested
+     * distance instead.
+     */
     private double computeSlPct(double price) {
         if      (price <= 130)  return 0.020;  // 2.0%
         else if (price <= 170)  return 0.017;  // 1.7%
