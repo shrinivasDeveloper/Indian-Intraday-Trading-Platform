@@ -22,6 +22,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
+import org.springframework.context.event.EventListener;
+import com.trading.events.CandleCompleteEvent;
 
 /**
  * MomentumScheduler - orchestrates the complete strategy flow.
@@ -43,6 +46,16 @@ public class MomentumScheduler {
     private final MomentumCandleService candleService;
     private final MomentumTradingService tradingService;
     private final MomentumTradeRepository repository;
+
+    // FIX (per explicit user request: react to real candle completions
+    // immediately instead of waiting up to 30 seconds for the next poll,
+    // "without affecting any strategies and momentum as well"). This
+    // lock ensures tick()'s entire body - whether triggered by the
+    // scheduler below OR the new event-driven listener - can NEVER run
+    // concurrently from two different threads at once. Without this,
+    // a genuine race condition could let both paths pass the "no active
+    // trade yet" check simultaneously and attempt a duplicate entry.
+    private final ReentrantLock tickLock = new ReentrantLock();
 
     // FIX (per explicit request: "2 trades per day without affecting
     // existing strategy... update in momentum strategy"). Replaced the
@@ -120,11 +133,98 @@ public class MomentumScheduler {
 
     /** Runs frequently; internally gates on the exact configured time
      *  and the once-per-day guard, matching the same proven pattern
-     *  already used by every other strategy's scheduler this session. */
+     *  already used by every other strategy's scheduler this session.
+     *  FIX: entire body now wrapped in tickLock, so this can safely be
+     *  called from either the scheduled poll below OR the new event-
+     *  driven trigger, never both at once.
+     *  FIX (found during production-readiness review): uses tryLock(),
+     *  not the blocking lock() - if the event-driven trigger currently
+     *  holds the lock, this scheduled cycle is skipped gracefully
+     *  rather than blocking the scheduler thread. The event-driven
+     *  path (or the next 30-second cycle) is already doing the same
+     *  work, so nothing is lost by skipping. */
     @Scheduled(fixedRate = 30000)
     public void tick() {
         if (!config.isEnabled()) return;
+        if (!tickLock.tryLock()) {
+            log.debug("[MOMENTUM-SCHEDULER] Skipped this scheduled cycle - the event-driven " +
+                    "trigger is currently processing the same work");
+            return;
+        }
+        try {
+            tickInternal();
+        } finally {
+            tickLock.unlock();
+        }
+    }
 
+    /**
+     * FIX (per explicit user request: "why every 30 second not live
+     * ticks... please fix it without affecting the strategy flow...
+     * without affecting any strategies and momentum as well"). Reacts
+     * to a real candle completing immediately, instead of waiting up
+     * to 30 seconds for the next scheduled poll - cutting the
+     * worst-case detection delay from "up to 30 seconds" down to
+     * essentially immediate. Calls the EXACT SAME tick() method used
+     * by the scheduler above (protected by the same tickLock) - reuses
+     * 100% of the existing gating logic (daily reset, EOD exit,
+     * reconciliation, active-trade monitoring, daily cap, selection/
+     * rescan, breakout monitoring) with zero duplication, so nothing
+     * about the existing strategy flow changes - this purely adds a
+     * FASTER way to trigger the same, unchanged logic. Filters to only
+     * 5-minute candles (matching the strategy's own candle granularity
+     * - reacting to 1-minute candles would trigger far too often for
+     * no benefit) for symbols Momentum currently tracks. Wrapped so
+     * this can never throw back into the shared CandleCompleteEvent
+     * pipeline other strategies also depend on.
+     */
+    @EventListener
+    public void onCandleCompleteForBreakoutCheck(CandleCompleteEvent event) {
+        try {
+            if (!config.isEnabled()) return;
+            var candle = event.getCandle();
+            if (candle == null || !"5minute".equals(candle.getTimeframe())) return;
+            String symbol = candle.getTradingSymbol();
+            if (symbol == null) return;
+            boolean isTracked = todaysCandidates.stream()
+                    .anyMatch(c -> symbol.equals(c.getSymbol()));
+            if (!isTracked) return;
+
+            // FIX (found during production-readiness review): uses
+            // tryLock(), not the blocking lock() - this listener likely
+            // runs on the same shared async thread pool
+            // CandleAggregatorService uses for other strategies too.
+            // Blocking here while waiting for the scheduled tick to
+            // finish could tie up threads that shared infrastructure
+            // depends on. If the lock isn't immediately available, this
+            // specific event is skipped gracefully - the scheduled
+            // 30-second poll (or the next candle event) will still
+            // catch the same opportunity shortly after.
+            if (!tickLock.tryLock()) {
+                log.debug("[MOMENTUM-SCHEDULER] Skipped event-driven check for {} - the " +
+                        "scheduled poll is currently running (will catch this shortly)", symbol);
+                return;
+            }
+            try {
+                tickInternal();
+            } finally {
+                tickLock.unlock();
+            }
+        } catch (Exception e) {
+            log.warn("[MOMENTUM-SCHEDULER] Event-driven breakout check failed (non-fatal, the " +
+                    "next scheduled 30-second poll will still catch this): {}", e.getMessage());
+        }
+    }
+
+    /**
+     * The exact, complete, UNCHANGED tick() body from before this fix -
+     * extracted as its own method purely so both the scheduled poll and
+     * the new event-driven trigger can share it (and the same lock)
+     * without any duplicated logic. Zero behavioral change from the
+     * original tick() - every line below is byte-for-byte identical to
+     * what tick() itself contained before this fix.
+     */
+    private void tickInternal() {
         LocalDate today = LocalDate.now(IST);
         if (!today.equals(lastResetDate)) {
             tradesToday.set(0);

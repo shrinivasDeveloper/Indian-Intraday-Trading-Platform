@@ -77,6 +77,20 @@ public class MomentumCandleService {
     // 5-minute candle completion, reset at the start of each trading day.
     private final Map<String, double[]> dayHighLowTracker = new ConcurrentHashMap<>();
 
+    // FIX (confirmed real bug found via direct user report + verified
+    // with exact math): the day-low tracker above was updating on
+    // EVERY candle, INCLUDING the latest one being checked for
+    // breakout. Since a genuine breakout candle IS the new day-low by
+    // definition, dayLow always became equal to that same candle's
+    // close BEFORE the comparison ran - making "lastClose < dayLow"
+    // mathematically impossible to satisfy for the very candle that
+    // should trigger it. This second tracker lags by exactly one
+    // candle - it holds the day's high/low AS OF the candle BEFORE the
+    // latest one, which is what a genuine breakout must be compared
+    // against (matching the same principle already used correctly for
+    // the consolidation window, which also excludes the breakout candle).
+    private final Map<String, double[]> priorDayHighLowTracker = new ConcurrentHashMap<>();
+
     // Symbols Momentum currently cares about - updated by MomentumScheduler
     // whenever a fresh scan/rescan happens, so the event listener below
     // knows exactly which symbols to buffer (avoids buffering candles for
@@ -144,6 +158,13 @@ public class MomentumCandleService {
 
             double[] hl = dayHighLowTracker.computeIfAbsent(symbol,
                     k -> new double[]{0, Double.MAX_VALUE});
+            // FIX (confirmed real bug, verified with exact math): snapshot
+            // the CURRENT (pre-update) high/low into the "prior" tracker
+            // BEFORE this candle's own high/low gets folded into the main
+            // tracker below. This is what evaluate() will use for the
+            // breakout comparison - the day's high/low as of the candle
+            // BEFORE this one, never including this candle itself.
+            priorDayHighLowTracker.put(symbol, new double[]{hl[0], hl[1]});
             if (converted.high() > hl[0]) hl[0] = converted.high();
             if (converted.low() < hl[1]) hl[1] = converted.low();
         } catch (Exception e) {
@@ -160,6 +181,7 @@ public class MomentumCandleService {
         if (!today.equals(lastBufferResetDate)) {
             fiveMinBuffers.clear();
             dayHighLowTracker.clear();
+            priorDayHighLowTracker.clear();
             lastBufferResetDate = today;
             log.info("[MOMENTUM-CANDLE] New trading day - live candle buffers reset");
         }
@@ -250,45 +272,24 @@ public class MomentumCandleService {
             // window itself).
             boolean priceBreakout = isLong ? lastClose > dayHigh : lastClose < dayLow;
 
-            // FEATURE (Volume Profile Confirmation, per explicit user
-            // spec's pipeline step 4): the breakout candle's volume must
-            // exceed 1.2x the window's average volume - confirms
-            // genuine market interest behind the move, not a thin,
-            // low-conviction breakout. Deliberately a MODERATE threshold
-            // (not an aggressive 2x+ requirement) per explicit user
-            // instruction to avoid losing valid opportunities - this
-            // filters obviously weak breakouts without being overly
-            // restrictive. Average is computed from the CONSOLIDATION
-            // window only (prior, calmer candles) - a cleaner, more
-            // meaningful baseline than including the breakout candle's
-            // own volume in its own comparison average.
-            double avgVolume = window.stream().mapToLong(MomentumCandidate.Candle::volume)
-                    .average().orElse(0);
-            long breakoutCandleVolume = breakoutCandle.volume();
-            boolean volumeConfirmed = avgVolume > 0 && breakoutCandleVolume >= avgVolume * 1.2;
-            boolean breakout = priceBreakout && volumeConfirmed;
-
-            String volumeNote = priceBreakout
-                    ? (volumeConfirmed
-                    ? String.format(" | Volume confirmed (%d vs %.0f avg, %.1fx)",
-                    breakoutCandleVolume, avgVolume,
-                    avgVolume > 0 ? breakoutCandleVolume / avgVolume : 0)
-                    : String.format(" | Volume NOT confirmed (%d vs %.0f avg, need 1.2x) - " +
-                            "price broke out but volume too thin, waiting for real conviction",
-                    breakoutCandleVolume, avgVolume))
-                    : "";
+            // FIX (per explicit user request: "please remove this gate...
+            // only this gate should remove"). Volume confirmation gate
+            // removed - breakout now depends purely on price crossing
+            // the day's high/low, exactly as it did before this gate
+            // was added. Nothing else in this method changed.
+            boolean breakout = priceBreakout;
 
             return new EvaluationResult(true, breakout, consolHigh, consolLow, dayHigh, dayLow,
                     window,
                     breakout
                             ? String.format("Valid %d-candle consolidation COMPLETE, followed by DAY'S " +
-                                    "%s BREAKOUT confirmed (close %.2f vs day %s %.2f)%s", windowSize,
+                                    "%s BREAKOUT confirmed (close %.2f vs day %s %.2f)", windowSize,
                             isLong ? "HIGH" : "LOW", lastClose, isLong ? "high" : "low",
-                            isLong ? dayHigh : dayLow, volumeNote)
+                            isLong ? dayHigh : dayLow)
                             : String.format("Valid %d-candle consolidation forming, waiting for " +
-                                    "day's %s breakout (current=%.2f, need %s %.2f)%s", windowSize,
+                                    "day's %s breakout (current=%.2f, need %s %.2f)", windowSize,
                             isLong ? "high" : "low", lastClose, isLong ? "above" : "below",
-                            isLong ? dayHigh : dayLow, volumeNote));
+                            isLong ? dayHigh : dayLow));
         }
 
         return new EvaluationResult(false, false, 0, 0, dayHigh, dayLow, recent,
@@ -319,7 +320,13 @@ public class MomentumCandleService {
      * with the same live data used for consolidation detection.
      */
     private double[] fetchDayHighLow(String symbol) {
-        double[] hl = dayHighLowTracker.get(symbol);
+        // FIX (confirmed real bug, verified with exact math): reads from
+        // the PRIOR tracker, not the always-current one - see the field
+        // declaration above and the event listener for the full
+        // explanation. This is what makes the breakout comparison
+        // genuinely possible, instead of always comparing a candle
+        // against a day-low value it just set itself.
+        double[] hl = priorDayHighLowTracker.get(symbol);
         if (hl == null || hl[0] <= 0 || hl[1] >= Double.MAX_VALUE) return new double[]{0, 0};
         return new double[]{hl[0], hl[1]};
     }
