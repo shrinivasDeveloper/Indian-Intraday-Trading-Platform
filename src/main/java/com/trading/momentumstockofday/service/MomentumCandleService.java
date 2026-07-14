@@ -203,6 +203,9 @@ public class MomentumCandleService {
                     toDate(marketOpen), toDate(now), String.valueOf(token),
                     config.getCandleInterval(), false, false);
             if (data == null || data.dataArrayList == null || data.dataArrayList.isEmpty()) {
+                log.warn("[MOMENTUM-CANDLE] {} - day's high/low fetch: Kite's call succeeded " +
+                                "(no exception) but returned {} - token={}", symbol,
+                        data == null ? "a null response" : "zero candles", token);
                 return new double[]{0, 0};
             }
 
@@ -267,7 +270,7 @@ public class MomentumCandleService {
     private List<MomentumCandidate.Candle> fetchRecentCandles(String symbol, int count) {
         try {
             long token = resolveToken(symbol);
-            if (token == 0) return List.of();
+            if (token == 0) return List.of(); // resolveToken() already logs its own failure reason
 
             LocalDateTime now = LocalDateTime.now(IST);
             Date to = toDate(now);
@@ -275,7 +278,22 @@ public class MomentumCandleService {
 
             HistoricalData data = kiteConnect.getHistoricalData(
                     from, to, String.valueOf(token), config.getCandleInterval(), false, false);
-            if (data == null || data.dataArrayList == null) return List.of();
+            // FIX (found via direct user report: zero [MOMENTUM-CANDLE]
+            // log lines appeared anywhere in Railway's logs, yet the
+            // dashboard still showed "0 available" - confirmed real
+            // root cause: if Kite's call SUCCEEDS (no exception) but
+            // returns a null response or null/empty dataArrayList, this
+            // previously returned silently with ZERO logging, since it
+            // wasn't treated as a failure at all. Now logged explicitly,
+            // so this specific "successful call, but empty data" case
+            // is finally visible.
+            if (data == null || data.dataArrayList == null || data.dataArrayList.isEmpty()) {
+                log.warn("[MOMENTUM-CANDLE] {} - Kite's historical-data call succeeded (no " +
+                                "exception) but returned {} - token={} interval={} window={} to {}",
+                        symbol, data == null ? "a null response" : "zero candles",
+                        token, config.getCandleInterval(), from, to);
+                return List.of();
+            }
 
             List<MomentumCandidate.Candle> all = new ArrayList<>();
             for (Object obj : data.dataArrayList) {
@@ -437,7 +455,12 @@ public class MomentumCandleService {
 
             HistoricalData data = kiteConnect.getHistoricalData(
                     from, to, String.valueOf(token), "60minute", false, false);
-            if (data == null || data.dataArrayList == null) return List.of();
+            if (data == null || data.dataArrayList == null || data.dataArrayList.isEmpty()) {
+                log.warn("[MOMENTUM-CANDLE] {} - 4H candle fetch: Kite's call succeeded (no " +
+                                "exception) but returned {} - token={}", symbol,
+                        data == null ? "a null response" : "zero candles", token);
+                return List.of();
+            }
 
             List<MomentumCandidate.Candle> hourly = new ArrayList<>();
             for (Object obj : data.dataArrayList) {
