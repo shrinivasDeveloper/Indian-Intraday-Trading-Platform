@@ -214,7 +214,15 @@ public class MomentumCandleService {
             }
             return (high > 0 && low < Double.MAX_VALUE) ? new double[]{high, low} : new double[]{0, 0};
         } catch (KiteException | Exception e) {
-            log.debug("[MOMENTUM-CANDLE] Failed to fetch today's high/low for {} (non-fatal, " +
+            // FIX (per direct user report: "can't see momentum logs in
+            // Railway, no errors, works locally"). Upgraded from DEBUG
+            // to WARN - if Railway's deployed environment has ANY
+            // environment variable overriding application.yml's
+            // "com.trading: DEBUG" setting (common in production
+            // deployments, outside this codebase's control), a DEBUG
+            // message would be silently suppressed there while still
+            // appearing locally. WARN is visible regardless.
+            log.warn("[MOMENTUM-CANDLE] Failed to fetch today's high/low for {} (non-fatal, " +
                     "will retry next cycle): {}", symbol, e.getMessage());
             return new double[]{0, 0};
         }
@@ -278,7 +286,7 @@ public class MomentumCandleService {
             if (all.size() <= count) return all;
             return all.subList(all.size() - count, all.size());
         } catch (KiteException | Exception e) {
-            log.debug("[MOMENTUM-CANDLE] Failed to fetch candles for {} (non-fatal, will retry " +
+            log.warn("[MOMENTUM-CANDLE] Failed to fetch candles for {} (non-fatal, will retry " +
                     "next cycle): {}", symbol, e.getMessage());
             return List.of();
         }
@@ -455,7 +463,7 @@ public class MomentumCandleService {
             }
             return fourHour;
         } catch (KiteException | Exception e) {
-            log.debug("[MOMENTUM-CANDLE] Failed to fetch 4H candles for {} (non-fatal, will " +
+            log.warn("[MOMENTUM-CANDLE] Failed to fetch 4H candles for {} (non-fatal, will " +
                     "retry next cycle): {}", symbol, e.getMessage());
             return List.of();
         }

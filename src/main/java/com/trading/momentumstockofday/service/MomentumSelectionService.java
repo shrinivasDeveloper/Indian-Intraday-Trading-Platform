@@ -58,8 +58,22 @@ public class MomentumSelectionService {
                         // reading, and could otherwise falsely outrank a
                         // genuinely negative sector with real data.
                         .filter(e -> e.getValue().stockCount() > 0)
+                        // FIX (found via direct user report, confirmed
+                        // precisely against real live data): ranking by
+                        // RAW value always favored any positive sector
+                        // over negative ones, regardless of magnitude -
+                        // e.g. Healthcare at +0.31% ranked above Realty
+                        // at -1.11%, even though Realty's move was more
+                        // than 3x stronger. Per the original spec
+                        // ("select top 3 sectors if green or red... look
+                        // for short and long trade opportunities"), the
+                        // top 3 must be the STRONGEST movers in EITHER
+                        // direction. Now ranks by absolute magnitude -
+                        // direction determination (LONG for positive,
+                        // SHORT for negative, done later via
+                        // sectorChangePct >= 0) is completely unchanged.
                         .sorted((a, b) -> Double.compare(
-                                b.getValue().changePct(), a.getValue().changePct())) // highest first
+                                Math.abs(b.getValue().changePct()), Math.abs(a.getValue().changePct())))
                         .toList();
 
         if (rankedSectors.isEmpty()) {

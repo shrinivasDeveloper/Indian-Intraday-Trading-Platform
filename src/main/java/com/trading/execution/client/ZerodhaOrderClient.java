@@ -222,7 +222,13 @@ public class ZerodhaOrderClient {
             // here would hit the exact same Zerodha "tick size" rejection
             // COLPAL's entry order did. Applied the same fix for full,
             // consistent coverage across every order-price code path.
-            p.triggerPrice = roundToTickSize(newTrigger); // double autoboxed to Double [OK]
+            // Uses the safe 0.05 fallback explicitly (confirmed via
+            // direct search: this method has zero callers anywhere in
+            // the codebase currently, and doesn't have easy access to
+            // the symbol here without an extra lookup) - if this method
+            // is ever wired up for real use, the caller should be
+            // updated to pass the real symbol through for full accuracy.
+            p.triggerPrice = roundToTickSize(newTrigger, 0.05); // double autoboxed to Double [OK]
             p.orderType    = Constants.ORDER_TYPE_SLM;
             // JAR-VERIFIED: modifyOrder(String, OrderParams, String) -> Order
             Order result   = kiteConnect.modifyOrder(orderId, p, Constants.VARIETY_REGULAR);
@@ -375,18 +381,20 @@ public class ZerodhaOrderClient {
         p.transactionType  = txType;
         p.quantity         = qty;                        // int -> Integer autobox [OK]
         p.orderType        = type;
-        // FIX (found via direct user report - real Zerodha rejection):
-        // "Tick size for this script is 0.10. Kindly enter price in the
-        // multiple of tick size" - confirmed real, exact cause: COLPAL's
-        // computed entry price (2032.38) is not a valid multiple of its
-        // 0.10 tick size (2032.38 / 0.10 = 20323.8, not a whole number).
-        // Rounds to the nearest 0.05 before every order submission -
-        // NSE's standard tick size for the vast majority of stocks. Since
-        // 0.10 is an exact multiple of 0.05, this also correctly
-        // satisfies stocks with the less common 0.10 tick size (like
-        // COLPAL), without needing a per-instrument tick-size lookup.
-        p.price            = roundToTickSize(price);     // double -> Double autobox [OK]
-        p.triggerPrice     = roundToTickSize(trigger);    // double -> Double autobox [OK]
+        // FIX (found via direct user report - TWO real Zerodha
+        // rejections, on different stocks with DIFFERENT tick sizes:
+        // COLPAL at 0.10, then POLYCAB at 0.50). Confirmed mathematically
+        // that rounding to a fixed 0.05 does NOT guarantee alignment
+        // with coarser tick sizes - only 1-in-10 multiples of 0.05 also
+        // align to 0.50, so the earlier "round to 0.05" fix was
+        // insufficient for POLYCAB. Now uses the REAL, per-instrument
+        // tick_size field from Kite's own Instrument model (confirmed
+        // via bytecode: Instrument.tick_size is a genuine double field)
+        // - correct for every stock, not just ones with 0.05 or 0.10
+        // tick sizes.
+        double tickSize = getTickSize(symbol);
+        p.price            = roundToTickSize(price, tickSize);     // double -> Double autobox [OK]
+        p.triggerPrice     = roundToTickSize(trigger, tickSize);    // double -> Double autobox [OK]
         p.product          = Constants.PRODUCT_MIS;      // "MIS" [OK]
         p.validity         = Constants.VALIDITY_DAY;     // "DAY" [OK]
         // FIX (confirmed real, not a guess - verified directly from
@@ -410,14 +418,46 @@ public class ZerodhaOrderClient {
         return p;
     }
 
-    /** Rounds to the nearest valid NSE tick size (0.05) - see build()
-     *  above for the full explanation of why this is needed and why
-     *  0.05 is safe for both the common 0.05 and less-common 0.10
-     *  tick-size stocks. */
-    private double roundToTickSize(double price) {
+    // Cache of real tick_size per symbol, resolved once and reused -
+    // avoids re-fetching the full ~9,946-instrument list on every
+    // single order.
+    private final Map<String, Double> tickSizeCache = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Looks up the REAL, per-instrument tick size from Kite's own
+     * Instrument model - confirmed via bytecode this is a genuine field
+     * Kite provides directly, not something that needs guessing. Falls
+     * back to 0.05 (NSE's most common tick size) only if the lookup
+     * itself fails, so this can never leave price completely unrounded.
+     */
+    private double getTickSize(String symbol) {
+        Double cached = tickSizeCache.get(symbol);
+        if (cached != null && cached > 0) return cached;
+        try {
+            List<com.zerodhatech.models.Instrument> instruments = kiteConnect.getInstruments("NSE");
+            for (com.zerodhatech.models.Instrument i : instruments) {
+                if (symbol.equalsIgnoreCase(i.tradingsymbol)) {
+                    double tick = i.tick_size;
+                    if (tick > 0) {
+                        tickSizeCache.put(symbol, tick);
+                        return tick;
+                    }
+                    break;
+                }
+            }
+        } catch (KiteException | Exception e) {
+            log.debug("[AI-NEWS-ORDER] Could not resolve real tick size for {} - falling back " +
+                    "to 0.05: {}", symbol, e.getMessage());
+        }
+        return 0.05; // safe fallback - NSE's most common tick size
+    }
+
+    /** Rounds to the given tick size - now the REAL, per-instrument
+     *  value from Kite (see getTickSize() above), not a fixed guess. */
+    private double roundToTickSize(double price, double tickSize) {
         if (price <= 0) return price; // 0.0 is the correct sentinel for
         // market orders - leave untouched
-        return Math.round(price / 0.05) * 0.05;
+        return Math.round(price / tickSize) * tickSize;
     }
 
     private String doPlace(OrderParams p, String variety) {

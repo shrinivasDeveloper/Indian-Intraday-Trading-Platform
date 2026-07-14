@@ -111,7 +111,7 @@ public class MomentumTradingService {
                     }
                 }
             } catch (KiteException | Exception e) {
-                log.debug("[MOMENTUM-TRADE] Poll attempt {} for order {} failed (will retry): {}",
+                log.warn("[MOMENTUM-TRADE] Poll attempt {} for order {} failed (will retry): {}",
                         attempt, orderId, e.getMessage());
             }
             try {
@@ -387,7 +387,7 @@ public class MomentumTradingService {
             checkAndUpdateTrailingStop(trade, ltp);
             return true; // still active
         } catch (KiteException | Exception e) {
-            log.debug("[MOMENTUM-TRADE] Monitoring check failed for {} (non-fatal, retry next " +
+            log.warn("[MOMENTUM-TRADE] Monitoring check failed for {} (non-fatal, retry next " +
                     "cycle): {}", trade.getSymbol(), e.getMessage());
             return true; // couldn't determine - assume still active, retry next cycle
         }
@@ -420,7 +420,7 @@ public class MomentumTradingService {
                 if (realMargin > 0) return BigDecimal.valueOf(realMargin);
             }
         } catch (KiteException | Exception e) {
-            log.debug("[MOMENTUM-TRADE] Real margin calculation failed for {} - falling back " +
+            log.warn("[MOMENTUM-TRADE] Real margin calculation failed for {} - falling back " +
                     "to conservative full-cash estimate: {}", symbol, e.getMessage());
         }
         return BigDecimal.valueOf(price).multiply(BigDecimal.valueOf(qty));
@@ -492,7 +492,7 @@ public class MomentumTradingService {
             }
             return true;
         } catch (KiteException | Exception e) {
-            log.debug("[MOMENTUM-TRADE] Reconciliation check failed for {} (non-fatal, will " +
+            log.warn("[MOMENTUM-TRADE] Reconciliation check failed for {} (non-fatal, will " +
                     "retry next cycle): {}", trade.getSymbol(), e.getMessage());
             return true; // couldn't determine - assume still valid, retry next cycle
         }
