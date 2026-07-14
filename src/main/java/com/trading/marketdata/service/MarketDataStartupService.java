@@ -29,6 +29,12 @@ public class MarketDataStartupService {
     private final InstrumentCacheService instrumentCache;
     private final MarketDataService      marketDataService;
     private final ParallelWarmupService  parallelWarmup;   // CHANGED: was WarmupService
+    // FIX (per explicit user request: "how can we make websocket feed
+    // matching sector heatmap all stocks" - Option A, expanding the
+    // shared WebSocket subscription for every strategy, not just
+    // Momentum).
+    private final com.trading.sectorheatmap.service.SectorHeatmapDataService sectorHeatmapDataService;
+    private final com.zerodhatech.kiteconnect.KiteConnect kiteConnect;
 
     public void onTokenReady(ZerodhaToken token) {
         log.info("[STARTUP] ⚡ Token ready — starting market data pipeline (parallel warmup)");
@@ -68,8 +74,63 @@ public class MarketDataStartupService {
                 log.info("[STARTUP] Added BankNifty token {} to subscription", bankNiftyToken);
             }
 
+            // FIX (per explicit user request: "how can we make websocket
+            // feed matching sector heatmap all stocks" - Option A).
+            // The Nifty500 list above only covers ~500 stocks, but the
+            // Sector Heatmap tracks the full ~751-stock Nifty Total
+            // Market universe. Momentum (and any future strategy) can
+            // only get live ticks for symbols actually subscribed here -
+            // this expands the SHARED subscription to cover that full
+            // universe, benefiting every strategy, not just Momentum.
+            // Resolves each additional symbol's token directly via
+            // KiteConnect's own Instrument list (confirmed via bytecode
+            // earlier this session: getTradingsymbol()/getInstrument_token()
+            // are genuine, real fields) - a single extra call, made once
+            // at startup, not on any repeated/hot path.
+            int addedFromHeatmap = 0;
+            try {
+                java.util.Set<String> heatmapSymbols = sectorHeatmapDataService.getAllTrackedSymbols();
+                if (heatmapSymbols.isEmpty()) {
+                    log.warn("[STARTUP] Sector Heatmap has no symbols loaded yet - skipping " +
+                            "subscription expansion this startup (Nifty500's {} tokens still " +
+                            "subscribed correctly; heatmap-only stocks will lack live ticks " +
+                            "until the next restart, once the heatmap has data)", fullTokens.size());
+                } else {
+                    java.util.List<com.zerodhatech.models.Instrument> allInstruments =
+                            kiteConnect.getInstruments("NSE");
+                    java.util.Map<String, Long> symbolToToken = new java.util.HashMap<>();
+                    for (com.zerodhatech.models.Instrument inst : allInstruments) {
+                        symbolToToken.put(inst.getTradingsymbol(), inst.getInstrument_token());
+                    }
+                    for (String symbol : heatmapSymbols) {
+                        // FIX: renamed from "token" - that name was
+                        // already the method parameter (ZerodhaToken
+                        // token), causing a real "already defined in
+                        // scope" compile error.
+                        Long instrumentToken = symbolToToken.get(symbol);
+                        if (instrumentToken != null && !fullTokens.contains(instrumentToken)) {
+                            fullTokens.add(instrumentToken);
+                            addedFromHeatmap++;
+                        }
+                    }
+                    log.info("[STARTUP] Expanded subscription with {} additional Sector Heatmap " +
+                            "symbols not already in the Nifty500 list", addedFromHeatmap);
+                }
+                // FIX: KiteException extends java.lang.Throwable directly
+                // (confirmed via bytecode earlier this session), NOT
+                // Exception - "catch (Exception e)" alone does not catch
+                // it, since kiteConnect.getInstruments() above is
+                // declared to throw it. Same class of bug already fixed
+                // once in Hero-Zero tonight - fixed here too.
+            } catch (com.zerodhatech.kiteconnect.kitehttp.exceptions.KiteException | Exception e) {
+                log.warn("[STARTUP] Sector Heatmap subscription expansion failed - continuing " +
+                        "with the base Nifty500 subscription only: {}", e.getMessage());
+            }
+
             quoteTokens = List.of();
-            log.info("[STARTUP] Subscription list: {} tokens", fullTokens.size());
+            log.info("[STARTUP] Subscription list: {} tokens ({} Nifty500 + BankNifty, {} " +
+                            "additional from Sector Heatmap)", fullTokens.size(),
+                    fullTokens.size() - addedFromHeatmap, addedFromHeatmap);
 
         } catch (Exception e) {
             log.warn("[STARTUP] Subscription list build failed — using fallback: {}", e.getMessage());

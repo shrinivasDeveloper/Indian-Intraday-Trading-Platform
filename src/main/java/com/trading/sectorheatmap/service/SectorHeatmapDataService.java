@@ -258,6 +258,19 @@ public class SectorHeatmapDataService {
 
     // -- Query methods for the controller ----------------------------------
 
+    /**
+     * FIX (per explicit user request: "how can we make websocket feed
+     * matching sector heatmap all stocks" - Option A, expanding the
+     * shared WebSocket subscription for every strategy, not just
+     * Momentum). Returns every symbol currently mapped by the Sector
+     * Heatmap (all 751 stocks, the full Nifty Total Market universe) -
+     * used by MarketDataStartupService to subscribe live ticks for the
+     * complete universe, not just the narrower ~500 Nifty500 subset.
+     */
+    public Set<String> getAllTrackedSymbols() {
+        return new java.util.HashSet<>(symbolToSector.keySet());
+    }
+
     public Set<String> getAllSectorNames() {
         return SectorTaxonomy.ALL_22_SECTORS;
     }
