@@ -210,6 +210,13 @@ public class MomentumScheduler {
                         "monitored, per spec)", scanType, fresh.size());
             }
             todaysCandidates = fresh; // REPLACES the previous list entirely - per spec
+            // FIX (per explicit user request: rebuild candle sourcing to
+            // use the live CandleCompleteEvent stream): tell the event
+            // listener which symbols to buffer candles for - it only
+            // buffers symbols Momentum currently tracks, not all ~500
+            // Nifty500 symbols the event stream publishes for.
+            candleService.updateTrackedSymbols(
+                    fresh.stream().map(MomentumCandidate::getSymbol).collect(java.util.stream.Collectors.toSet()));
             return; // let the NEXT tick begin monitoring, keeps each tick simple/fast
         }
 
