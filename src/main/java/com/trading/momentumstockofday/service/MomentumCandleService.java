@@ -34,14 +34,15 @@ import java.util.concurrent.ConcurrentLinkedDeque;
  * genuine, real-time candles built from live WebSocket ticks, not
  * polled historical data.
  *
- * IMPORTANT, DELIBERATE EXCEPTION: the 4-hour VWAP/EMA(200) fetch
- * (fetch4HourCandles) STILL uses kiteConnect.getHistoricalData() with
- * its 220-day lookback - this is a genuinely different use case
- * (multi-month backward-looking data) that historical_data() is
- * documented to handle correctly; the unreliability found was
- * specifically about TODAY's data. A live-only buffer could never
- * accumulate 800 hours of 60-minute data before restarting, which
- * would permanently break the trend filter instead of fixing anything.
+ * IMPORTANT, DELIBERATE EXCEPTION: the VWAP/EMA(200) trend-filter
+ * fetch (fetch5MinuteHistoryCandles) STILL uses kiteConnect.
+ * getHistoricalData() with a 10-day lookback - this is a genuinely
+ * different use case (multi-day backward-looking data) that
+ * historical_data() is documented to handle correctly; the
+ * unreliability found was specifically about TODAY's data. A
+ * live-only buffer (bounded to a small window for consolidation
+ * purposes) could never hold the 200 candles' worth of history this
+ * filter genuinely needs.
  *
  * ALL DECISION LOGIC (consolidation validity, breakout+volume
  * confirmation, VWAP/EMA formulas, trend filter gates) is preserved
@@ -400,34 +401,40 @@ public class MomentumCandleService {
 
     /**
      * Checks BOTH mandatory trend filters together, per explicit spec:
-     *   VWAP (4H): LONG needs price above 4H VWAP, SHORT needs price below.
-     *   EMA (4H):  LONG needs 20>50>200, SHORT needs 20<50<200.
+     *   VWAP: LONG needs price above VWAP, SHORT needs price below.
+     *   EMA:  LONG needs 20>50>200, SHORT needs 20<50<200.
      * Rejects (passed=false) if EITHER condition fails - both are
      * mandatory, checked together as the final gate immediately before
      * trade execution, per spec: "applied after all existing
      * validations and immediately before trade execution."
+     *
+     * FIX (per explicit user request: "change it to 5 minutes"). Now
+     * sourced from 5-minute candles directly, instead of aggregating
+     * 60-minute candles into synthetic 4-hour ones. ONLY the candle
+     * timeframe changed - the VWAP/EMA formulas, the 200-candle
+     * requirement, and the gate logic below are completely unchanged.
      */
     public TrendFilterResult checkTrendFilters(String symbol, String direction, double currentPrice) {
-        List<MomentumCandidate.Candle> fourHourCandles = fetch4HourCandles(symbol);
+        List<MomentumCandidate.Candle> trendCandles = fetch5MinuteHistoryCandles(symbol);
         // Need at least 200 candles for a genuine EMA(200) - per spec's
         // own mandatory requirement; a shorter series would produce a
         // misleading, not-yet-converged EMA(200) value.
-        if (fourHourCandles.size() < 200) {
-            return new TrendFilterResult(false, "Not enough 4H candle history for EMA(200) - " +
-                    "have " + fourHourCandles.size() + ", need 200", 0, 0, 0, 0);
+        if (trendCandles.size() < 200) {
+            return new TrendFilterResult(false, "Not enough 5-minute candle history for EMA(200) - " +
+                    "have " + trendCandles.size() + ", need 200", 0, 0, 0, 0);
         }
 
-        double vwap4h = computeVwap(fourHourCandles);
-        double ema20 = computeEma(fourHourCandles, 20);
-        double ema50 = computeEma(fourHourCandles, 50);
-        double ema200 = computeEma(fourHourCandles, 200);
+        double vwap4h = computeVwap(trendCandles);
+        double ema20 = computeEma(trendCandles, 20);
+        double ema50 = computeEma(trendCandles, 50);
+        double ema200 = computeEma(trendCandles, 200);
 
         boolean isLong = "LONG".equals(direction);
 
         boolean vwapOk = isLong ? currentPrice > vwap4h : currentPrice < vwap4h;
         if (!vwapOk) {
             return new TrendFilterResult(false, String.format(
-                    "4H VWAP filter FAILED: price=%.2f %s required side of VWAP=%.2f (need %s)",
+                    "5-min VWAP filter FAILED: price=%.2f %s required side of VWAP=%.2f (need %s)",
                     currentPrice, isLong ? "not above" : "not below", vwap4h,
                     isLong ? "price > VWAP" : "price < VWAP"),
                     vwap4h, ema20, ema50, ema200);
@@ -436,69 +443,59 @@ public class MomentumCandleService {
         boolean emaOk = isLong ? (ema20 > ema50 && ema50 > ema200) : (ema20 < ema50 && ema50 < ema200);
         if (!emaOk) {
             return new TrendFilterResult(false, String.format(
-                    "4H EMA trend filter FAILED: EMA20=%.2f EMA50=%.2f EMA200=%.2f - need %s",
+                    "5-min EMA trend filter FAILED: EMA20=%.2f EMA50=%.2f EMA200=%.2f - need %s",
                     ema20, ema50, ema200, isLong ? "20>50>200" : "20<50<200"),
                     vwap4h, ema20, ema50, ema200);
         }
 
         return new TrendFilterResult(true, String.format(
-                "4H trend filters PASSED: VWAP=%.2f (price %s) | EMA20=%.2f EMA50=%.2f " +
+                "5-min trend filters PASSED: VWAP=%.2f (price %s) | EMA20=%.2f EMA50=%.2f " +
                         "EMA200=%.2f (%s)", vwap4h, isLong ? "above" : "below", ema20, ema50, ema200,
                 isLong ? "20>50>200" : "20<50<200"), vwap4h, ema20, ema50, ema200);
     }
 
     /**
-     * UNCHANGED from the previous version - deliberately still uses
-     * historical_data() (see class-level Javadoc). Fetches 60-minute
-     * candles (220 calendar days - confirmed via Kite's own documented
-     * API limits to be safely within the 400-day maximum for this
-     * interval) and aggregates every 4 consecutive ones into one
-     * synthetic 4-hour candle.
+     * FIX (per explicit user request: "change it to 5 minutes...
+     * apart from this dont change anything in the strategy"). Fetches
+     * 5-minute candles directly (10 calendar days - verified safely
+     * within Kite's own documented 100-day maximum for this interval,
+     * comfortably producing 500+ real candles, well above the 200
+     * needed for EMA(200)) - no aggregation needed, since 5-minute is
+     * already the desired granularity. Still deliberately uses
+     * historical_data() (see class-level Javadoc) rather than the live
+     * event-driven buffer, since 200 candles of backward-looking
+     * history is the same genuine backtesting-style use case
+     * historical_data() is documented to handle correctly - only the
+     * SAME-DAY, real-time consolidation candles needed the live rebuild.
      */
-    private List<MomentumCandidate.Candle> fetch4HourCandles(String symbol) {
+    private List<MomentumCandidate.Candle> fetch5MinuteHistoryCandles(String symbol) {
         try {
             long token = resolveToken(symbol);
             if (token == 0) return List.of();
 
             LocalDateTime now = LocalDateTime.now(IST);
             Date to = toDate(now);
-            Date from = toDate(now.minusDays(220));
+            Date from = toDate(now.minusDays(10));
 
             HistoricalData data = kiteConnect.getHistoricalData(
-                    from, to, String.valueOf(token), "60minute", false, false);
+                    from, to, String.valueOf(token), "5minute", false, false);
             if (data == null || data.dataArrayList == null || data.dataArrayList.isEmpty()) {
-                log.warn("[MOMENTUM-CANDLE] {} - 4H candle fetch: Kite's call succeeded (no " +
-                                "exception) but returned {} - token={}", symbol,
+                log.warn("[MOMENTUM-CANDLE] {} - 5-min trend-filter candle fetch: Kite's call " +
+                                "succeeded (no exception) but returned {} - token={}", symbol,
                         data == null ? "a null response" : "zero candles", token);
                 return List.of();
             }
 
-            List<MomentumCandidate.Candle> hourly = new ArrayList<>();
+            List<MomentumCandidate.Candle> candles = new ArrayList<>();
             for (Object obj : data.dataArrayList) {
                 HistoricalData d = (HistoricalData) obj;
-                hourly.add(new MomentumCandidate.Candle(d.open, d.high, d.low, d.close,
+                candles.add(new MomentumCandidate.Candle(d.open, d.high, d.low, d.close,
                         d.timeStamp, d.volume));
             }
-
-            // Aggregate every 4 consecutive 60-minute candles into one
-            // synthetic 4-hour candle: open=first, high=max, low=min,
-            // close=last, volume=sum - the standard higher-timeframe
-            // aggregation approach.
-            List<MomentumCandidate.Candle> fourHour = new ArrayList<>();
-            for (int i = 0; i + 4 <= hourly.size(); i += 4) {
-                List<MomentumCandidate.Candle> group = hourly.subList(i, i + 4);
-                double open = group.get(0).open();
-                double close = group.get(group.size() - 1).close();
-                double high = group.stream().mapToDouble(MomentumCandidate.Candle::high).max().orElse(0);
-                double low = group.stream().mapToDouble(MomentumCandidate.Candle::low).min().orElse(0);
-                long volume = group.stream().mapToLong(MomentumCandidate.Candle::volume).sum();
-                fourHour.add(new MomentumCandidate.Candle(open, high, low, close,
-                        group.get(0).timestamp(), volume));
-            }
-            return fourHour;
+            return candles;
         } catch (KiteException | Exception e) {
-            log.warn("[MOMENTUM-CANDLE] Failed to fetch 4H candles for {} (non-fatal, will " +
-                    "retry next cycle): {}", symbol, e.getMessage());
+            log.warn("[MOMENTUM-CANDLE] Failed to fetch 5-min trend-filter candles for {} " +
+                    "(non-fatal, will retry next cycle): {}", symbol, e.getMessage());
             return List.of();
         }
     }
