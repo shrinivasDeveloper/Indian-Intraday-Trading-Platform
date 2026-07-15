@@ -96,33 +96,56 @@ public class MarketDataStartupService {
                             "subscribed correctly; heatmap-only stocks will lack live ticks " +
                             "until the next restart, once the heatmap has data)", fullTokens.size());
                 } else {
-                    java.util.List<com.zerodhatech.models.Instrument> allInstruments =
-                            kiteConnect.getInstruments("NSE");
-                    java.util.Map<String, Long> symbolToToken = new java.util.HashMap<>();
-                    for (com.zerodhatech.models.Instrument inst : allInstruments) {
-                        symbolToToken.put(inst.getTradingsymbol(), inst.getInstrument_token());
-                    }
-                    for (String symbol : heatmapSymbols) {
-                        // FIX: renamed from "token" - that name was
-                        // already the method parameter (ZerodhaToken
-                        // token), causing a real "already defined in
-                        // scope" compile error.
-                        Long instrumentToken = symbolToToken.get(symbol);
-                        if (instrumentToken != null && !fullTokens.contains(instrumentToken)) {
-                            fullTokens.add(instrumentToken);
-                            addedFromHeatmap++;
+                    // FIX (per explicit user request: apply the same
+                    // proven retry pattern already validated for
+                    // Momentum's daily-candle bootstrap). Confirmed real
+                    // problem from production logs: this call was
+                    // failing during the same startup rate-limit window
+                    // that affects multiple services (InstrumentCacheService,
+                    // AutoStockSelectionEngine), silently reverting to
+                    // the base 503-token subscription instead of the
+                    // full ~751. Now makes up to 3 dedicated attempts,
+                    // 15 seconds apart, before giving up - the same
+                    // timing already proven to work for Momentum.
+                    java.util.List<com.zerodhatech.models.Instrument> allInstruments = null;
+                    for (int attempt = 1; attempt <= 3; attempt++) {
+                        try {
+                            allInstruments = kiteConnect.getInstruments("NSE");
+                            if (allInstruments != null && !allInstruments.isEmpty()) break;
+                        } catch (com.zerodhatech.kiteconnect.kitehttp.exceptions.KiteException | Exception e) {
+                            log.warn("[STARTUP] Sector Heatmap expansion fetch attempt {}/3 " +
+                                    "failed: {}", attempt, e.getMessage());
+                        }
+                        if (attempt < 3) {
+                            try { Thread.sleep(15_000); } catch (InterruptedException ie) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
                         }
                     }
-                    log.info("[STARTUP] Expanded subscription with {} additional Sector Heatmap " +
-                            "symbols not already in the Nifty500 list", addedFromHeatmap);
+
+                    if (allInstruments == null || allInstruments.isEmpty()) {
+                        log.warn("[STARTUP] Sector Heatmap subscription expansion could not " +
+                                        "fetch instruments after 3 dedicated attempts - continuing " +
+                                        "with the base Nifty500 subscription only ({} tokens)",
+                                fullTokens.size());
+                    } else {
+                        java.util.Map<String, Long> symbolToToken = new java.util.HashMap<>();
+                        for (com.zerodhatech.models.Instrument inst : allInstruments) {
+                            symbolToToken.put(inst.getTradingsymbol(), inst.getInstrument_token());
+                        }
+                        for (String symbol : heatmapSymbols) {
+                            Long instrumentToken = symbolToToken.get(symbol);
+                            if (instrumentToken != null && !fullTokens.contains(instrumentToken)) {
+                                fullTokens.add(instrumentToken);
+                                addedFromHeatmap++;
+                            }
+                        }
+                        log.info("[STARTUP] Expanded subscription with {} additional Sector " +
+                                "Heatmap symbols not already in the Nifty500 list", addedFromHeatmap);
+                    }
                 }
-                // FIX: KiteException extends java.lang.Throwable directly
-                // (confirmed via bytecode earlier this session), NOT
-                // Exception - "catch (Exception e)" alone does not catch
-                // it, since kiteConnect.getInstruments() above is
-                // declared to throw it. Same class of bug already fixed
-                // once in Hero-Zero tonight - fixed here too.
-            } catch (com.zerodhatech.kiteconnect.kitehttp.exceptions.KiteException | Exception e) {
+            } catch (Exception e) {
                 log.warn("[STARTUP] Sector Heatmap subscription expansion failed - continuing " +
                         "with the base Nifty500 subscription only: {}", e.getMessage());
             }
