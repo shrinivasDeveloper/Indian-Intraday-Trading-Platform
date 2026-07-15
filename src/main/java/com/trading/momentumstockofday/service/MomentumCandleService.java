@@ -9,7 +9,9 @@ import com.zerodhatech.kiteconnect.kitehttp.exceptions.KiteException;
 import com.zerodhatech.models.HistoricalData;
 import com.zerodhatech.models.Instrument;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -58,9 +60,124 @@ public class MomentumCandleService {
     private final KiteConnect kiteConnect;
     private final MomentumConfig config;
 
-    public MomentumCandleService(KiteConnect kiteConnect, MomentumConfig config) {
+    private final com.trading.sectorheatmap.service.SectorHeatmapDataService sectorHeatmapDataService;
+
+    public MomentumCandleService(KiteConnect kiteConnect, MomentumConfig config,
+                                 com.trading.sectorheatmap.service.SectorHeatmapDataService sectorHeatmapDataService) {
         this.kiteConnect = kiteConnect;
         this.config = config;
+        this.sectorHeatmapDataService = sectorHeatmapDataService;
+    }
+
+    /**
+     * FIX (per explicit user request: "not 500 symbol all stocks please"
+     * - a full, upfront bootstrap covering the ENTIRE Sector Heatmap
+     * universe, ~751 stocks, not just the narrower ~500 Nifty500
+     * subset AI itself covers). Matches AI's own proven bootstrap
+     * pattern (fetch once at startup, throttled, with progress logging)
+     * but is Momentum's own, completely independent implementation -
+     * zero calls into AI's actual AiMarketDataService bean, which
+     * remains unsafe to depend on (it's @ConditionalOnProperty and
+     * would not exist at all if AI is ever disabled).
+     *
+     * Delayed 150 seconds (longer than AI's own 90-second delay) so
+     * this genuinely runs AFTER both AI's and any other bootstrap
+     * work, avoiding competing for Zerodha's API rate limits during
+     * the busiest part of startup.
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    @Async("tradingExecutor")
+    public void bootstrapDailyCandles() {
+        // FIX (confirmed real root cause from production logs): the
+        // previous 150-second delay only waited past AI's own 90-second
+        // STARTING delay - but AI's bootstrap then runs continuously for
+        // ~2.5 more minutes after that, making ~1500 historical-data
+        // calls the entire time. Momentum's retry window was landing
+        // squarely in the MIDDLE of AI's still-actively-running
+        // bootstrap, not after it finished - explaining why every retry
+        // attempt failed despite the backoff logic itself working
+        // correctly. Extended to 360 seconds (6 minutes) - genuinely
+        // past AI's full bootstrap duration (90s delay + ~2.5min
+        // runtime + safety margin), not just its starting point.
+        try { Thread.sleep(360_000); } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+
+        Set<String> symbols = sectorHeatmapDataService.getAllTrackedSymbols();
+        if (symbols.isEmpty()) {
+            log.warn("[MOMENTUM-CANDLE] Daily candle bootstrap skipped - Sector Heatmap has " +
+                    "no symbols loaded yet. The existing cache-on-first-use fallback in " +
+                    "fetchDailyCandles() will still fetch on demand for any symbol actually " +
+                    "selected as a candidate.");
+            return;
+        }
+
+        // FIX (confirmed real bug found from production logs: "bootstrap
+        // complete - 0/751 symbols cached"). The instrument token cache's
+        // backoff (5 minutes) was longer than the ENTIRE bootstrap loop's
+        // runtime (~3.75 minutes for 751 symbols at 300ms each) -
+        // meaning a single early failure guaranteed the cache could
+        // never recover within the same bootstrap run, wasting the
+        // entire loop. This dedicated, upfront retry gives the
+        // instrument cache a genuine, focused chance to populate BEFORE
+        // committing the whole 751-symbol loop to it - up to 3
+        // attempts, 15 seconds apart (enough time for a temporary
+        // rate-limit to clear, without materially delaying the
+        // bootstrap's own start).
+        Map<String, Long> tokenCache = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            tokenCache = getOrBuildInstrumentTokenCache();
+            if (!tokenCache.isEmpty()) break;
+            if (attempt < 3) {
+                log.warn("[MOMENTUM-CANDLE] Instrument cache still empty (attempt {}/3) - " +
+                        "waiting 15s before the bootstrap's dedicated retry", attempt);
+                try { Thread.sleep(15_000); } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
+        if (tokenCache == null || tokenCache.isEmpty()) {
+            log.warn("[MOMENTUM-CANDLE] Daily candle bootstrap could not populate the " +
+                    "instrument cache after 3 dedicated attempts - skipping this bootstrap run " +
+                    "entirely. The existing cache-on-first-use fallback in fetchDailyCandles() " +
+                    "will still fetch on demand for any symbol actually selected as a candidate " +
+                    "later, once the rate limit has genuinely cleared.");
+            return;
+        }
+
+        log.info("[MOMENTUM-CANDLE] Daily candle bootstrap starting: {} symbols (full Sector " +
+                "Heatmap universe, ~1 year each)", symbols.size());
+
+        int loaded = 0;
+        LocalDate today = LocalDate.now(IST);
+        for (String symbol : symbols) {
+            try {
+                List<MomentumCandidate.Candle> daily = fetchDailyCandlesFromApi(symbol);
+                if (!daily.isEmpty()) {
+                    dailyCandleCache.put(symbol, daily);
+                    dailyCandleCacheDate.put(symbol, today);
+                    loaded++;
+                }
+                if (loaded % 50 == 0 && loaded > 0) {
+                    log.info("[MOMENTUM-CANDLE] Daily candle bootstrap progress: {}/{}",
+                            loaded, symbols.size());
+                }
+                // Throttle to avoid Zerodha rate limits - same interval
+                // AI's own bootstrap uses.
+                Thread.sleep(300);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                log.debug("[MOMENTUM-CANDLE] Daily candle bootstrap failed for {}: {}",
+                        symbol, e.getMessage());
+            }
+        }
+
+        log.info("[MOMENTUM-CANDLE] Daily candle bootstrap complete - {}/{} symbols cached",
+                loaded, symbols.size());
     }
 
     // ========================================================================
@@ -99,6 +216,44 @@ public class MomentumCandleService {
     private final Set<String> trackedSymbols = ConcurrentHashMap.newKeySet();
 
     private volatile LocalDate lastBufferResetDate = null;
+
+    // FIX (per explicit user request: "same bootstrap... reuse in
+    // momentum for daily candle fetch and store"). Momentum's OWN,
+    // independent cache-once-per-day pattern for the daily S/R gate -
+    // matching AI's proven "fetch once, reuse throughout the day"
+    // approach, but built independently here (NOT reusing AI's actual
+    // AiMarketDataService bean, which is unsafe to depend on since it's
+    // @ConditionalOnProperty(ai.trading.enabled) and would not exist at
+    // all if AI is ever disabled - Momentum must never be able to fail
+    // to start just because AI is off). Unlike AI's full upfront
+    // bootstrap of all ~500 symbols, this is a lazy, cache-on-first-use
+    // pattern - appropriate since Momentum's tracked symbols change
+    // every 15 minutes (only ~9 at a time), so pre-fetching symbols
+    // that may never even be selected would be wasted work.
+    private final Map<String, List<MomentumCandidate.Candle>> dailyCandleCache =
+            new ConcurrentHashMap<>();
+    private final Map<String, LocalDate> dailyCandleCacheDate = new ConcurrentHashMap<>();
+
+    // FIX (confirmed real bug found from production logs: resolveToken()
+    // was re-fetching the ENTIRE ~9,929-instrument NSE list from Kite on
+    // EVERY single call - and during the 751-symbol daily-candle
+    // bootstrap, this happened 751 times in rapid succession, almost
+    // certainly hitting Zerodha's rate limits and causing every single
+    // symbol resolution to fail, confirmed by the "null" exception
+    // message pattern seen for even the most well-known, definitely-real
+    // stocks like ICICIBANK and TATASTEEL). Caches the full symbol-to-
+    // token map, fetched once and reused, refreshed once per day -
+    // matching the same proven caching principle already used elsewhere
+    // tonight (the daily candle cache itself, and ZerodhaOrderClient's
+    // tick-size cache).
+    private volatile Map<String, Long> instrumentTokenCache = null;
+    private volatile long instrumentTokenCacheLastFailureMs = 0;
+    private static final long INSTRUMENT_CACHE_BACKOFF_MS = 10_000; // 10 seconds - short enough
+    // for the bootstrap's own dedicated 3-attempt retry loop (15 seconds apart) to make
+    // genuinely fresh attempts each time, while still preventing rapid-fire spam
+    // elsewhere; the dedicated retry loop is now the primary recovery mechanism, this
+    // is just a secondary safety net for calls outside that loop
+    private volatile LocalDate instrumentTokenCacheDate = null;
 
     // Plenty for the 2-8 candle consolidation window plus the volatility-
     // comparison buffer (maxConsolidationCandles + 3) with comfortable margin.
@@ -183,6 +338,12 @@ public class MomentumCandleService {
             fiveMinBuffers.clear();
             dayHighLowTracker.clear();
             priorDayHighLowTracker.clear();
+            // FIX: clear the daily-candle cache too, per the same
+            // caching pattern added for the S/R gate - prevents
+            // unbounded memory growth from stale entries accumulating
+            // across many trading days.
+            dailyCandleCache.clear();
+            dailyCandleCacheDate.clear();
             lastBufferResetDate = today;
             log.info("[MOMENTUM-CANDLE] New trading day - live candle buffers reset");
         }
@@ -384,17 +545,68 @@ public class MomentumCandleService {
 
     private long resolveToken(String symbol) {
         try {
+            Map<String, Long> cache = getOrBuildInstrumentTokenCache();
+            Long token = cache.get(symbol.toUpperCase());
+            return token != null ? token : 0L;
+        } catch (Exception e) {
+            log.warn("[MOMENTUM-CANDLE] Could not resolve instrument token for {}: {}",
+                    symbol, e.getMessage());
+            return 0L;
+        }
+    }
+
+    /**
+     * FIX (confirmed real bug found from production logs): builds the
+     * symbol-to-token map ONCE per day and reuses it for every lookup,
+     * instead of the previous behavior of calling
+     * kiteConnect.getInstruments("NSE") fresh on every single
+     * resolveToken() call - which, during the 751-symbol bootstrap,
+     * meant 751 rapid-fire calls to fetch the entire ~9,929-instrument
+     * NSE list, almost certainly triggering Zerodha's rate limits and
+     * causing every single symbol to fail resolution (confirmed by the
+     * "null" exception message seen for even the most liquid, definitely-
+     * real stocks). Thread-safe via double-checked locking on the same
+     * daily-refresh principle already used for the candle cache.
+     */
+    private synchronized Map<String, Long> getOrBuildInstrumentTokenCache() {
+        LocalDate today = LocalDate.now(IST);
+        if (instrumentTokenCache != null && today.equals(instrumentTokenCacheDate)) {
+            return instrumentTokenCache;
+        }
+
+        // FIX (confirmed real gap from production logs: the first fetch
+        // failed due to a platform-wide rate-limit collision at
+        // startup - multiple services all calling getInstruments()
+        // simultaneously - and without this backoff, every subsequent
+        // call in the 751-symbol bootstrap loop retried IMMEDIATELY,
+        // hammering the still-rate-limited endpoint for the entire
+        // bootstrap duration instead of giving it time to recover).
+        long msSinceLastFailure = System.currentTimeMillis() - instrumentTokenCacheLastFailureMs;
+        if (instrumentTokenCacheLastFailureMs > 0 && msSinceLastFailure < INSTRUMENT_CACHE_BACKOFF_MS) {
+            return instrumentTokenCache != null ? instrumentTokenCache : Map.of();
+        }
+
+        try {
             List<Instrument> instruments = kiteConnect.getInstruments("NSE");
+            Map<String, Long> fresh = new ConcurrentHashMap<>();
             for (Instrument i : instruments) {
-                if (symbol.equalsIgnoreCase(i.getTradingsymbol())) {
-                    return i.getInstrument_token();
+                if (i.getTradingsymbol() != null) {
+                    fresh.put(i.getTradingsymbol().toUpperCase(), i.getInstrument_token());
                 }
             }
+            instrumentTokenCache = fresh;
+            instrumentTokenCacheDate = today;
+            instrumentTokenCacheLastFailureMs = 0; // clear any prior backoff on success
+            log.info("[MOMENTUM-CANDLE] Instrument token cache refreshed - {} symbols cached " +
+                    "for today", fresh.size());
+            return fresh;
         } catch (KiteException | Exception e) {
-            log.warn("[MOMENTUM-CANDLE] Could not resolve instrument token for {} (needed only " +
-                    "for the 4H historical VWAP/EMA fetch): {}", symbol, e.getMessage());
+            instrumentTokenCacheLastFailureMs = System.currentTimeMillis();
+            log.warn("[MOMENTUM-CANDLE] Failed to refresh instrument token cache - backing off " +
+                            "for {} seconds before retrying (non-fatal): {}",
+                    INSTRUMENT_CACHE_BACKOFF_MS / 1000, e.getMessage());
+            return instrumentTokenCache != null ? instrumentTokenCache : Map.of();
         }
-        return 0L;
     }
 
     private Date toDate(LocalDateTime ldt) {
@@ -548,5 +760,483 @@ public class MomentumCandleService {
             ema = (close - ema) * multiplier + ema;
         }
         return ema;
+    }
+
+    // ========================================================================
+    // NEW GATE (per explicit user request): Daily Support/Resistance and
+    // Trendline validation - a genuinely INDEPENDENT, additional gate.
+    // Does NOT modify evaluate(), checkConsolidationValidity(),
+    // checkTrendFilters(), or any other existing method in this file -
+    // purely additive. Fetches its own 1-year Daily data independently
+    // (rather than reusing AI's data, since AI's actual daily-candle
+    // storage file was not available here to verify safely - per the
+    // explicit instruction not to risk any interference with AI).
+    // ========================================================================
+
+    public record HigherTimeframeGateResult(boolean passed, String reason) {}
+
+    /**
+     * Checks whether the daily price structure supports the configured
+     * minimum Risk:Reward before allowing a trade, per explicit spec:
+     *   LONG:  nearest daily resistance (horizontal or descending
+     *          trendline) must be far enough above entry to allow the
+     *          configured R:R - UNLESS price has already broken that
+     *          resistance with a strong move, or broken-and-retested it
+     *          as new support.
+     *   SHORT: mirror image, using support and ascending trendlines.
+     * Called ONLY from enterBreakout() (once per actual trade attempt,
+     * the same place the existing VWAP/EMA trend filter runs) - never
+     * from the 30-second monitoring loop or the 15-minute scan, so this
+     * cannot introduce any latency to scanning or monitoring.
+     */
+    public HigherTimeframeGateResult checkHigherTimeframeGate(String symbol, String direction,
+                                                              double entry, double riskPerShare) {
+        List<MomentumCandidate.Candle> daily = fetchDailyCandles(symbol);
+        if (daily.size() < 30) {
+            // Not enough daily history to identify meaningful structure -
+            // fail safe by rejecting, rather than trading blind.
+            return new HigherTimeframeGateResult(false,
+                    "Not enough daily candle history for S/R analysis - have " +
+                            daily.size() + ", need at least 30");
+        }
+
+        boolean isLong = "LONG".equals(direction);
+        double minRequiredMove = riskPerShare * config.getRiskRewardRatio();
+
+        // FIX (per explicit user request: "use the most technically
+        // sound and production-ready approach rather than introducing
+        // arbitrary hardcoded values"). ATR(14) is the data-driven,
+        // volatility-normalized basis for every threshold below -
+        // a stock's OWN natural noise level, not a fixed constant
+        // applied identically to every stock regardless of behavior.
+        double atr = computeDailyAtr(daily, 14);
+        if (atr <= 0) {
+            return new HigherTimeframeGateResult(false,
+                    "Could not compute a valid ATR from daily data - cannot assess structure " +
+                            "reliably");
+        }
+
+        // Major levels via clustering (per explicit user request: "not
+        // every swing high or swing low... use a robust method... such
+        // as multiple confirmations, clustering"). Groups nearby swing
+        // points within an ATR-based tolerance (not a fixed %), keeps
+        // only clusters with 2+ touches - the minimal, standard
+        // definition of genuine support/resistance: a level touched
+        // only once is just a swing point, not a level the market has
+        // shown repeated interest in.
+        List<Double> majorResistances = findMajorLevels(daily, atr, true);
+        List<Double> majorSupports = findMajorLevels(daily, atr, false);
+        Double trendlineLevel = isLong
+                ? projectDescendingTrendline(daily, atr)
+                : projectAscendingTrendline(daily, atr);
+
+        Double nearestHorizontal = isLong
+                ? majorResistances.stream().filter(h -> h > entry).min(Double::compareTo).orElse(null)
+                : majorSupports.stream().filter(l -> l < entry).max(Double::compareTo).orElse(null);
+
+        Double nearestLevel = combineNearest(isLong, nearestHorizontal, trendlineLevel, entry);
+
+        if (nearestLevel == null) {
+            return new HigherTimeframeGateResult(true,
+                    "No significant daily " + (isLong ? "resistance" : "support") +
+                            " found within range - path is clear");
+        }
+
+        double availableMove = isLong ? nearestLevel - entry : entry - nearestLevel;
+        boolean sufficientRoom = availableMove >= minRequiredMove;
+
+        if (sufficientRoom) {
+            return new HigherTimeframeGateResult(true, String.format(
+                    "Sufficient room to nearest major daily %s at %.2f (%.2f available, %.2f " +
+                            "required for %.1f:1 R:R)", isLong ? "resistance" : "support", nearestLevel,
+                    availableMove, minRequiredMove, config.getRiskRewardRatio()));
+        }
+
+        // FIX (per explicit user request: "do not hardcode a value such
+        // as 0.5%... implement a technically sound method"). A breakout
+        // is "strong" when price has moved beyond the level by at least
+        // one ATR - a standard, volatility-normalized measure of a
+        // genuinely significant move, not an arbitrary fixed percentage
+        // applied identically regardless of the stock's own behavior.
+        boolean alreadyBrokenStrong = isLong
+                ? (entry - nearestLevel) >= atr
+                : (nearestLevel - entry) >= atr;
+
+        // FIX (per explicit user request: "avoid assumptions such as a
+        // 10-day lookback or 0.5% tolerance... generic, production-ready
+        // retest validation"). Finds the ACTUAL breakout candle (the
+        // first daily close beyond the level, searched across the full
+        // fetched history, not a fixed window) and checks whether price
+        // has genuinely held on the correct side since that specific
+        // point, using the same ATR-based tolerance throughout.
+        boolean retestHolding = checkRetestHolding(daily, nearestLevel, isLong, atr);
+
+        // FIX (per explicit user request, SHORT trade rejection
+        // specifically: "implement actual rejection detection using
+        // appropriate price action... visible bearish rejection"). For
+        // SHORT, requires an explicit rejection candle at the retest -
+        // a candle whose wick reaches toward/through the broken level
+        // (upper wick, since this is resistance-from-below) while its
+        // CLOSE stays back on the correct side - a genuine price-action
+        // rejection pattern, not merely "closes have stayed below."
+        // LONG keeps the "holding above" check per the prompt's own
+        // differentiated wording (LONG says "holding above", SHORT
+        // specifically says "gets rejected").
+        boolean rejectionConfirmed = isLong
+                ? retestHolding
+                : checkRejectionCandle(daily, nearestLevel, atr);
+
+        if (alreadyBrokenStrong) {
+            return new HigherTimeframeGateResult(true, String.format(
+                    "Nearest major daily %s at %.2f is close (%.2f available, %.2f required), " +
+                            "but price has ALREADY broken it by >=1x ATR (%.2f) - allowed per strong-" +
+                            "breakout exception", isLong ? "resistance" : "support", nearestLevel,
+                    availableMove, minRequiredMove, atr));
+        }
+
+        if (rejectionConfirmed) {
+            return new HigherTimeframeGateResult(true, String.format(
+                    "Nearest major daily %s at %.2f is close (%.2f available, %.2f required), " +
+                            "but price broke it and %s - allowed per retest-confirmation exception",
+                    isLong ? "resistance" : "support", nearestLevel, availableMove, minRequiredMove,
+                    isLong ? "is holding above it (now support)"
+                            : "was rejected on retest (bearish rejection candle confirmed)"));
+        }
+
+        return new HigherTimeframeGateResult(false, String.format(
+                "Nearest major daily %s at %.2f is too close (only %.2f available, need %.2f " +
+                        "for %.1f:1 R:R) - not yet broken by a strong (>=1x ATR) move, no retest " +
+                        "confirmation", isLong ? "resistance" : "support", nearestLevel, availableMove,
+                minRequiredMove, config.getRiskRewardRatio()));
+    }
+
+    /** Picks the CLOSER of the horizontal level and the trendline level
+     *  (whichever constrains the available room more), or whichever one
+     *  exists if only one is present. Neither being present returns null. */
+    private Double combineNearest(boolean isLong, Double horizontal, Double trendline, double entry) {
+        if (horizontal == null) return trendline;
+        if (trendline == null) return horizontal;
+        return isLong ? Math.min(horizontal, trendline) : Math.max(horizontal, trendline);
+    }
+
+    /**
+     * Standard ATR(14) over daily candles - the same True Range formula
+     * used everywhere else in technical analysis: max of (high-low),
+     * |high-prevClose|, |low-prevClose|, averaged over the period.
+     * Independently implemented here (not reused from AI) to preserve
+     * Momentum's required independence.
+     */
+    private double computeDailyAtr(List<MomentumCandidate.Candle> daily, int period) {
+        if (daily.size() < period + 1) return 0;
+        int start = daily.size() - period;
+        double sumTr = 0;
+        for (int i = start; i < daily.size(); i++) {
+            double high = daily.get(i).high();
+            double low = daily.get(i).low();
+            double prevClose = daily.get(i - 1).close();
+            double tr = Math.max(high - low, Math.max(Math.abs(high - prevClose), Math.abs(low - prevClose)));
+            sumTr += tr;
+        }
+        return sumTr / period;
+    }
+
+    /**
+     * FIX (per explicit user request: robust major-level identification
+     * via clustering, not raw swing points). Detects raw swing points
+     * (standard 3-candle-window swing high/low), then CLUSTERS nearby
+     * ones together using an ATR-based tolerance - price zones within
+     * roughly half an ATR of each other are treated as the same level,
+     * since that's within the stock's own normal daily noise. Only
+     * clusters with 2+ distinct touches are kept as "major" - a level
+     * touched only once is just a swing point, not genuine support or
+     * resistance by definition (which requires the market to have
+     * shown repeated interest at that price).
+     */
+    private List<Double> findMajorLevels(List<MomentumCandidate.Candle> daily, double atr, boolean resistance) {
+        int window = 3;
+        List<Double> rawSwings = new ArrayList<>();
+        for (int i = window; i < daily.size() - window; i++) {
+            double val = resistance ? daily.get(i).high() : daily.get(i).low();
+            boolean isSwing = true;
+            for (int j = i - window; j <= i + window; j++) {
+                if (j == i) continue;
+                double other = resistance ? daily.get(j).high() : daily.get(j).low();
+                if (resistance ? other > val : other < val) { isSwing = false; break; }
+            }
+            if (isSwing) rawSwings.add(val);
+        }
+        if (rawSwings.isEmpty()) return List.of();
+
+        Collections.sort(rawSwings);
+        double tolerance = atr * 0.5; // half an ATR - within normal daily noise for this stock
+
+        List<Double> majorLevels = new ArrayList<>();
+        List<Double> cluster = new ArrayList<>();
+        for (double v : rawSwings) {
+            if (cluster.isEmpty() || (v - cluster.get(cluster.size() - 1)) <= tolerance) {
+                cluster.add(v);
+            } else {
+                if (cluster.size() >= 2) {
+                    majorLevels.add(cluster.stream().mapToDouble(Double::doubleValue).average().orElse(0));
+                }
+                cluster.clear();
+                cluster.add(v);
+            }
+        }
+        if (cluster.size() >= 2) {
+            majorLevels.add(cluster.stream().mapToDouble(Double::doubleValue).average().orElse(0));
+        }
+        return majorLevels;
+    }
+
+    /**
+     * Projects a descending trendline resistance level at "today" by
+     * connecting the two most recent swing highs, ONLY if the second is
+     * genuinely lower than the first (a real descending trend) - then
+     * linearly extrapolates that line forward to the current candle
+     * index. Returns null if fewer than 2 swing highs exist, or if the
+     * two most recent ones aren't actually descending.
+     */
+    /**
+     * FIX (per explicit user spec: "Trendlines should be validated
+     * using meaningful confirmations... ignore weak, insignificant, or
+     * short-lived trendlines"). Searches ALL pairs of swing highs as
+     * candidate descending-trendline anchors, then counts how many
+     * OTHER swing highs independently lie close to (within ATR
+     * tolerance of) each candidate line - a genuine confirmation, not
+     * just 2 arbitrary points that happen to be descending. Requires
+     * at least 3 total confirming points (the 2 anchors plus at least
+     * 1 more) before accepting a trendline as real. Among qualifying
+     * candidates, prefers the one with the MOST confirmations, then
+     * the LONGEST span (explicitly favoring genuine, well-tested,
+     * long-standing structure over short-lived coincidental lines).
+     */
+    private Double projectDescendingTrendline(List<MomentumCandidate.Candle> daily, double atr) {
+        List<Double> vals = new ArrayList<>();
+        List<Integer> idxs = new ArrayList<>();
+        int window = 3;
+        for (int i = window; i < daily.size() - window; i++) {
+            double h = daily.get(i).high();
+            boolean isSwing = true;
+            for (int j = i - window; j <= i + window; j++) {
+                if (j != i && daily.get(j).high() > h) { isSwing = false; break; }
+            }
+            if (isSwing) { idxs.add(i); vals.add(h); }
+        }
+        return fitDominantTrendline(idxs, vals, daily.size() - 1, atr, true);
+    }
+
+    /** Mirror of projectDescendingTrendline, for an ascending support line. */
+    private Double projectAscendingTrendline(List<MomentumCandidate.Candle> daily, double atr) {
+        List<Double> vals = new ArrayList<>();
+        List<Integer> idxs = new ArrayList<>();
+        int window = 3;
+        for (int i = window; i < daily.size() - window; i++) {
+            double l = daily.get(i).low();
+            boolean isSwing = true;
+            for (int j = i - window; j <= i + window; j++) {
+                if (j != i && daily.get(j).low() < l) { isSwing = false; break; }
+            }
+            if (isSwing) { idxs.add(i); vals.add(l); }
+        }
+        return fitDominantTrendline(idxs, vals, daily.size() - 1, atr, false);
+    }
+
+    /**
+     * Shared logic for both trendline directions: tries every pair of
+     * swing points as trendline anchors, counts independent
+     * confirmations from the remaining swing points, and returns the
+     * projected value (at todayIdx) of whichever candidate line has
+     * the most confirmations (ties broken by longest span). Returns
+     * null if no candidate reaches the minimum 3-point confirmation
+     * threshold - meaning no genuine, multiply-confirmed trendline
+     * exists in the fetched history, which is a valid, honest outcome,
+     * not a fallback to a weaker line.
+     */
+    private Double fitDominantTrendline(List<Integer> idxs, List<Double> vals, int todayIdx,
+                                        double atr, boolean descending) {
+        if (idxs.size() < 3) return null; // cannot have 3+ confirmations with fewer than 3 points at all
+
+        double tolerance = atr * 0.5;
+        double bestSlope = 0, bestIntercept = 0;
+        int bestConfirmations = 0, bestSpan = 0;
+        boolean found = false;
+
+        for (int a = 0; a < idxs.size(); a++) {
+            for (int b = a + 1; b < idxs.size(); b++) {
+                int ia = idxs.get(a), ib = idxs.get(b);
+                double va = vals.get(a), vb = vals.get(b);
+                boolean correctDirection = descending ? vb < va : vb > va;
+                if (!correctDirection) continue;
+
+                double slope = (vb - va) / (double) (ib - ia);
+                double intercept = va - slope * ia;
+
+                int confirmations = 2; // the 2 anchor points themselves
+                for (int c = 0; c < idxs.size(); c++) {
+                    if (c == a || c == b) continue;
+                    double projected = slope * idxs.get(c) + intercept;
+                    if (Math.abs(vals.get(c) - projected) <= tolerance) confirmations++;
+                }
+
+                int span = ib - ia;
+                boolean better = confirmations > bestConfirmations ||
+                        (confirmations == bestConfirmations && span > bestSpan);
+
+                if (confirmations >= 3 && better) {
+                    bestSlope = slope;
+                    bestIntercept = intercept;
+                    bestConfirmations = confirmations;
+                    bestSpan = span;
+                    found = true;
+                }
+            }
+        }
+
+        if (!found) return null; // no genuinely multi-confirmed trendline exists
+        return bestSlope * todayIdx + bestIntercept;
+    }
+
+    /**
+     * FIX (per explicit user request: find the ACTUAL breakout point
+     * rather than assuming a fixed lookback window). Searches the full
+     * daily history for the FIRST candle whose close genuinely broke
+     * past the level (beyond an ATR-based noise threshold, so a
+     * single-candle wick spike doesn't count as a real break). From
+     * that specific point forward, checks whether every subsequent
+     * close has held on the correct side, within the same ATR-based
+     * tolerance - a level that was broken but never actually held
+     * (price closed back through it afterward) does not qualify.
+     */
+    private boolean checkRetestHolding(List<MomentumCandidate.Candle> daily, double level,
+                                       boolean isLong, double atr) {
+        double tolerance = atr * 0.5;
+        int breakoutIdx = -1;
+        for (int i = 0; i < daily.size(); i++) {
+            double close = daily.get(i).close();
+            boolean genuinelyBroken = isLong ? close > level + tolerance : close < level - tolerance;
+            if (genuinelyBroken) { breakoutIdx = i; break; }
+        }
+        if (breakoutIdx < 0 || breakoutIdx >= daily.size() - 1) return false; // never broke, or broke on the very last candle (no retest yet)
+
+        for (int i = breakoutIdx; i < daily.size(); i++) {
+            double close = daily.get(i).close();
+            boolean holding = isLong ? close >= level - tolerance : close <= level + tolerance;
+            if (!holding) return false; // closed back through the level after breaking - did not hold
+        }
+        return true;
+    }
+
+    /**
+     * FIX (per explicit user request, SHORT-specific: "implement actual
+     * rejection detection using appropriate price action... visible
+     * bearish rejection... closes back below the level"). Scans recent
+     * daily candles for a genuine rejection pattern at the given level:
+     * a candle whose HIGH reaches into or through the level (testing it
+     * from below) while its CLOSE stays meaningfully back below the
+     * level - the upper wick itself (high minus close) must be a
+     * genuinely significant rejection, measured against ATR, not a
+     * token difference. This is a real price-action pattern (a long
+     * upper wick with a weak close, the classic bearish rejection
+     * signature), not merely checking that closes have stayed below.
+     */
+    private boolean checkRejectionCandle(List<MomentumCandidate.Candle> daily, double level, double atr) {
+        double approachTolerance = atr * 0.5;
+        double minWickSize = atr * 0.3; // the rejection wick itself must be a meaningful fraction of ATR
+
+        int lookback = Math.min(15, daily.size());
+        List<MomentumCandidate.Candle> recent = daily.subList(daily.size() - lookback, daily.size());
+
+        for (MomentumCandidate.Candle c : recent) {
+            boolean testedTheLevel = c.high() >= level - approachTolerance;
+            boolean closedBackBelow = c.close() < level - approachTolerance * 0.5;
+            double upperWick = c.high() - Math.max(c.open(), c.close());
+            boolean genuineRejectionWick = upperWick >= minWickSize;
+
+            if (testedTheLevel && closedBackBelow && genuineRejectionWick) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Fetches roughly 1 year of Daily candles independently, via the
+     * same proven historical_data() pattern already used for the trend
+     * filter - NOT reused from AI, since AI's actual daily-candle
+     * storage file was not available here to verify safely, per
+     * explicit instruction not to risk any interference with AI's own
+     * data or logic. Daily data is exactly the kind of multi-month
+     * backward-looking use case historical_data() is documented to
+     * handle correctly (confirmed earlier this session via Zerodha's
+     * own guidance) - this is not the same-day-data unreliability that
+     * prompted the live-tick rebuild for consolidation candles.
+     */
+    /**
+     * FIX (per explicit user request: "same bootstrap... reuse in
+     * momentum for daily candle fetch and store"). Cache-aware entry
+     * point - checks Momentum's own daily-candle cache first before
+     * hitting the API, matching AI's proven "fetch once per day,
+     * reuse" pattern. Only re-fetches if this symbol has never been
+     * cached today, or if the cached entry is from a PRIOR day (stale).
+     * The actual fetch logic itself (below, fetchDailyCandlesFromApi())
+     * is completely unchanged from before this caching was added.
+     */
+    private List<MomentumCandidate.Candle> fetchDailyCandles(String symbol) {
+        LocalDate today = LocalDate.now(IST);
+        LocalDate cachedDate = dailyCandleCacheDate.get(symbol);
+        if (today.equals(cachedDate)) {
+            List<MomentumCandidate.Candle> cached = dailyCandleCache.get(symbol);
+            if (cached != null) {
+                log.debug("[MOMENTUM-CANDLE] {} - using cached daily candles from today " +
+                        "({} candles) instead of re-fetching", symbol, cached.size());
+                return cached;
+            }
+        }
+
+        List<MomentumCandidate.Candle> fresh = fetchDailyCandlesFromApi(symbol);
+        if (!fresh.isEmpty()) {
+            dailyCandleCache.put(symbol, fresh);
+            dailyCandleCacheDate.put(symbol, today);
+        }
+        return fresh;
+    }
+
+    /**
+     * The actual fetch logic - UNCHANGED from before caching was added.
+     * Same 370-day window, same error handling, same historical_data()
+     * call. Only called now via fetchDailyCandles() above when the
+     * cache is empty or stale, instead of on every single gate check.
+     */
+    private List<MomentumCandidate.Candle> fetchDailyCandlesFromApi(String symbol) {
+        try {
+            long token = resolveToken(symbol);
+            if (token == 0) return List.of();
+
+            LocalDateTime now = LocalDateTime.now(IST);
+            Date to = toDate(now);
+            Date from = toDate(now.minusDays(370)); // ~1 year, small margin for holidays/weekends
+
+            HistoricalData data = kiteConnect.getHistoricalData(
+                    from, to, String.valueOf(token), "day", false, false);
+            if (data == null || data.dataArrayList == null || data.dataArrayList.isEmpty()) {
+                log.warn("[MOMENTUM-CANDLE] {} - daily S/R gate candle fetch: Kite's call " +
+                                "succeeded (no exception) but returned {} - token={}", symbol,
+                        data == null ? "a null response" : "zero candles", token);
+                return List.of();
+            }
+
+            List<MomentumCandidate.Candle> candles = new ArrayList<>();
+            for (Object obj : data.dataArrayList) {
+                HistoricalData d = (HistoricalData) obj;
+                candles.add(new MomentumCandidate.Candle(d.open, d.high, d.low, d.close,
+                        d.timeStamp, d.volume));
+            }
+            return candles;
+        } catch (KiteException | Exception e) {
+            log.warn("[MOMENTUM-CANDLE] Failed to fetch daily S/R gate candles for {} " +
+                    "(non-fatal, will retry next cycle): {}", symbol, e.getMessage());
+            return List.of();
+        }
     }
 }

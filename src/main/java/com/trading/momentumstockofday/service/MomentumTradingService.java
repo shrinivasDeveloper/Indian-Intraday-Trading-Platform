@@ -223,6 +223,21 @@ public class MomentumTradingService {
             }
             log.info("[MOMENTUM-TRADE] {} trend filters passed: {}", symbol, trendResult.reason());
 
+            // NEW GATE (per explicit user request: "add Daily Support/
+            // Resistance/trendline Validation Gate... execute after all
+            // existing momentum validations pass and before trade
+            // execution"). A new, independent, additional check - does
+            // NOT modify the trend filter above or any other existing
+            // validation. If this fails, the same rejection path already
+            // used for every other gate fires - scanning simply
+            // continues to the next candidate, exactly as before.
+            var srGateResult = candleService.checkHigherTimeframeGate(
+                    symbol, candidate.getDirection(), entry, riskPerShare);
+            if (!srGateResult.passed()) {
+                throw new MomentumStrategyException(symbol + " - " + srGateResult.reason());
+            }
+            log.info("[MOMENTUM-TRADE] {} daily S/R gate passed: {}", symbol, srGateResult.reason());
+
             String orderId = placeMarketOrder(symbol, isLong ? Constants.TRANSACTION_TYPE_BUY
                     : Constants.TRANSACTION_TYPE_SELL, qty);
 
