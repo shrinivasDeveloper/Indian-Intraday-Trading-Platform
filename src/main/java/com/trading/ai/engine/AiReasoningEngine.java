@@ -504,13 +504,28 @@ public class AiReasoningEngine {
         boolean sweepHigh = f[55] < 0; // FIX: SweepHigh now negative-signed
         if (sweepLow || sweepHigh) score += 1.0;
 
-        // SR flip — strong structure change
-        boolean srFlip = f[56] > 0;
-        if (srFlip) score += 0.7;
-
         // Trendline touch — FIX: f[58] now negative for falling-trendline SHORT
         boolean trendlineTouch = f[58] != 0;
         if (trendlineTouch) score += 0.5;
+
+        // SR flip — strong structure change
+        boolean srFlip = f[56] > 0;
+        // FIX (per explicit user request: "hitting more stoploss...
+        // please fix" for S/R flip). Per the general theory that a LONE
+        // S/R flip - confirmed on the first retest with no other
+        // confirming signal - is prone to false positives (price
+        // "flips" briefly then continues through). Now requires
+        // confluence with at least one other signal (sweep or
+        // trendline touch) for the FULL bonus; a lone S/R flip with
+        // nothing else confirming it gets a reduced bonus instead.
+        // This is a scoring-level adjustment only, within this file -
+        // f[56]'s own underlying value (however it gets computed) is
+        // completely untouched, since that detection logic lives
+        // outside this file.
+        if (srFlip) {
+            boolean hasConfluence = sweepLow || sweepHigh || trendlineTouch;
+            score += hasConfluence ? 0.7 : 0.35;
+        }
 
         // Channel position — prefer entries at extremes not midpoint
         double channelPos = f[57];
@@ -548,8 +563,24 @@ public class AiReasoningEngine {
             if ("LONG".equals(dir)  && f[61] > 0.8) score += 0.15;
             if ("SHORT".equals(dir) && f[61] < -0.8) score += 0.15;
             // Order Block = institutional level = strong SL backing
-            if ("LONG".equals(dir)  && f[62] > 0.8) score += 0.15;
-            if ("SHORT".equals(dir) && f[62] < -0.8) score += 0.15;
+            // FIX (per explicit user request: "hitting more stoploss...
+            // please fix" for Order Block). Per the general theory that
+            // not every impulsive move's origin candle reflects a
+            // genuine institutional order block - many are false
+            // positives in choppy or low-volume conditions. Now
+            // requires the SAME move to also show BOS or CHOCH
+            // confirmation (the other 2 daily SMC signals already
+            // treated as highest-quality in this file) before awarding
+            // this specific bonus. Order Block still participates fully
+            // in the generic 10-pattern daily loop above, completely
+            // unchanged - only this isolated, specific bonus is gated.
+            boolean dailyStructureConfirmed =
+                    ("LONG".equals(dir) && (f[60] > 0.8 || f[61] > 0.8)) ||
+                            ("SHORT".equals(dir) && (f[60] < -0.8 || f[61] < -0.8));
+            if (dailyStructureConfirmed) {
+                if ("LONG".equals(dir)  && f[62] > 0.8) score += 0.15;
+                if ("SHORT".equals(dir) && f[62] < -0.8) score += 0.15;
+            }
         }
 
         // If no patterns at all — still possible to trade on pure momentum

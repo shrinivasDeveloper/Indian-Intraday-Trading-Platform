@@ -266,8 +266,25 @@ public class MomentumCandleService {
             double consolHigh = window.stream().mapToDouble(MomentumCandidate.Candle::high).max().orElse(0);
             double consolLow = window.stream().mapToDouble(MomentumCandidate.Candle::low).min().orElse(0);
 
-            double lastClose = breakoutCandle.close();
             boolean isLong = "LONG".equals(candidate.getDirection());
+
+            // FIX (per explicit user request: "For a long trade, the
+            // consolidation range should be formed below the day's
+            // high... for a short trade, the consolidation range
+            // should be formed above the day's low"). The consolidation
+            // window itself must sit on the correct side of the
+            // relevant day level BEFORE a breakout can be considered -
+            // for LONG, the window's own high must not have already
+            // reached/crossed the day's high; for SHORT, the window's
+            // own low must not have already reached/crossed the day's
+            // low. If the consolidation has already breached that level
+            // during its own formation, this window is rejected and a
+            // different window size (still within the same YAML-
+            // configured min/max candle range, unchanged) is tried.
+            boolean correctlyPositioned = isLong ? consolHigh < dayHigh : consolLow > dayLow;
+            if (!correctlyPositioned) continue; // try a different window size
+
+            double lastClose = breakoutCandle.close();
             // Breakout confirmed against the DAY'S high/low, checked on
             // the SEPARATE breakout candle (not part of the consolidation
             // window itself).

@@ -58,6 +58,16 @@ public class MomentumSelectionService {
                         // reading, and could otherwise falsely outrank a
                         // genuinely negative sector with real data.
                         .filter(e -> e.getValue().stockCount() > 0)
+                        // FIX (per explicit user request: "add a validation
+                        // gate to check the number of stocks in each
+                        // sector. Only sectors that have more than 10
+                        // stocks should be considered for scanning.
+                        // Sectors with 10 or fewer stocks should be
+                        // skipped"). Added as a SEPARATE, additional
+                        // filter - the existing stockCount() > 0 filter
+                        // above is completely untouched, per explicit
+                        // instruction not to modify existing logic.
+                        .filter(e -> e.getValue().stockCount() > 10)
                         // FIX (found via direct user report, confirmed
                         // precisely against real live data): ranking by
                         // RAW value always favored any positive sector
