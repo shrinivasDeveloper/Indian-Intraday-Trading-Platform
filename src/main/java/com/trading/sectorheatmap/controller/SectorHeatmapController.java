@@ -81,4 +81,25 @@ public class SectorHeatmapController {
                 "stocks", stocks
         );
     }
+
+    /**
+     * NEW ENDPOINT (per explicit user request: "generate a report
+     * listing only those symbols that require manual or verified
+     * refinement"). Purely additive - does not modify either endpoint
+     * above. Returns the real, live symbols currently folded into
+     * broader categories (Financial Services, Healthcare, Services,
+     * Realty) that still need verified, per-symbol sector splits
+     * (NBFC, Housing Finance, Pharma, Hospitals, Aviation, REITs,
+     * Commercial & Transport Services) - the exact data needed to add
+     * further symbol-level overrides incrementally and accurately.
+     */
+    @GetMapping("/refinement-report")
+    public Map<String, Object> getRefinementReport() {
+        Map<String, List<String>> report = dataService.getSymbolsNeedingRefinement();
+        int totalNeedingRefinement = report.values().stream().mapToInt(List::size).sum();
+        return Map.of(
+                "categoriesNeedingRefinement", report,
+                "totalSymbolsNeedingRefinement", totalNeedingRefinement
+        );
+    }
 }

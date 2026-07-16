@@ -212,7 +212,7 @@ public class SectorHeatmapDataService {
                     String name = nameCol >= 0 && cols.length > nameCol
                             ? cols[nameCol].trim() : symbol;
                     if (symbol.isEmpty()) continue;
-                    String sector = SectorTaxonomy.sectorFor(industry);
+                    String sector = SectorTaxonomy.sectorForSymbol(symbol, industry);
                     result.put(symbol, new String[]{name, sector});
                 }
             }
@@ -282,6 +282,45 @@ public class SectorHeatmapDataService {
                 .filter(s -> s.sector().equalsIgnoreCase(sector))
                 .sorted(cmp)
                 .toList();
+    }
+
+    /**
+     * FIX (per explicit user request: "generate a report listing only
+     * those symbols that require manual or verified refinement...
+     * design the override mechanism so additional verified mappings
+     * can be added incrementally without modifying any Heatmap
+     * logic"). Purely additive - reuses the existing, completely
+     * unchanged getStocksInSector() above for each broader category
+     * that still needs splitting into more specific sectors (NBFC,
+     * Housing Finance, Pharma, Healthcare, Hospitals, Aviation, REITs,
+     * Commercial & Transport Services all currently fold into
+     * Financial Services / Healthcare / Services / Realty). Zero
+     * modification to any existing calculation, filtering, ranking,
+     * monitoring, sorting, or visualization logic - this is a
+     * read-only report over data that already exists.
+     */
+    public Map<String, List<String>> getSymbolsNeedingRefinement() {
+        // These are the broader NSE-derived sectors that still contain
+        // symbols needing further, VERIFIED splitting per the requested
+        // 31-sector taxonomy - PSU Banks, Private Banks, and Insurance
+        // are excluded here since those 3 are already fully, reliably
+        // resolved (see SectorTaxonomy.java).
+        List<String> categoriesNeedingRefinement = List.of(
+                "Financial Services", // NBFC, Housing Finance still folded in here
+                "Healthcare",         // Pharma, Hospitals still folded in here
+                "Services",           // Aviation, Commercial & Transport still folded in here
+                "Realty"              // REITs & Realty still folded in here
+        );
+
+        Map<String, List<String>> report = new java.util.LinkedHashMap<>();
+        for (String category : categoriesNeedingRefinement) {
+            List<String> symbols = getStocksInSector(category, true).stream()
+                    .map(StockSnapshot::symbol)
+                    .sorted()
+                    .toList();
+            report.put(category, symbols);
+        }
+        return report;
     }
 
     /** FIX (found via direct user testing: clicking a sector showing

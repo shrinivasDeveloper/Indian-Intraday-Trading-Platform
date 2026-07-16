@@ -38,14 +38,20 @@ public final class SectorTaxonomy {
 
     /** The exact 22 official NSE Sectors - nothing else is ever valid. */
     public static final Set<String> ALL_22_SECTORS = Set.of(
-            "Chemicals", "Construction Materials", "Metals & Mining",
-            "Forest Materials", "Automobile and Auto Components",
-            "Consumer Durables", "Textiles", "Media, Entertainment & Publication",
-            "Realty", "Consumer Services", "Retailing",
-            "Oil, Gas & Consumable Fuels", "Fast Moving Consumer Goods",
+            "Chemicals", "Construction Materials", "Metals",
+            "Forest Materials", "Auto",
+            "Consumer Durables", "Textiles", "Media",
+            "Realty", "Consumer Services", "Retail",
+            "Oil & Gas", "FMCG",
             "Financial Services", "Healthcare", "Construction",
-            "Capital Goods", "Information Technology", "Services",
-            "Telecommunication", "Power", "Diversified"
+            "Capital Goods", "Information Technology (IT)", "Services",
+            "Telecom", "Power", "Diversified",
+            // FIX (per explicit user request, Option B): added as new
+            // sectors get real, verified symbol-level overrides or
+            // industry-string retargeting.
+            "PSU Banks", "Private Banks", "Insurance", "NBFC", "Housing Finance",
+            "Pharma", "Hospitals", "Aviation", "Commercial & Transport Services",
+            "REITs & Realty"
     );
 
     /** Industry name (as it appears in NSE's own stock-level data feed,
@@ -58,32 +64,32 @@ public final class SectorTaxonomy {
             Map.entry("cement & cement products", "Construction Materials"),
             Map.entry("other construction materials", "Construction Materials"),
             // Metals & Mining
-            Map.entry("ferrous metals", "Metals & Mining"),
-            Map.entry("non - ferrous metals", "Metals & Mining"),
-            Map.entry("non-ferrous metals", "Metals & Mining"),
-            Map.entry("diversified metals", "Metals & Mining"),
-            Map.entry("minerals & mining", "Metals & Mining"),
-            Map.entry("metals & minerals trading", "Metals & Mining"),
+            Map.entry("ferrous metals", "Metals"),
+            Map.entry("non - ferrous metals", "Metals"),
+            Map.entry("non-ferrous metals", "Metals"),
+            Map.entry("diversified metals", "Metals"),
+            Map.entry("minerals & mining", "Metals"),
+            Map.entry("metals & minerals trading", "Metals"),
             // Forest Materials
             Map.entry("paper, forest & jute products", "Forest Materials"),
             // Automobile and Auto Components
-            Map.entry("automobiles", "Automobile and Auto Components"),
-            Map.entry("auto components", "Automobile and Auto Components"),
+            Map.entry("automobiles", "Auto"),
+            Map.entry("auto components", "Auto"),
             // Consumer Durables
             Map.entry("consumer durables", "Consumer Durables"),
             // Textiles
             Map.entry("textiles & apparels", "Textiles"),
             // Media, Entertainment & Publication
-            Map.entry("media", "Media, Entertainment & Publication"),
-            Map.entry("entertainment", "Media, Entertainment & Publication"),
-            Map.entry("printing & publication", "Media, Entertainment & Publication"),
+            Map.entry("media", "Media"),
+            Map.entry("entertainment", "Media"),
+            Map.entry("printing & publication", "Media"),
             // Realty
             Map.entry("realty", "Realty"),
             // Consumer Services
             Map.entry("leisure services", "Consumer Services"),
             Map.entry("other consumer services", "Consumer Services"),
             // Retailing
-            Map.entry("retailing", "Retailing"),
+            Map.entry("retailing", "Retail"),
             // FIX (per explicit user report: Retailing is the one
             // remaining sector showing "No live data", after all other
             // 21 sectors were confirmed fixed). Unlike those 21, I don't
@@ -93,35 +99,35 @@ public final class SectorTaxonomy {
             // classification hierarchy as "Consumer Services > Retailing
             // > Diversified Retail," suggesting genuine retail companies
             // may often be tagged at the "Consumer Services" level in
-            // NSE's actual data, with "Retailing" itself being rarer or
+            // NSE's actual data, with "Retail" itself being rarer or
             // more specific than expected. Added the most plausible,
             // safe variant aliases below rather than guess a single one
             // with false confidence - the diagnostic logging already
             // built into refreshMapping() will show the definitive,
             // real answer on the next deployment if any of these still
             // don't match.
-            Map.entry("retail", "Retailing"),
-            Map.entry("retailers", "Retailing"),
-            Map.entry("trading", "Retailing"),
+            Map.entry("retail", "Retail"),
+            Map.entry("retailers", "Retail"),
+            Map.entry("trading", "Retail"),
             // Oil, Gas & Consumable Fuels
-            Map.entry("gas", "Oil, Gas & Consumable Fuels"),
-            Map.entry("oil", "Oil, Gas & Consumable Fuels"),
-            Map.entry("petroleum products", "Oil, Gas & Consumable Fuels"),
-            Map.entry("consumable fuels", "Oil, Gas & Consumable Fuels"),
+            Map.entry("gas", "Oil & Gas"),
+            Map.entry("oil", "Oil & Gas"),
+            Map.entry("petroleum products", "Oil & Gas"),
+            Map.entry("consumable fuels", "Oil & Gas"),
             // Fast Moving Consumer Goods
-            Map.entry("fast moving consumer goods", "Fast Moving Consumer Goods"),
-            Map.entry("agricultural food & other products", "Fast Moving Consumer Goods"),
-            Map.entry("beverages", "Fast Moving Consumer Goods"),
-            Map.entry("cigarettes & tobacco products", "Fast Moving Consumer Goods"),
-            Map.entry("food products", "Fast Moving Consumer Goods"),
-            Map.entry("personal products", "Fast Moving Consumer Goods"),
-            Map.entry("household products", "Fast Moving Consumer Goods"),
-            Map.entry("diversified fmcg", "Fast Moving Consumer Goods"),
+            Map.entry("fast moving consumer goods", "FMCG"),
+            Map.entry("agricultural food & other products", "FMCG"),
+            Map.entry("beverages", "FMCG"),
+            Map.entry("cigarettes & tobacco products", "FMCG"),
+            Map.entry("food products", "FMCG"),
+            Map.entry("personal products", "FMCG"),
+            Map.entry("household products", "FMCG"),
+            Map.entry("diversified fmcg", "FMCG"),
             // Financial Services
             Map.entry("finance", "Financial Services"),
             Map.entry("banks", "Financial Services"),
             Map.entry("capital markets", "Financial Services"),
-            Map.entry("insurance", "Financial Services"),
+            Map.entry("insurance", "Insurance"),
             Map.entry("financial technology (fintech)", "Financial Services"),
             // Healthcare
             Map.entry("healthcare", "Healthcare"),
@@ -137,10 +143,10 @@ public final class SectorTaxonomy {
             Map.entry("industrial manufacturing", "Capital Goods"),
             Map.entry("industrial products", "Capital Goods"),
             // Information Technology
-            Map.entry("information technology", "Information Technology"),
-            Map.entry("it - software", "Information Technology"),
-            Map.entry("it - services", "Information Technology"),
-            Map.entry("it - hardware", "Information Technology"),
+            Map.entry("information technology", "Information Technology (IT)"),
+            Map.entry("it - software", "Information Technology (IT)"),
+            Map.entry("it - services", "Information Technology (IT)"),
+            Map.entry("it - hardware", "Information Technology (IT)"),
             // Services
             Map.entry("services", "Services"),
             Map.entry("engineering services", "Services"),
@@ -149,9 +155,9 @@ public final class SectorTaxonomy {
             Map.entry("commercial services & supplies", "Services"),
             Map.entry("public services", "Services"),
             // Telecommunication
-            Map.entry("telecommunication", "Telecommunication"),
-            Map.entry("telecom - services", "Telecommunication"),
-            Map.entry("telecom - equipment & accessories", "Telecommunication"),
+            Map.entry("telecommunication", "Telecom"),
+            Map.entry("telecom - services", "Telecom"),
+            Map.entry("telecom - equipment & accessories", "Telecom"),
             // Power
             Map.entry("power", "Power"),
             // Utilities (NSE's own tier - "Other Utilities" maps to Power
@@ -181,23 +187,23 @@ public final class SectorTaxonomy {
             // original taxonomy above and are correctly NOT repeated
             // here, to avoid a duplicate-key error.)
             // ============================================================
-            Map.entry("automobile and auto components", "Automobile and Auto Components"),
+            Map.entry("automobile and auto components", "Auto"),
             Map.entry("capital goods", "Capital Goods"),
             Map.entry("financial services", "Financial Services"),
             Map.entry("construction materials", "Construction Materials"),
             Map.entry("chemicals", "Chemicals"),
             Map.entry("consumer services", "Consumer Services"),
             Map.entry("textiles", "Textiles"),
-            Map.entry("metals & mining", "Metals & Mining"),
+            Map.entry("metals & mining", "Metals"),
             Map.entry("forest materials", "Forest Materials"),
-            Map.entry("media, entertainment & publication", "Media, Entertainment & Publication"),
+            Map.entry("media, entertainment & publication", "Media"),
             // "Oil Gas & Consumable Fuels" - confirmed real variant
             // without the comma after "Oil", alongside the with-comma
             // version already mapped above - both accepted.
-            Map.entry("oil gas & consumable fuels", "Oil, Gas & Consumable Fuels"),
+            Map.entry("oil gas & consumable fuels", "Oil & Gas"),
             // "Media Entertainment & Publication" - confirmed real
             // variant without the comma after "Media".
-            Map.entry("media entertainment & publication", "Media, Entertainment & Publication"),
+            Map.entry("media entertainment & publication", "Media"),
 
             // ============================================================
             // ADDITIONAL FIX: an OLDER, alternate GICS-style vocabulary
@@ -206,15 +212,215 @@ public final class SectorTaxonomy {
             // as aliases too, for maximum robustness regardless of which
             // exact format the live endpoint returns on any given day.
             // ============================================================
-            Map.entry("it", "Information Technology"),
-            Map.entry("metals", "Metals & Mining"),
+            Map.entry("it", "Information Technology (IT)"),
+            Map.entry("metals", "Metals"),
             Map.entry("pharma", "Healthcare"),
-            Map.entry("telecom", "Telecommunication"),
-            Map.entry("automobile", "Automobile and Auto Components"),
-            Map.entry("media & entertainment", "Media, Entertainment & Publication"),
+            Map.entry("telecom", "Telecom"),
+            Map.entry("automobile", "Auto"),
+            Map.entry("media & entertainment", "Media"),
             Map.entry("energy", "Power"),
             Map.entry("consumer goods", "Consumer Durables"),
             Map.entry("fertilisers & pesticides", "Chemicals") // British spelling variant
+    );
+
+    // ============================================================
+    // SYMBOL-LEVEL OVERRIDES (per explicit user request, Option B):
+    // for sector splits that NSE's raw industry-string data cannot
+    // distinguish (e.g., "Banks" doesn't separate PSU from Private),
+    // this map provides an explicit, individually-verified override
+    // for specific symbols - checked BEFORE the industry-string
+    // lookup above, which remains completely unchanged and still
+    // handles every symbol not listed here. This is additive, layered
+    // logic - never a replacement for the proven industry mapping.
+    //
+    // PSU Banks - verified via multiple consistent, real sources: the
+    // complete, current list of 12 government-owned banks (Government
+    // of India holds a majority stake) listed on NSE.
+    // ============================================================
+    public static final Map<String, String> SYMBOL_SECTOR_OVERRIDES = Map.ofEntries(
+            Map.entry("SBIN", "PSU Banks"),
+            Map.entry("PNB", "PSU Banks"),
+            Map.entry("BANKBARODA", "PSU Banks"),
+            Map.entry("CANBK", "PSU Banks"),
+            Map.entry("UNIONBANK", "PSU Banks"),
+            Map.entry("BANKINDIA", "PSU Banks"),
+            Map.entry("INDIANB", "PSU Banks"),
+            Map.entry("CENTRALBK", "PSU Banks"),
+            Map.entry("UCOBANK", "PSU Banks"),
+            Map.entry("MAHABANK", "PSU Banks"),
+            Map.entry("PSB", "PSU Banks"),
+            Map.entry("IOB", "PSU Banks"),
+
+            // FIX (per explicit user request, Category 1: Private
+            // Banks). 17 of NSE's ~21 private sector banks confirmed
+            // with high confidence across multiple consistent, real
+            // sources. Honest note: a handful of smaller, less
+            // commonly-covered private banks may not be included here
+            // yet - those will surface in the refinement report
+            // (getSymbolsNeedingRefinement()) as still-unrefined
+            // Financial Services entries, for further verification
+            // rather than guessing.
+            Map.entry("HDFCBANK", "Private Banks"),
+            Map.entry("ICICIBANK", "Private Banks"),
+            Map.entry("AXISBANK", "Private Banks"),
+            Map.entry("KOTAKBANK", "Private Banks"),
+            Map.entry("INDUSINDBK", "Private Banks"),
+            Map.entry("FEDERALBNK", "Private Banks"),
+            Map.entry("IDFCFIRSTB", "Private Banks"),
+            Map.entry("YESBANK", "Private Banks"),
+            Map.entry("RBLBANK", "Private Banks"),
+            Map.entry("BANDHANBNK", "Private Banks"),
+            Map.entry("KARURVYSYA", "Private Banks"),
+            Map.entry("IDBI", "Private Banks"),
+            Map.entry("SOUTHBANK", "Private Banks"),
+            Map.entry("CSBBANK", "Private Banks"),
+            Map.entry("J&KBANK", "Private Banks"),
+            Map.entry("CUB", "Private Banks"),
+            Map.entry("DCBBANK", "Private Banks"),
+
+            // FIX (per explicit user request, Category 2: NBFC).
+            // Major, well-known large/mid-cap NBFCs confirmed across
+            // multiple sources. Honest note: NBFC is a genuinely large,
+            // open-ended category (thousands of companies, many
+            // micro-cap) - this is not an exhaustive list, but the
+            // significant, widely-recognized names likely to be part of
+            // a Nifty Total Market universe. 3 of these (SHRIRAMFIN,
+            // MANAPPURAM, RECLTD) additionally cross-verified as
+            // genuinely present in the tracked universe via real log
+            // data seen earlier this session.
+            Map.entry("BAJFINANCE", "NBFC"),
+            Map.entry("CHOLAFIN", "NBFC"),
+            Map.entry("SHRIRAMFIN", "NBFC"),
+            Map.entry("MUTHOOTFIN", "NBFC"),
+            Map.entry("ABCAPITAL", "NBFC"),
+            Map.entry("M&MFIN", "NBFC"),
+            Map.entry("SUNDARMFIN", "NBFC"),
+            Map.entry("MANAPPURAM", "NBFC"),
+            Map.entry("POONAWALLA", "NBFC"),
+            Map.entry("IIFL", "NBFC"),
+            Map.entry("PFC", "NBFC"),
+            Map.entry("RECLTD", "NBFC"),
+            Map.entry("BAJAJHLDNG", "NBFC"),
+
+            // FIX (per explicit user request, Category 3 - Phase 1:
+            // Housing Finance). Major, publicly-listed HFCs verified
+            // across multiple sources. AAVAS and BAJAJHFL additionally
+            // cross-verified as genuinely present in the tracked
+            // universe via real log data seen earlier this session.
+            // Phase 1 only - further verification against the
+            // refinement report still required.
+            Map.entry("LICHSGFIN", "Housing Finance"),
+            Map.entry("PNBHOUSING", "Housing Finance"),
+            Map.entry("CANFINHOME", "Housing Finance"),
+            Map.entry("GICHSGFIN", "Housing Finance"),
+            Map.entry("APTUS", "Housing Finance"),
+            Map.entry("AAVAS", "Housing Finance"),
+            Map.entry("HOMEFIRST", "Housing Finance"),
+            Map.entry("INDIASHLTR", "Housing Finance"),
+            Map.entry("REPCOHOME", "Housing Finance"),
+            Map.entry("BAJAJHFL", "Housing Finance"),
+
+            // FIX (per explicit user request, Healthcare domain,
+            // Category: Pharma - Phase 1). Major, well-known
+            // pharmaceutical companies verified across multiple
+            // sources. 6 of these (SUNPHARMA, DIVISLAB, ALKEM, BIOCON,
+            // JBCHEPHARM, JUBLPHARMA) additionally cross-verified as
+            // genuinely present in the tracked universe via real log
+            // data seen earlier this session.
+            Map.entry("SUNPHARMA", "Pharma"),
+            Map.entry("DIVISLAB", "Pharma"),
+            Map.entry("CIPLA", "Pharma"),
+            Map.entry("DRREDDY", "Pharma"),
+            Map.entry("TORNTPHARM", "Pharma"),
+            Map.entry("MANKIND", "Pharma"),
+            Map.entry("ZYDUSLIFE", "Pharma"),
+            Map.entry("LUPIN", "Pharma"),
+            Map.entry("ALKEM", "Pharma"),
+            Map.entry("AUROPHARMA", "Pharma"),
+            Map.entry("BIOCON", "Pharma"),
+            Map.entry("GLENMARK", "Pharma"),
+            Map.entry("IPCALAB", "Pharma"),
+            Map.entry("LAURUSLABS", "Pharma"),
+            Map.entry("NATCOPHARM", "Pharma"),
+            Map.entry("ABBOTINDIA", "Pharma"),
+            Map.entry("AJANTPHARM", "Pharma"),
+            Map.entry("JBCHEPHARM", "Pharma"),
+            Map.entry("GLAND", "Pharma"),
+            Map.entry("JUBLPHARMA", "Pharma"),
+
+            // FIX (per explicit user request, Healthcare domain,
+            // Category: Hospitals - Phase 1). Major hospital chains
+            // verified across multiple sources. 4 of these (APOLLOHOSP,
+            // MAXHEALTH, MEDANTA, RAINBOW) additionally cross-verified
+            // as genuinely present in the tracked universe via real
+            // log data seen earlier this session.
+            Map.entry("APOLLOHOSP", "Hospitals"),
+            Map.entry("MAXHEALTH", "Hospitals"),
+            Map.entry("FORTIS", "Hospitals"),
+            Map.entry("NH", "Hospitals"),
+            Map.entry("MEDANTA", "Hospitals"),
+            Map.entry("KIMS", "Hospitals"),
+            Map.entry("ASTERDM", "Hospitals"),
+            Map.entry("RAINBOW", "Hospitals"),
+            Map.entry("YATHARTH", "Hospitals"),
+
+            // FIX (per explicit user request, Services domain,
+            // Category: Aviation - Phase 1). Aviation is a genuinely
+            // small, well-defined category in India - 2 major, actively-
+            // traded listed airlines. Jet Airways is under bankruptcy
+            // revival proceedings, not a normal actively-traded stock,
+            // so intentionally excluded.
+            Map.entry("INDIGO", "Aviation"),
+            Map.entry("SPICEJET", "Aviation"),
+
+            // FIX (per explicit user request, Services domain,
+            // Category: Commercial & Transport Services - Phase 1).
+            // Major logistics/transport companies verified across
+            // multiple sources.
+            Map.entry("CONCOR", "Commercial & Transport Services"),
+            Map.entry("BLUEDART", "Commercial & Transport Services"),
+            Map.entry("DELHIVERY", "Commercial & Transport Services"),
+            Map.entry("TCI", "Commercial & Transport Services"),
+            Map.entry("MAHLOG", "Commercial & Transport Services"),
+            Map.entry("VRLLOG", "Commercial & Transport Services"),
+            Map.entry("TCIEXP", "Commercial & Transport Services"),
+            Map.entry("GATEWAY", "Commercial & Transport Services"),
+            Map.entry("ALLCARGO", "Commercial & Transport Services"),
+            Map.entry("SCI", "Commercial & Transport Services"),
+
+            // FIX (per explicit user request, Realty domain, Category:
+            // REITs & Realty - Phase 1). All 5 currently listed Indian
+            // REITs, confirmed via multiple, highly consistent sources -
+            // a genuinely small, closed category similar to PSU Banks.
+            // Realty (Remaining) requires no code change - the existing
+            // "Realty" industry-string mapping already correctly
+            // captures property developers.
+            Map.entry("EMBASSY", "REITs & Realty"),
+            Map.entry("MINDSPACE", "REITs & Realty"),
+            Map.entry("BIRET", "REITs & Realty"),
+            Map.entry("NXST", "REITs & Realty"),
+            Map.entry("KRT", "REITs & Realty"),
+
+            // FIX (confirmed real bug from dashboard: Insurance showed
+            // "No live data" - the exact same failure pattern already
+            // found and fixed for Private Banks. The raw industry-
+            // string retargeting to "insurance" only matches an exact
+            // value, but many insurance companies' raw NSE industry may
+            // directly be "Financial Services", bypassing it entirely).
+            // Replaced with verified symbol overrides, same proven
+            // mechanism as every other category. 3 of these (ICICIPRULI,
+            // ICICIGI, MFSL) additionally cross-verified as genuinely
+            // present in the tracked universe via real log data seen
+            // earlier this session.
+            Map.entry("LICI", "Insurance"),
+            Map.entry("HDFCLIFE", "Insurance"),
+            Map.entry("ICICIPRULI", "Insurance"),
+            Map.entry("SBILIFE", "Insurance"),
+            Map.entry("MFSL", "Insurance"),
+            Map.entry("ICICIGI", "Insurance"),
+            Map.entry("NIACL", "Insurance"),
+            Map.entry("STARHEALTH", "Insurance"),
+            Map.entry("GICRE", "Insurance")
     );
 
     // FIX (found via direct user report: 448 of 743 live stocks - 60%!
@@ -241,6 +447,22 @@ public final class SectorTaxonomy {
             return "Diversified";
         }
         return result;
+    }
+
+    /**
+     * FIX (per explicit user request, Option B): checks the symbol-
+     * level override FIRST - for the specific stocks where a finer
+     * sector split has been individually verified (e.g., PSU Banks).
+     * Falls back to the existing, completely unchanged sectorFor(
+     * industry) for every symbol not explicitly listed in the
+     * override map above.
+     */
+    public static String sectorForSymbol(String symbol, String rawIndustry) {
+        if (symbol != null) {
+            String override = SYMBOL_SECTOR_OVERRIDES.get(symbol.trim().toUpperCase());
+            if (override != null) return override;
+        }
+        return sectorFor(rawIndustry);
     }
 
     /** Called once per refresh cycle (see SectorHeatmapDataService) to

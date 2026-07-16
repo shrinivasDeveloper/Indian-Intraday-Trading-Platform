@@ -123,6 +123,28 @@ public class MomentumScheduler {
             log.info("[MOMENTUM-SCHEDULER] Restart recovery: found 1 ACTIVE trade ({}), " +
                             "{}/{} trades taken today - monitoring will resume automatically",
                     activeTrades.get(0).getSymbol(), tradesToday.get(), config.getMaxTradesPerDay());
+
+            // FIX (per explicit user investigation: "no auto square off
+            // happened for momentum and AI... why"). Makes this exact
+            // scenario unmistakable in future logs, even with limited
+            // log retention: if the app restarts AFTER the configured
+            // force-exit time, this line makes that fact explicit and
+            // searchable, rather than silently relying on the next
+            // tick to (correctly) handle it. Zero change to actual
+            // behavior - the existing tick() logic already handles
+            // this correctly on its own; this purely adds visibility.
+            java.time.LocalTime nowAtRestart = java.time.LocalTime.now(IST);
+            java.time.LocalTime forceExitTimeAtRestart = java.time.LocalTime.parse(config.getForceExitTime());
+            if (!nowAtRestart.isBefore(forceExitTimeAtRestart)) {
+                log.warn("[MOMENTUM-SCHEDULER] RESTART DETECTED AFTER FORCE-EXIT TIME ({} vs " +
+                                "configured {}) - an active trade was still found in our database. " +
+                                "The very next scheduled tick will immediately reconcile against the " +
+                                "real broker position and force-exit if genuinely still open. If the " +
+                                "broker already closed this position while the app was offline " +
+                                "(e.g. Zerodha's own MIS auto square-off), reconciliation will detect " +
+                                "and correctly record that instead.",
+                        nowAtRestart, config.getForceExitTime());
+            }
         } else if (!todaysTrades.isEmpty()) {
             selectionAttemptedToday.set(true);
             lastScanTime = java.time.LocalDateTime.now(IST);
@@ -244,8 +266,24 @@ public class MomentumScheduler {
         // strategy this session, independently implemented here.
         MomentumTrade active = activeTrade.get();
         if (active != null && !now.isBefore(forceExitTime)) {
-            tradingService.exitTrade(active, "FORCE_EXIT_EOD");
-            activeTrade.set(null);
+            // FIX (confirmed serious bug found via direct user report:
+            // a position stuck ACTIVE forever with no exit order ever
+            // appearing at the broker). activeTrade was being cleared
+            // unconditionally here regardless of whether the exit
+            // below genuinely succeeded - a single transient failure
+            // (network blip, API error) would silently and permanently
+            // abandon the position, since the only reference needed to
+            // retry it was destroyed anyway. Now only clears if the
+            // exit genuinely succeeded - otherwise the next scheduled
+            // tick (30 seconds later) will correctly retry.
+            boolean exited = tradingService.exitTrade(active, "FORCE_EXIT_EOD");
+            if (exited) {
+                activeTrade.set(null);
+            } else {
+                log.warn("[MOMENTUM-SCHEDULER] EOD force-exit failed for {} - keeping it " +
+                        "active so the next tick retries (see MOMENTUM-TRADE log above for " +
+                        "the specific failure reason)", active.getSymbol());
+            }
             return;
         }
 

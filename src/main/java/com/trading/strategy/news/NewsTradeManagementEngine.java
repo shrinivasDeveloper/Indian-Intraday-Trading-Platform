@@ -519,6 +519,30 @@ public class NewsTradeManagementEngine {
         });
     }
 
+    // FIX (confirmed real bug found from direct user report: NAM-INDIA's
+    // trailing stop showed a level implying the target had genuinely
+    // been reached, but the position remained stuck ACTIVE rather than
+    // exiting). Root cause confirmed via code inspection: SL/target
+    // monitoring (manageTrade()) only ever ran inside the event-driven
+    // onTick() listener above - there was NO periodic, time-based
+    // fallback at all. If a symbol doesn't receive a live tick for a
+    // stretch (low liquidity, infrequent trades), the SL/target check
+    // simply never runs during that gap, even if the true market price
+    // has already crossed the target. This periodic safety-net check
+    // reuses the exact same, unmodified manageTrade() method and the
+    // already-maintained lastPrices map - it does not duplicate or
+    // alter the existing tick-driven logic, it purely adds a fallback
+    // so a quiet symbol can never get permanently stuck.
+    @Scheduled(fixedRate = 30000)
+    public void periodicSafetyCheck() {
+        if (activeTrades.isEmpty()) return;
+        for (String sym : new ArrayList<>(activeTrades.keySet())) {
+            BigDecimal ltp = lastPrices.get(sym);
+            if (ltp == null) continue; // no price observed yet at all - nothing to check against
+            manageTrade(sym, ltp);
+        }
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // CLOSE — router (LIVE places a real exit order, PAPER closes directly)
     // Same dual-mode pattern as AiTradeManagementEngine.

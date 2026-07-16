@@ -1446,6 +1446,20 @@ public class NewsKeywordFilter {
         combined = combined.replaceAll(
                 "(?i)\\b(BSE|NSE)\\s+Intimation\\s+is\\s+hereby\\s+given\\b",
                 "The exchange intimation is hereby given");
+        // FIX (found via direct user report, third confirmed variant):
+        // "...has submitted to BSE a copy of Post Buyback Public
+        // Advertisement..." - a genuinely different phrasing than the
+        // three above (those match informed/notified/reported/filed/
+        // Intimation; this one is "submitted to"). Real example: M&M's
+        // own buyback announcement (Kotak Mahindra Capital Company
+        // acting as manager to the buyback) was ALSO getting
+        // attributed to BSE Limited's own stock, purely because BSE is
+        // named as the filing recipient in this standard regulatory
+        // phrasing, not because the news is genuinely about BSE
+        // Limited.
+        combined = combined.replaceAll(
+                "(?i)\\b(has|have)\\s+submitted\\s+(to|with)\\s+(BSE|NSE)\\b",
+                "$1 submitted $2 the exchange");
 
         Set<String> found = new LinkedHashSet<>();
 

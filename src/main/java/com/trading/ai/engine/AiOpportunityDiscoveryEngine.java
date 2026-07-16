@@ -440,25 +440,69 @@ public class AiOpportunityDiscoveryEngine {
      * This eliminates false signals from any two candles that happen to have
      * similar lows within normal daily price oscillation.
      */
+    /**
+     * f[54] - Daily Liquidity Sweep Low (STRICT, further tightened).
+     *
+     * A genuine sweep requires a SIGNIFICANT support level tested multiple times:
+     *   1. Level must have been tested at least 2 previous times (3 touches min)
+     *      - this distinguishes real support from random daily noise
+     *   2. The sweep candle's low went BELOW the level
+     *   3. Close recovered ABOVE the level (rejection of the sweep)
+     *   4. Recovery close > 0.3% above level (not just a hairline recovery)
+     *   5. Equal low tolerance tightened to 0.3% (was 0.5% - too loose)
+     *
+     * FIX (per explicit user request, 5 confirmed gaps found via direct
+     * code review):
+     *   a) Volume confirmation added - candVol > avgVol * 1.2, matching
+     *      the exact same threshold already used by detectBOS() in
+     *      AiDailyPatternEngine. A genuine stop-hunt sweep should show
+     *      elevated volume as resting stops trigger; this was previously
+     *      completely unchecked.
+     *   b) Lookback widened from 20 to 90 candles (both for candidate
+     *      levels AND the touch-counting window) - previously only the
+     *      most recent ~20 trading days were ever considered, even
+     *      though the full ~252-day daily history is passed in. Major,
+     *      well-established levels from 2-4 months back were never
+     *      examined at all.
+     *   c) Touch requirement raised from 1 prior touch (2 total) to 2
+     *      prior touches (3 total) - brings sweep's validation bar
+     *      closer to this file's other patterns (Triangle requires 3+,
+     *      Trendline requires 2+ intermediate plus 2 definition points).
+     *   d) First-sweep-only: the inner loop now BREAKS at the first
+     *      genuine sweep candle found for a level (whether or not it
+     *      passes the new volume check), instead of silently continuing
+     *      to scan further candles. This ensures only a level's FIRST,
+     *      freshest sweep is ever credited - a level that's already
+     *      been swept once is a depleted liquidity pool, and a later,
+     *      weaker repeat sweep of the same level no longer counts.
+     */
     private double detectDailyLiquiditySweepLow(List<Candle> daily, double ltp) {
         int n = daily.size();
         if (n < 15) return 0;
         double EQ_TOL = 0.003; // 0.3% equal low tolerance (tightened from 0.5%)
+        int lookback = Math.min(90, n - 1); // FIX: widened from 20
 
-        for (int i = n - 20; i < n - 1; i++) {
+        double avgVol = 0;
+        int volCount = Math.min(20, n);
+        for (int v = n - volCount; v < n; v++) avgVol += daily.get(v).getVolume();
+        avgVol /= volCount;
+
+        for (int i = n - lookback; i < n - 1; i++) {
             if (i < 0) continue;
             double level = daily.get(i).getLow().doubleValue();
 
             // Count how many prior candles tested this level (within EQ_TOL)
             int priorTouches = 0;
-            for (int k = Math.max(0, i - 20); k < i; k++) {
+            for (int k = Math.max(0, i - lookback); k < i; k++) { // FIX: widened from i-20
                 double kLow = daily.get(k).getLow().doubleValue();
                 if (Math.abs(kLow - level) / level < EQ_TOL) priorTouches++;
             }
-            // Require at least 1 prior touch (so level has been tested 2+ times total)
-            if (priorTouches < 1) continue;
+            // FIX: raised from 1 to 2 prior touches (3 touches total)
+            if (priorTouches < 2) continue;
 
-            // Check for sweep candle AFTER this level was established
+            // Find the FIRST genuine sweep candle after this level formed -
+            // FIX: break (not continue past) once found, so only the
+            // freshest sweep of this level is ever considered.
             for (int j = i + 1; j < n; j++) {
                 double candLow   = daily.get(j).getLow().doubleValue();
                 double candClose = daily.get(j).getClose().doubleValue();
@@ -466,6 +510,14 @@ public class AiOpportunityDiscoveryEngine {
                     // Swept below AND closed clearly above
                     if (candLow < level * (1 - 0.001)
                             && candClose > level * 1.003) { // 0.3% recovery
+                        // FIX: require elevated volume on the sweep candle
+                        // itself - same threshold as detectBOS().
+                        double candVol = daily.get(j).getVolume();
+                        if (candVol < avgVol * 1.2) {
+                            break; // first sweep found but too weak on volume -
+                            // this level's liquidity is considered used,
+                            // don't keep scanning later candles for it
+                        }
                         // PROXIMITY: ltp must still be within 1.0% of sweep level
                         // If stock ran 2%+ above level -> entry opportunity gone
                         if (ltp <= level * 1.010) {
@@ -480,30 +532,34 @@ public class AiOpportunityDiscoveryEngine {
     }
 
     /**
-     * f[55] - Daily Liquidity Sweep High.
-     * Equal DAILY highs swept and closed below = institutional trap on daily.
-     */
-    /**
-     * f[55] - Daily Liquidity Sweep High (STRICT).
-     * Same strictness as f[54] - significant resistance level required.
-     * Level must have been tested 2+ times before being swept.
-     * Sweep candle exceeded level AND closed clearly below it.
+     * f[55] - Daily Liquidity Sweep High (STRICT, further tightened).
+     * Same strictness as f[54], mirrored - see the detailed FIX notes
+     * on detectDailyLiquiditySweepLow() above; all 5 fixes apply
+     * identically here (volume confirmation, widened 90-candle
+     * lookback, raised touch requirement, first-sweep-only logic).
      */
     private double detectDailyLiquiditySweepHigh(List<Candle> daily, double ltp) {
         int n = daily.size();
         if (n < 15) return 0;
         double EQ_TOL = 0.003; // 0.3% equal high tolerance
+        int lookback = Math.min(90, n - 1); // FIX: widened from 20
 
-        for (int i = n - 20; i < n - 1; i++) {
+        double avgVol = 0;
+        int volCount = Math.min(20, n);
+        for (int v = n - volCount; v < n; v++) avgVol += daily.get(v).getVolume();
+        avgVol /= volCount;
+
+        for (int i = n - lookback; i < n - 1; i++) {
             if (i < 0) continue;
             double level = daily.get(i).getHigh().doubleValue();
 
             int priorTouches = 0;
-            for (int k = Math.max(0, i - 20); k < i; k++) {
+            for (int k = Math.max(0, i - lookback); k < i; k++) { // FIX: widened from i-20
                 double kHigh = daily.get(k).getHigh().doubleValue();
                 if (Math.abs(kHigh - level) / level < EQ_TOL) priorTouches++;
             }
-            if (priorTouches < 1) continue;
+            // FIX: raised from 1 to 2 prior touches (3 touches total)
+            if (priorTouches < 2) continue;
 
             for (int j = i + 1; j < n; j++) {
                 double candHigh  = daily.get(j).getHigh().doubleValue();
@@ -511,6 +567,12 @@ public class AiOpportunityDiscoveryEngine {
                 if (Math.abs(candHigh - level) / level < EQ_TOL) {
                     if (candHigh > level * 1.001
                             && candClose < level * 0.997) { // 0.3% rejection
+                        // FIX: require elevated volume on the sweep candle
+                        double candVol = daily.get(j).getVolume();
+                        if (candVol < avgVol * 1.2) {
+                            break; // first sweep found but too weak on volume -
+                            // level considered used, stop scanning it
+                        }
                         // PROXIMITY: ltp must still be within 1.0% of sweep level
                         // If stock dropped 2%+ below level -> short opportunity gone
                         if (ltp >= level * 0.990) {

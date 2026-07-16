@@ -8,64 +8,26 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * AiDailyPatternEngine — detects 22 price-action and SMC patterns on DAILY candles.
- *
- * All patterns validated STRICTLY on daily timeframe (1-year data).
- * Returns a DailyPatterns record with individual scores (-1 to +1 per pattern).
- *
- * Patterns implemented:
- *   SMC:            BOS, CHOCH, Liquidity Sweep, Order Block, FVG
- *   Wyckoff:        Accumulation, Distribution
- *   Supply/Demand:  Supply Zone, Demand Zone (enhanced from f[47])
- *   Chart Patterns: Triple Top/Bottom, Head and Shoulders
- *   Triangles:      Ascending, Descending, Symmetrical, Expanding
- *   Channels:       Rising, Falling, Breakout, Reversal
- *   Trendlines:     Breakout, Bounce
- *
- * +1.0 = strong bullish pattern confirmed
- * -1.0 = strong bearish pattern confirmed
- *  0.0 = no pattern / neutral
- */
 @Component
 @ConditionalOnProperty(name = "ai.trading.enabled", havingValue = "true")
 @Slf4j
 public class AiDailyPatternEngine {
 
-    // Strictness thresholds
-    private static final double SWING_PCT        = 0.005; // FIX: was 0.3% — 0.5% better for daily BOS confirmation
-    private static final double CLUSTER_PCT      = 0.015; // 1.5% — pattern level cluster tolerance
-    private static final double FVG_MIN_PCT      = 0.003; // 0.3% — minimum FVG gap size
-    // FIX: was 0.020 — lower boundary 0%, upper 1.5% (OB zone = candle body + small extension)
-    private static final double OB_TOLERANCE_UP  = 0.015; // 1.5% above OB top
-    private static final double OB_TOLERANCE_DN  = 0.003; // 0.3% below OB bottom (near-miss only)
-    private static final double TRENDLINE_TOL    = 0.012; // 1.2% — trendline touch tolerance
-    private static final double CHANNEL_TOL      = 0.015; // 1.5% — channel boundary tolerance
-    private static final int    MIN_SWING_SEP    = 10;    // FIX: was 3 — daily triple top needs 10+ days between peaks
-    private static final int    LOOKBACK_PATTERN = 120;   // candles used for pattern detection
-    // 120 days (6 months) gives enough room for:
-    // Triple Top/Bottom (3 peaks × 10d = 40d min)
-    // H&S (LS + Head + RS = 40-60d typical)
-    // Triangle (3 touches per side = 40d min)
-    // Was 60 — too tight for longer patterns
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // MAIN ENTRY — compute all daily patterns for one symbol
-    // ═══════════════════════════════════════════════════════════════════════
+    private static final double SWING_PCT        = 0.005;
+    private static final double CLUSTER_PCT      = 0.015;
+    private static final double FVG_MIN_PCT      = 0.003;
+    private static final double OB_TOLERANCE_UP  = 0.015;
+    private static final double OB_TOLERANCE_DN  = 0.003;
+    private static final double TRENDLINE_TOL    = 0.012;
+    private static final double CHANNEL_TOL      = 0.015;
+    private static final int    MIN_SWING_SEP    = 10;
+    private static final int    LOOKBACK_PATTERN = 120;
 
     public record DailyPatterns(
-            double bos,               // f[60] Break of Structure
-            double choch,             // f[61] Change of Character
-            double orderBlock,        // f[62] Order Block proximity
-            double fvg,               // f[63] Fair Value Gap
-            double accumDist,         // f[64] Accumulation / Distribution
-            double triplePat,         // f[65] Triple Top / Triple Bottom
-            double headShoulders,     // f[66] Head and Shoulders
-            double triangle,          // f[67] Triangle (ascending/descending/symmetrical)
-            double channel,           // f[68] Channel (rising/falling/breakout/reversal)
-            double trendlinePat       // f[69] Trendline breakout / bounce on daily
+            double bos, double choch, double orderBlock, double fvg, double accumDist,
+            double triplePat, double headShoulders, double triangle, double channel,
+            double trendlinePat
     ) {
-        /** Count of bullish daily patterns confirmed */
         public int bullishCount() {
             int c = 0;
             if (bos > 0.5) c++;
@@ -80,7 +42,6 @@ public class AiDailyPatternEngine {
             if (trendlinePat > 0.5) c++;
             return c;
         }
-        /** Count of bearish daily patterns confirmed */
         public int bearishCount() {
             int c = 0;
             if (bos < -0.5) c++;
@@ -108,7 +69,6 @@ public class AiDailyPatternEngine {
         int lb = Math.min(LOOKBACK_PATTERN, n);
         List<Candle> window = daily.subList(n - lb, n);
 
-        // Swing points used by multiple patterns
         List<SwingPoint> highs = findSwingHighs(window);
         List<SwingPoint> lows  = findSwingLows(window);
 
@@ -128,28 +88,13 @@ public class AiDailyPatternEngine {
         );
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // SMC PATTERNS
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /**
-     * BOS — Break of Structure.
-     * Bullish BOS: daily close breaks above recent swing high with volume.
-     * Bearish BOS: daily close breaks below recent swing low with volume.
-     * Strict: must happen within last 3 candles, volume > 1.2× average.
-     */
     private double detectBOS(double ltp, List<Candle> w,
                              List<SwingPoint> highs, List<SwingPoint> lows) {
         if (highs.isEmpty() || lows.isEmpty()) return 0;
         int n = w.size();
         double avgVol = averageVolume(w, 20);
+        final double BOS_PROXIMITY = 0.015;
 
-        // Proximity tolerance: price must still be within 1.5% of BOS level.
-        // BOS fires when daily close broke the swing high.
-        // By 11AM, if stock ran 4% above BOS level → opportunity gone → skip.
-        final double BOS_PROXIMITY = 0.015; // 1.5%
-
-        // Bullish BOS: recent close breaks above a prior swing high
         for (int i = n - 3; i < n; i++) {
             if (i < 0) continue;
             double close = w.get(i).getClose().doubleValue();
@@ -158,17 +103,14 @@ public class AiDailyPatternEngine {
                 if (sh.index >= i) continue;
                 if (sh.index < i - 15) break;
                 if (close > sh.price * (1 + SWING_PCT) && vol > avgVol * 1.2) {
-                    // PROXIMITY: ltp must be within 1.5% above the BOS swing level
-                    // If stock already ran 3%+ above BOS level → skip
                     if (ltp <= sh.price * (1 + BOS_PROXIMITY)) {
-                        return 1.0; // confirmed bullish BOS, price still near level
+                        return 1.0;
                     }
-                    return 0; // BOS confirmed but price moved too far — opportunity gone
+                    return 0;
                 }
             }
         }
 
-        // Bearish BOS: recent close breaks below a prior swing low
         for (int i = n - 3; i < n; i++) {
             if (i < 0) continue;
             double close = w.get(i).getClose().doubleValue();
@@ -177,38 +119,18 @@ public class AiDailyPatternEngine {
                 if (sl.index >= i) continue;
                 if (sl.index < i - 15) break;
                 if (close < sl.price * (1 - SWING_PCT) && vol > avgVol * 1.2) {
-                    // PROXIMITY: ltp must be within 1.5% below the BOS swing level
                     if (ltp >= sl.price * (1 - BOS_PROXIMITY)) {
-                        return -1.0; // confirmed bearish BOS, price still near level
+                        return -1.0;
                     }
-                    return 0; // BOS confirmed but price dropped too far — gone
+                    return 0;
                 }
             }
         }
         return 0;
     }
 
-    /**
-     * CHOCH — Change of Character.
-     * After minimum 3 lower highs (downtrend): price makes higher high → bull CHOCH.
-     * After minimum 3 higher lows (uptrend): price makes lower low → bear CHOCH.
-     * Strict: requires confirmed sequence of at least 3 before change.
-     */
     private double detectCHOCH(double ltp, List<Candle> w,
                                List<SwingPoint> highs, List<SwingPoint> lows) {
-        // FIX: List is sorted NEWEST FIRST (index descending).
-        // highs[0] = newest swing high, highs[1] = older, highs[2] = even older.
-        //
-        // DOWNTREND (lower highs over time) means:
-        //   newest high < second-newest high < third-newest etc.
-        //   i.e., highs[0] < highs[1] < highs[2] in newest-first order
-        //   So: highs[i].price > highs[i-1].price for i=1,2,3 = downtrend structure
-        //
-        // Bull CHOCH: was in downtrend, LATEST high breaks ABOVE prev high
-        //   Downtrend confirmed by highs[1] > highs[2] > highs[3]
-        //   CHOCH: highs[0] > highs[1] (latest > second-latest = structure break)
-
-        // Check bull CHOCH: was in downtrend (older highs higher), now latest is higher
         if (highs.size() >= 4) {
             boolean downtrend = true;
             for (int i = 2; i < Math.min(4, highs.size()); i++) {
@@ -218,17 +140,14 @@ public class AiDailyPatternEngine {
                 }
             }
             if (downtrend && highs.get(0).price > highs.get(1).price * (1 + SWING_PCT)) {
-                // PROXIMITY: ltp must be within 1.5% above the CHOCH level (highs[1])
-                // If stock already ran 3%+ above the broken high → opportunity gone
                 double chochLevel = highs.get(1).price;
                 if (ltp <= chochLevel * 1.015) {
-                    return 1.0; // bull CHOCH confirmed, price still near level
+                    return 1.0;
                 }
-                return 0; // CHOCH confirmed but price ran too far
+                return 0;
             }
         }
 
-        // Check bear CHOCH: was in uptrend (older lows lower), now latest is lower
         if (lows.size() >= 4) {
             boolean uptrend = true;
             for (int i = 2; i < Math.min(4, lows.size()); i++) {
@@ -238,24 +157,39 @@ public class AiDailyPatternEngine {
                 }
             }
             if (uptrend && lows.get(0).price < lows.get(1).price * (1 - SWING_PCT)) {
-                // PROXIMITY: ltp must be within 1.5% below the CHOCH level (lows[1])
                 double chochLevel = lows.get(1).price;
                 if (ltp >= chochLevel * 0.985) {
-                    return -1.0; // bear CHOCH confirmed, price still near level
+                    return -1.0;
                 }
-                return 0; // CHOCH confirmed but price dropped too far
+                return 0;
             }
         }
         return 0;
     }
 
     /**
-     * Order Block.
-     * Bullish OB: last bearish candle before a bullish BOS.
-     *   Price returning to OB zone = institutional demand.
-     * Bearish OB: last bullish candle before a bearish BOS.
-     *   Price returning to OB zone = institutional supply.
-     * Strict: OB must be clear candle body, price currently inside OB zone.
+     * Order Block (STRICT, further tightened per explicit user request
+     * for better win rate - 3 confirmed gaps fixed):
+     *
+     *   a) Volume threshold aligned to 1.2x (was 1.1x) - matches
+     *      detectBOS()'s own established standard elsewhere in this
+     *      file exactly. Previously Order Block's underlying BOS
+     *      confirmation was weaker than the dedicated BOS pattern's.
+     *
+     *   b) Freshness check added - verifies this is the FIRST time
+     *      price has returned to the OB zone since it formed. In
+     *      genuine SMC theory, an order block's resting institutional
+     *      orders are typically consumed on the first retest; a zone
+     *      that's already been revisited (whether it held or not) is a
+     *      depleted, weaker signal - previously any retest, first or
+     *      fifth, was credited identically.
+     *
+     *   c) Invalidation check added - verifies price hasn't already
+     *      closed cleanly through the OB's far side (below the bullish
+     *      OB's bottom, or above the bearish OB's top) at any point
+     *      since it formed. A level price has already broken through is
+     *      a failed zone, not valid support/resistance - previously
+     *      this was never checked at all.
      */
     private double detectOrderBlock(double ltp, List<Candle> w,
                                     List<SwingPoint> highs, List<SwingPoint> lows,
@@ -265,33 +199,51 @@ public class AiDailyPatternEngine {
 
         double avgVol = averageVolume(w, 20);
 
-        // Find bullish BOS candles in recent history (last 20 candles)
         for (int i = Math.max(1, n - 20); i < n; i++) {
             double close = w.get(i).getClose().doubleValue();
             double vol   = w.get(i).getVolume();
-            // Is this a bullish BOS candle?
             boolean isBullBOS = false;
             for (SwingPoint sh : highs) {
                 if (sh.index < i && sh.index >= i - 15) {
-                    if (close > sh.price * (1 + SWING_PCT) && vol > avgVol * 1.1) {
+                    // FIX: aligned to 1.2x, matching detectBOS()
+                    if (close > sh.price * (1 + SWING_PCT) && vol > avgVol * 1.2) {
                         isBullBOS = true;
                         break;
                     }
                 }
             }
             if (isBullBOS) {
-                // FIX: was looking back 10 candles — OB is the LAST opposing candle
-                // Standard SMC: look back max 3 candles before BOS for OB
                 for (int j = i - 1; j >= Math.max(0, i - 3); j--) {
                     double obOpen  = w.get(j).getOpen().doubleValue();
                     double obClose = w.get(j).getClose().doubleValue();
                     if (obClose < obOpen) { // bearish candle = bullish OB
                         double obTop = obOpen;
                         double obBot = obClose;
-                        // Is current price inside the OB zone?
-                        if (ltp >= obBot * (1 - OB_TOLERANCE_DN)
+
+                        // FIX: freshness + invalidation check across every
+                        // candle since the OB formed (from the BOS candle
+                        // at i, up to but excluding the current/last candle).
+                        boolean alreadyRetested = false;
+                        boolean invalidated = false;
+                        for (int m = i + 1; m < n - 1; m++) {
+                            double mLow   = w.get(m).getLow().doubleValue();
+                            double mClose = w.get(m).getClose().doubleValue();
+                            if (mLow <= obTop * (1 + OB_TOLERANCE_UP)
+                                    && mLow >= obBot * (1 - OB_TOLERANCE_DN)) {
+                                alreadyRetested = true; // price already dipped
+                                // into this zone before
+                            }
+                            if (mClose < obBot * (1 - OB_TOLERANCE_DN)) {
+                                invalidated = true; // price already closed
+                                // clean through the zone
+                            }
+                        }
+
+                        // Is current price inside the OB zone, fresh, and not invalidated?
+                        if (!alreadyRetested && !invalidated
+                                && ltp >= obBot * (1 - OB_TOLERANCE_DN)
                                 && ltp <= obTop * (1 + OB_TOLERANCE_UP)) {
-                            return 1.0; // price at bullish order block
+                            return 1.0; // price at a fresh, valid bullish order block
                         }
                         break; // only use the most recent bearish candle
                     }
@@ -306,7 +258,8 @@ public class AiDailyPatternEngine {
             boolean isBearBOS = false;
             for (SwingPoint sl : lows) {
                 if (sl.index < i && sl.index >= i - 15) {
-                    if (close < sl.price * (1 - SWING_PCT) && vol > averageVolume(w, 20) * 1.1) {
+                    // FIX: aligned to 1.2x, matching detectBOS()
+                    if (close < sl.price * (1 - SWING_PCT) && vol > avgVol * 1.2) {
                         isBearBOS = true;
                         break;
                     }
@@ -319,9 +272,27 @@ public class AiDailyPatternEngine {
                     if (obClose > obOpen) { // bullish candle = bearish OB
                         double obTop = obClose;
                         double obBot = obOpen;
-                        if (ltp >= obBot * (1 - OB_TOLERANCE_UP)
+
+                        // FIX: same freshness + invalidation check, mirrored
+                        boolean alreadyRetested = false;
+                        boolean invalidated = false;
+                        for (int m = i + 1; m < n - 1; m++) {
+                            double mHigh  = w.get(m).getHigh().doubleValue();
+                            double mClose = w.get(m).getClose().doubleValue();
+                            if (mHigh >= obBot * (1 - OB_TOLERANCE_UP)
+                                    && mHigh <= obTop * (1 + OB_TOLERANCE_DN)) {
+                                alreadyRetested = true;
+                            }
+                            if (mClose > obTop * (1 + OB_TOLERANCE_DN)) {
+                                invalidated = true; // price already closed
+                                // clean through the zone
+                            }
+                        }
+
+                        if (!alreadyRetested && !invalidated
+                                && ltp >= obBot * (1 - OB_TOLERANCE_UP)
                                 && ltp <= obTop * (1 + OB_TOLERANCE_DN)) {
-                            return -1.0; // price at bearish order block
+                            return -1.0; // price at a fresh, valid bearish order block
                         }
                         break;
                     }
@@ -332,7 +303,8 @@ public class AiDailyPatternEngine {
     }
 
     /**
-     * FVG — Fair Value Gap (STRICT version).
+     * FVG — Fair Value Gap (STRICT version, further tightened per
+     * explicit user request for better win rate).
      *
      * Three-candle pattern identifying institutional imbalance zones.
      *
@@ -347,6 +319,15 @@ public class AiDailyPatternEngine {
      *
      * Gap minimum: 0.5% (increased from 0.3%) — small gaps are just noise.
      * Confirmation: price must have been on the far side of the gap after formation.
+     *
+     * FIX (per explicit user request - freshness gap found, same class
+     * already fixed for sweep and order block): previously confirmed
+     * price traveled away from the gap, but never checked whether the
+     * gap had ALREADY been filled/retested on an earlier visit before
+     * this current one. A gap that's already been partially or fully
+     * filled once is a weaker, already-consumed imbalance - now
+     * requires this to be the genuine first return to the gap since it
+     * formed.
      */
     private double detectFVG(double ltp, List<Candle> w, double atr) {
         int n = w.size();
@@ -372,13 +353,25 @@ public class AiDailyPatternEngine {
                         break;
                     }
                 }
+                // FIX: check no earlier candle already dipped into this
+                // gap zone before now - if so, it's already been
+                // retested/consumed once, not a fresh first return.
+                boolean alreadyFilled = false;
+                for (int k = i + 3; k < n - 1; k++) {
+                    double kLow = w.get(k).getLow().doubleValue();
+                    if (kLow <= l3 * 1.002 && kLow >= h1 * 0.999) {
+                        alreadyFilled = true;
+                        break;
+                    }
+                }
                 // Entry: price is now pulling back INTO the gap from above
                 // ltp must be inside gap AND last close was above gap
-                if (priceAboveGap && ltp >= h1 * 0.999 && ltp <= l3 * 1.002) {
+                if (priceAboveGap && !alreadyFilled
+                        && ltp >= h1 * 0.999 && ltp <= l3 * 1.002) {
                     double lastClose = w.get(n - 2).getClose().doubleValue();
                     // Last close was above the gap bottom = entering from above
                     if (lastClose > ltp) {
-                        return 1.0; // bullish FVG pullback entry
+                        return 1.0; // bullish FVG pullback entry, fresh gap
                     }
                 }
             }
@@ -394,11 +387,21 @@ public class AiDailyPatternEngine {
                         break;
                     }
                 }
+                // FIX: same freshness check, mirrored
+                boolean alreadyFilled = false;
+                for (int k = i + 3; k < n - 1; k++) {
+                    double kHigh = w.get(k).getHigh().doubleValue();
+                    if (kHigh >= h3 * 0.998 && kHigh <= l1 * 1.001) {
+                        alreadyFilled = true;
+                        break;
+                    }
+                }
                 // Entry: price bouncing up into the gap from below
-                if (priceBelowGap && ltp >= h3 * 0.998 && ltp <= l1 * 1.001) {
+                if (priceBelowGap && !alreadyFilled
+                        && ltp >= h3 * 0.998 && ltp <= l1 * 1.001) {
                     double lastClose = w.get(n - 2).getClose().doubleValue();
                     if (lastClose < ltp) {
-                        return -1.0; // bearish FVG bounce entry
+                        return -1.0; // bearish FVG bounce entry, fresh gap
                     }
                 }
             }
@@ -406,17 +409,6 @@ public class AiDailyPatternEngine {
         return 0;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // WYCKOFF PATTERNS
-    // ═══════════════════════════════════════════════════════════════════════
-
-    /**
-     * Accumulation / Distribution.
-     * Accumulation: price range contracting, holding near lows, volume declining.
-     *   Last candle breaks above range = Spring/markup signal.
-     * Distribution: range contracting at highs, volume declining, then break down.
-     * Strict: requires 15+ days of contraction before calling it.
-     */
     private double detectAccumDist(double ltp, List<Candle> w, double atr) {
         int n = w.size();
         if (n < 20) return 0;
@@ -424,19 +416,13 @@ public class AiDailyPatternEngine {
         int look = Math.min(20, n);
         List<Candle> recent = w.subList(n - look, n);
 
-        // Price range in window
         double high = recent.stream().mapToDouble(c -> c.getHigh().doubleValue()).max().orElse(0);
         double low  = recent.stream().mapToDouble(c -> c.getLow().doubleValue()).min().orElse(0);
         if (high == 0 || low == 0) return 0;
         double range = (high - low) / ((high + low) / 2.0);
 
-        // Is range contracting? (range < 8% over 20 days = tight consolidation)
-        if (range > 0.08) return 0; // too wide — not accumulation/distribution
+        if (range > 0.08) return 0;
 
-        // FIX: Wyckoff accumulation uses DIRECTIONAL volume check
-        // Accumulation: up-day average volume > down-day average volume
-        // (institutions buying quietly on down days but absorbing on up days)
-        // Old code compared total early vs late volume — wrong.
         double upVol = 0, downVol = 0;
         int upCount = 0, downCount = 0;
         for (Candle can : recent) {
@@ -447,23 +433,16 @@ public class AiDailyPatternEngine {
         }
         double avgUpVol   = upCount   > 0 ? upVol   / upCount   : 1;
         double avgDownVol = downCount > 0 ? downVol / downCount : 1;
-        // STRICT: up-day avg volume must be clearly higher than down-day avg volume
-        // Real accumulation = institutions buying actively on up days
-        // Old: >= 0.9 (fired on almost every range-bound stock)
-        boolean volDeclining = avgUpVol > avgDownVol * 1.2; // up days 20%+ more volume than down days
+        boolean volDeclining = avgUpVol > avgDownVol * 1.2;
 
-        // Where is price within the range?
         double rangePos = (ltp - low) / (high - low);
 
-        // Accumulation: range is tight, volume declining, price near lows, last candle up
         if (volDeclining && rangePos < 0.35) {
-            // Near bottom of consolidation = potential accumulation
             Candle last = recent.get(look - 1);
             boolean lastBull = last.getClose().doubleValue() > last.getOpen().doubleValue();
-            return lastBull ? 0.8 : 0.4; // stronger if last candle is bullish
+            return lastBull ? 0.8 : 0.4;
         }
 
-        // Distribution: tight range, volume declining, price near highs, last candle down
         if (volDeclining && rangePos > 0.65) {
             Candle last = recent.get(look - 1);
             boolean lastBear = last.getClose().doubleValue() < last.getOpen().doubleValue();
@@ -473,16 +452,21 @@ public class AiDailyPatternEngine {
         return 0;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // CHART PATTERNS
-    // ═══════════════════════════════════════════════════════════════════════
-
     /**
-     * Triple Top / Triple Bottom.
+     * Triple Top / Triple Bottom (further tightened per explicit user
+     * request for better win rate).
      * Three peaks at approximately same level (within CLUSTER_PCT) separated by valleys.
      * Triple Bottom: three troughs at same level — bullish reversal signal.
      * Triple Top: three peaks at same level — bearish reversal signal.
      * Strict: peaks separated by at least MIN_SWING_SEP candles each.
+     *
+     * FIX (per explicit user request - invalidation gap found, same
+     * class already fixed for order block): previously only checked
+     * price is currently near the 3rd touch, but never verified price
+     * hadn't already decisively broken through that level (and come
+     * back) since that 3rd touch formed. A level that's already failed
+     * once is not a genuine, still-intact pattern - now requires no
+     * decisive break has occurred since the pattern completed.
      */
     private double detectTriplePattern(double ltp, List<Candle> w,
                                        List<SwingPoint> highs, List<SwingPoint> lows) {
@@ -499,9 +483,20 @@ public class AiDailyPatternEngine {
                 double ref = l1.price;
                 if (Math.abs(l2.price - ref) / ref < CLUSTER_PCT
                         && Math.abs(l3.price - ref) / ref < CLUSTER_PCT) {
+                    // FIX: verify no decisive break BELOW the triple-
+                    // bottom level occurred since the 3rd (most recent)
+                    // touch - a genuine break invalidates the pattern.
+                    boolean brokenSince = false;
+                    for (int m = l1.index + 1; m < w.size(); m++) {
+                        if (w.get(m).getClose().doubleValue() < ref * (1 - CLUSTER_PCT)) {
+                            brokenSince = true;
+                            break;
+                        }
+                    }
                     // Price bouncing from third bottom
-                    if (Math.abs(ltp - l3.price) / l3.price < 0.03 && ltp > l3.price) {
-                        return 1.0; // triple bottom confirmed
+                    if (!brokenSince
+                            && Math.abs(ltp - l3.price) / l3.price < 0.03 && ltp > l3.price) {
+                        return 1.0; // triple bottom confirmed, still intact
                     }
                 }
             }
@@ -518,8 +513,18 @@ public class AiDailyPatternEngine {
                 double ref = h1.price;
                 if (Math.abs(h2.price - ref) / ref < CLUSTER_PCT
                         && Math.abs(h3.price - ref) / ref < CLUSTER_PCT) {
-                    if (Math.abs(ltp - h3.price) / h3.price < 0.03 && ltp < h3.price) {
-                        return -1.0; // triple top confirmed
+                    // FIX: verify no decisive break ABOVE the triple-top
+                    // level occurred since the 3rd touch.
+                    boolean brokenSince = false;
+                    for (int m = h1.index + 1; m < w.size(); m++) {
+                        if (w.get(m).getClose().doubleValue() > ref * (1 + CLUSTER_PCT)) {
+                            brokenSince = true;
+                            break;
+                        }
+                    }
+                    if (!brokenSince
+                            && Math.abs(ltp - h3.price) / h3.price < 0.03 && ltp < h3.price) {
+                        return -1.0; // triple top confirmed, still intact
                     }
                 }
             }
@@ -528,12 +533,20 @@ public class AiDailyPatternEngine {
     }
 
     /**
-     * Head and Shoulders (top) and Inverse Head and Shoulders (bottom).
+     * Head and Shoulders (top) and Inverse Head and Shoulders (bottom),
+     * further tightened per explicit user request for better win rate.
      * H&S Top: left shoulder, higher head, right shoulder (lower than head, near left).
      *   Bearish reversal. SHORT when price breaks neckline.
      * Inv H&S: inverted at lows. Bullish reversal. LONG when price breaks neckline.
      * Strict: head must be clearly higher/lower than both shoulders.
      *         Shoulders within 3% of each other.
+     *
+     * FIX (per explicit user request - invalidation gap found, same
+     * class already fixed for order block): the confirmed-breakdown/
+     * breakout checks already required proximity, but never verified
+     * price hadn't already reclaimed back through the neckline (closed
+     * back on the wrong side) since the actual break - a genuine
+     * failed breakdown/breakout, not a still-valid one.
      */
     private double detectHeadAndShoulders(double ltp, List<Candle> w,
                                           List<SwingPoint> highs, List<SwingPoint> lows) {
@@ -561,7 +574,20 @@ public class AiDailyPatternEngine {
                     // PROXIMITY: price must be within 2% below neckline
                     // If price already dropped 4%+ below neckline → short opportunity gone
                     if (ltp >= neckline * 0.980) {
-                        return -1.0; // confirmed H&S breakdown, still tradeable
+                        // FIX: verify price hasn't already reclaimed back
+                        // above the neckline since the right shoulder -
+                        // a genuine break-then-reclaim invalidates the setup.
+                        boolean reclaimed = false;
+                        for (int m = rs.index + 1; m < w.size() - 1; m++) {
+                            if (w.get(m).getClose().doubleValue() > neckline * 1.003) {
+                                reclaimed = true;
+                                break;
+                            }
+                        }
+                        if (!reclaimed) {
+                            return -1.0; // confirmed H&S breakdown, still tradeable
+                        }
+                        return 0; // already reclaimed - failed breakdown
                     }
                     return 0; // too far below neckline — chasing the short
                 }
@@ -589,7 +615,19 @@ public class AiDailyPatternEngine {
                     // PROXIMITY: price must be within 2% above neckline
                     // If price already ran 4%+ above neckline → long opportunity gone
                     if (ltp <= neckline * 1.020) {
-                        return 1.0; // confirmed inv H&S breakout, still tradeable
+                        // FIX: verify price hasn't already fallen back
+                        // below the neckline since the right shoulder.
+                        boolean reclaimed = false;
+                        for (int m = rs.index + 1; m < w.size() - 1; m++) {
+                            if (w.get(m).getClose().doubleValue() < neckline * 0.997) {
+                                reclaimed = true;
+                                break;
+                            }
+                        }
+                        if (!reclaimed) {
+                            return 1.0; // confirmed inv H&S breakout, still tradeable
+                        }
+                        return 0; // already fell back - failed breakout
                     }
                     return 0; // too far above neckline — chasing the long
                 }
@@ -598,96 +636,44 @@ public class AiDailyPatternEngine {
         return 0;
     }
 
-    /**
-     * Triangle Patterns (Ascending, Descending, Symmetrical, Expanding).
-     * Needs at least 2 swing highs + 2 swing lows to define trendlines.
-     * Ascending:  horizontal highs + rising lows → LONG breakout
-     * Descending: horizontal lows  + falling highs → SHORT breakdown
-     * Symmetrical: converging highs and lows → neutral (break either way)
-     * Expanding:  diverging highs and lows → volatile
-     */
-    /**
-     * Triangle Patterns — STRICT version.
-     *
-     * Requires minimum 3 swing highs AND 3 swing lows.
-     * Two points define any line — 3+ touches are required to confirm
-     * a real horizontal resistance or rising support.
-     *
-     * Ascending:   highs within 1% of each other (flat resistance, 3 tests)
-     *              + rising lows (2+ higher lows)
-     *              + price near flat resistance = breakout imminent
-     *
-     * Descending:  lows within 1% of each other (flat support, 3 tests)
-     *              + falling highs
-     *
-     * Symmetrical: removed — too many false positives. Two converging lines
-     *              defined by 2 points each is not a validated triangle.
-     */
     private double detectTriangle(double ltp, List<Candle> w,
                                   List<SwingPoint> highs, List<SwingPoint> lows) {
-        // Require minimum 3 swing points per side for a validated triangle
         if (highs.size() < 3 || lows.size() < 3) return 0;
 
-        // Flat resistance check: all swing highs within 1% of the average high
         double avgHigh = highs.stream().limit(3).mapToDouble(p -> p.price).average().orElse(0);
         boolean flatHighs = avgHigh > 0 && highs.stream().limit(3)
                 .allMatch(p -> Math.abs(p.price - avgHigh) / avgHigh < 0.010);
 
-        // Flat support check: all swing lows within 1% of the average low
         double avgLow = lows.stream().limit(3).mapToDouble(p -> p.price).average().orElse(0);
         boolean flatLows = avgLow > 0 && lows.stream().limit(3)
                 .allMatch(p -> Math.abs(p.price - avgLow) / avgLow < 0.010);
 
-        // Rising lows: each successive low is higher than the previous
-        // List is newest-first, so lows[0] > lows[1] > lows[2] = rising lows
         boolean risingLows = lows.get(0).price > lows.get(1).price * (1 + 0.003)
                 && lows.get(1).price > lows.get(2).price * (1 + 0.003);
 
-        // Falling highs: each successive high is lower
-        // List newest-first: highs[0] < highs[1] < highs[2] = falling highs
         boolean fallingHighs = highs.get(0).price < highs.get(1).price * (1 - 0.003)
                 && highs.get(1).price < highs.get(2).price * (1 - 0.003);
 
-        // ── Ascending triangle (LONG setup) ──────────────────────────────
-        // Flat resistance tested 3 times + rising lows
         if (flatHighs && risingLows) {
-            // Price near flat resistance = approaching breakout point
             if (ltp > avgHigh * 0.990 && ltp < avgHigh * 1.010) return 0.8;
-            // Confirmed breakout above resistance with clear margin
             if (ltp > avgHigh * 1.010) return 1.0;
         }
 
-        // ── Descending triangle (SHORT setup) ─────────────────────────────
-        // Flat support tested 3 times + falling highs
         if (flatLows && fallingHighs) {
             if (ltp < avgLow * 1.010 && ltp > avgLow * 0.990) return -0.8;
             if (ltp < avgLow * 0.990) return -1.0;
         }
 
-        // Symmetrical and Expanding triangles REMOVED — insufficient validation
-        // without at minimum 3 validated touches per side and a confirmed breakout
-
         return 0;
     }
 
-    /**
-     * Channel Patterns (Rising, Falling, Breakout, Reversal).
-     * Uses linear regression on swing highs and lows.
-     * Rising channel:  both slopes positive — bounce off lower channel line (LONG)
-     * Falling channel: both slopes negative — bounce off upper channel line (SHORT)
-     * Channel breakout: price breaks beyond channel (momentum trade)
-     * Channel reversal: price touches channel extreme and reverses
-     */
     private double detectChannel(double ltp, List<Candle> w,
                                  List<SwingPoint> highs, List<SwingPoint> lows) {
-        // FIX: require 3+ swing points per side (slopeOf now requires 3+)
         if (highs.size() < 3 || lows.size() < 3) return 0;
 
-        // Compute slope direction from recent swing highs and lows
         double highSlope = slopeOf(highs);
         double lowSlope  = slopeOf(lows);
 
-        // Project channel boundaries to current position
         SwingPoint latestHigh = highs.get(0);
         SwingPoint latestLow  = lows.get(0);
         int n = w.size();
@@ -695,94 +681,69 @@ public class AiDailyPatternEngine {
         double projectedHighLine = latestHigh.price + highSlope * (n - 1 - latestHigh.index);
         double projectedLowLine  = latestLow.price  + lowSlope  * (n - 1 - latestLow.index);
 
-        // Rising channel: both slopes positive (FIX: threshold 0.001 — was 0.003 missing slow channels)
         if (highSlope > 0.001 && lowSlope > 0.001) {
-            // Price near lower channel line = bounce entry for LONG
             if (projectedLowLine > 0 && Math.abs(ltp - projectedLowLine) / projectedLowLine < CHANNEL_TOL) {
-                return 0.9; // rising channel — at support line
+                return 0.9;
             }
-            // Price near upper channel line = potential SHORT or exit LONG
             if (projectedHighLine > 0 && Math.abs(ltp - projectedHighLine) / projectedHighLine < CHANNEL_TOL) {
-                return -0.4; // at resistance of rising channel
+                return -0.4;
             }
-            // Breakout above upper channel = strong momentum LONG
             if (projectedHighLine > 0 && ltp > projectedHighLine * (1 + CHANNEL_TOL)) {
-                return 1.0; // rising channel breakout
+                return 1.0;
             }
         }
 
-        // Falling channel: both slopes negative (FIX: threshold 0.001)
         if (highSlope < -0.001 && lowSlope < -0.001) {
-            // Price near upper channel line = SHORT entry
             if (projectedHighLine > 0 && Math.abs(ltp - projectedHighLine) / projectedHighLine < CHANNEL_TOL) {
-                return -0.9; // falling channel — at resistance line
+                return -0.9;
             }
-            // Price near lower channel line = potential LONG or cover SHORT
             if (projectedLowLine > 0 && Math.abs(ltp - projectedLowLine) / projectedLowLine < CHANNEL_TOL) {
-                return 0.4; // at support of falling channel
+                return 0.4;
             }
-            // Breakdown below lower channel = strong momentum SHORT
             if (projectedLowLine > 0 && ltp < projectedLowLine * (1 - CHANNEL_TOL)) {
-                return -1.0; // falling channel breakdown
+                return -1.0;
             }
         }
 
         return 0;
     }
 
-    /**
-     * Trendline Breakout and Bounce on DAILY candles.
-     * Uses actual swing points (not arbitrary candle indices).
-     * Bounce: price touching trendline and rejecting — continuation setup.
-     * Breakout: price closing beyond trendline with volume — momentum setup.
-     * Strict: needs 3+ touches to validate trendline before calling breakout.
-     */
     private double detectTrendlinePattern(double ltp, List<Candle> w,
                                           List<SwingPoint> highs, List<SwingPoint> lows,
                                           double atr) {
         int n = w.size();
         double avgVol = averageVolume(w, 20);
 
-        // Rising trendline (support): 3+ swing lows on the same line
         if (lows.size() >= 3) {
-            // Define line from oldest to newest low
-            SwingPoint l1 = lows.get(lows.size() - 1); // oldest
-            SwingPoint l2 = lows.get(0);                // newest
+            SwingPoint l1 = lows.get(lows.size() - 1);
+            SwingPoint l2 = lows.get(0);
             if (l2.index > l1.index) {
                 double slope     = (l2.price - l1.price) / (l2.index - l1.index);
                 double projected = l2.price + slope * (n - 1 - l2.index);
 
-                // Count INTERMEDIATE touches only (exclude l1 and l2 — definition points)
-                // l1 and l2 are always on the line by construction.
-                // Real validation requires 2+ intermediate points within tolerance.
                 int touches = 0;
                 for (SwingPoint l : lows) {
-                    if (l.index == l1.index || l.index == l2.index) continue; // skip definition points
+                    if (l.index == l1.index || l.index == l2.index) continue;
                     double expected = l2.price + slope * (n - 1 - l.index);
                     if (expected > 0 && Math.abs(l.price - expected) / expected < TRENDLINE_TOL) {
                         touches++;
                     }
                 }
 
-                // Require 2 independent intermediate touches (not the definition points)
                 if (touches >= 2 && projected > 0) {
                     double dist = (ltp - projected) / projected;
 
-                    // Bounce: price at trendline (within 1.2%)
                     if (Math.abs(dist) < TRENDLINE_TOL && slope > 0) {
-                        return 0.9; // trendline bounce — bullish
+                        return 0.9;
                     }
-                    // Breakout: price closed above with volume (rising trendline = no signal for LONG)
-                    // Breakdown below rising trendline = bearish
                     if (dist < -TRENDLINE_TOL) {
                         double lastVol = w.get(n - 1).getVolume();
-                        return lastVol > avgVol * 1.2 ? -1.0 : -0.6; // trendline breakdown
+                        return lastVol > avgVol * 1.2 ? -1.0 : -0.6;
                     }
                 }
             }
         }
 
-        // Falling trendline (resistance): 3+ swing highs on the same line
         if (highs.size() >= 3) {
             SwingPoint h1 = highs.get(highs.size() - 1);
             SwingPoint h2 = highs.get(0);
@@ -792,25 +753,22 @@ public class AiDailyPatternEngine {
 
                 int touches = 0;
                 for (SwingPoint h : highs) {
-                    if (h.index == h1.index || h.index == h2.index) continue; // skip definition points
+                    if (h.index == h1.index || h.index == h2.index) continue;
                     double expected = h2.price + slope * (n - 1 - h.index);
                     if (expected > 0 && Math.abs(h.price - expected) / expected < TRENDLINE_TOL) {
                         touches++;
                     }
                 }
 
-                // Require 2 independent intermediate touches
                 if (touches >= 2 && projected > 0) {
                     double dist = (ltp - projected) / projected;
 
-                    // Bounce at falling trendline = bearish (rejection)
                     if (Math.abs(dist) < TRENDLINE_TOL && slope < 0) {
-                        return -0.9; // falling trendline rejection — bearish
+                        return -0.9;
                     }
-                    // Breakout ABOVE falling trendline = bullish
                     if (dist > TRENDLINE_TOL) {
                         double lastVol = w.get(n - 1).getVolume();
-                        return lastVol > avgVol * 1.2 ? 1.0 : 0.6; // trendline breakout
+                        return lastVol > avgVol * 1.2 ? 1.0 : 0.6;
                     }
                 }
             }
@@ -819,17 +777,12 @@ public class AiDailyPatternEngine {
         return 0;
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // HELPERS
-    // ═══════════════════════════════════════════════════════════════════════
-
     record SwingPoint(int index, double price) {}
 
-    /** Swing highs: local maxima with 3 candles on each side (daily = meaningful swings) */
     private List<SwingPoint> findSwingHighs(List<Candle> w) {
         List<SwingPoint> result = new ArrayList<>();
         int n = w.size();
-        int lb = 3; // FIX: was 2 — too many minor swings. 3 candles each side for daily
+        int lb = 3;
         for (int i = lb; i < n - lb; i++) {
             double h = w.get(i).getHigh().doubleValue();
             boolean isSwing = true;
@@ -841,16 +794,14 @@ public class AiDailyPatternEngine {
             }
             if (isSwing) result.add(new SwingPoint(i, h));
         }
-        // Sort newest first
         result.sort((a, b) -> Integer.compare(b.index, a.index));
         return result;
     }
 
-    /** Swing lows: local minima — 3 candles each side for daily */
     private List<SwingPoint> findSwingLows(List<Candle> w) {
         List<SwingPoint> result = new ArrayList<>();
         int n = w.size();
-        int lb = 3; // FIX: was 2 — 3 candles each side for meaningful daily swings
+        int lb = 3;
         for (int i = lb; i < n - lb; i++) {
             double l = w.get(i).getLow().doubleValue();
             boolean isSwing = true;
@@ -887,14 +838,8 @@ public class AiDailyPatternEngine {
         return count > 0 ? sum / count : 1;
     }
 
-    /**
-     * Linear regression slope across ALL swing points.
-     * FIX: was using only first and last point — any 2 points define a line.
-     * Now uses least-squares regression across all points for robust slope.
-     * Also requires minimum 3 points for a reliable channel slope.
-     */
     private double slopeOf(List<SwingPoint> points) {
-        if (points.size() < 3) return 0; // FIX: require 3+ points
+        if (points.size() < 3) return 0;
         int n = points.size();
         double sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
         for (SwingPoint p : points) {
@@ -906,7 +851,6 @@ public class AiDailyPatternEngine {
         double denom = n * sumX2 - sumX * sumX;
         if (denom == 0) return 0;
         double rawSlope = (n * sumXY - sumX * sumY) / denom;
-        // Normalise by average price to get per-candle percentage slope
         double avgPrice = sumY / n;
         return avgPrice > 0 ? rawSlope / avgPrice : 0;
     }

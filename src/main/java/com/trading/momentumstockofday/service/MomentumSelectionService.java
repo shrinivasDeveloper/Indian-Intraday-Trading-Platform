@@ -67,7 +67,7 @@ public class MomentumSelectionService {
                         // filter - the existing stockCount() > 0 filter
                         // above is completely untouched, per explicit
                         // instruction not to modify existing logic.
-                        .filter(e -> e.getValue().stockCount() > 10)
+                        .filter(e -> e.getValue().stockCount() > 7)
                         // FIX (found via direct user report, confirmed
                         // precisely against real live data): ranking by
                         // RAW value always favored any positive sector

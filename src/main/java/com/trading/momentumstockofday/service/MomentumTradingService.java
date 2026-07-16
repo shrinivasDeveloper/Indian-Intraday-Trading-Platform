@@ -330,7 +330,25 @@ public class MomentumTradingService {
         }
     }
 
-    public void exitTrade(MomentumTrade trade, String reason) {
+    /**
+     * FIX (confirmed serious bug found via direct user report - NAM-INDIA
+     * showed ACTIVE forever in the UI, with no exit order ever appearing
+     * in the broker's order list). Root cause: this method's own catch
+     * block already logged "will retry next cycle" on failure, but never
+     * actually communicated that failure to the caller - every caller
+     * was unconditionally clearing its in-memory active-trade reference
+     * right after calling this, regardless of whether the exit genuinely
+     * succeeded. If placeMarketOrder() or pollForFill() ever threw (
+     * network blip, transient API error, order rejection), the database
+     * correctly stayed ACTIVE (markClosed() never ran) - but the
+     * scheduler's only reference to retry it was destroyed anyway,
+     * turning a single transient failure into a PERMANENT ghost position:
+     * still ACTIVE in the UI/database forever, never monitored or
+     * retried again until the app happened to restart. Now returns
+     * true/false so every caller can correctly keep retrying instead of
+     * silently abandoning the trade.
+     */
+    public boolean exitTrade(MomentumTrade trade, String reason) {
         boolean isLong = "LONG".equals(trade.getDirection());
         try {
             String orderId = placeMarketOrder(trade.getSymbol(),
@@ -355,9 +373,11 @@ public class MomentumTradingService {
             log.info("[MOMENTUM-TRADE] EXIT {}: {} qty={} reason={} exitPrice={}",
                     fill.filled() ? "CONFIRMED" : "UNCONFIRMED (best-effort price)",
                     trade.getSymbol(), trade.getQuantity(), reason, exitPrice);
+            return true;
         } catch (KiteException | Exception e) {
             log.error("[MOMENTUM-TRADE] Exit FAILED for {} ({}): {} - will retry next cycle",
                     trade.getSymbol(), reason, e.getMessage());
+            return false;
         }
     }
 
@@ -395,8 +415,9 @@ public class MomentumTradingService {
 
             boolean slHit = isLong ? ltp <= trailStop : ltp >= trailStop;
             if (slHit) {
-                exitTrade(trade, trade.isTrailingActive() ? "TRAILING_STOP_HIT" : "SL_HIT");
-                return false; // closed
+                boolean exited = exitTrade(trade, trade.isTrailingActive() ? "TRAILING_STOP_HIT" : "SL_HIT");
+                return !exited; // FIX: only report "closed" if the exit genuinely succeeded -
+                // otherwise stay ACTIVE so the scheduler keeps retrying next cycle
             }
 
             checkAndUpdateTrailingStop(trade, ltp);
