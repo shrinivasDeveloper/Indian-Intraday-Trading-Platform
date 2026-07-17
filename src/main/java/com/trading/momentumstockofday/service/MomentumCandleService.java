@@ -199,7 +199,7 @@ public class MomentumCandleService {
     @EventListener(ApplicationReadyEvent.class)
     @Async("tradingExecutor")
     public void bootstrap30MinuteCandles() {
-        try { Thread.sleep(660_000); } catch (InterruptedException ie) {
+        try { Thread.sleep(900_000); } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             return;
         }
