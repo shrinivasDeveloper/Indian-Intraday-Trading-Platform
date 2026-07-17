@@ -180,6 +180,84 @@ public class MomentumCandleService {
                 loaded, symbols.size());
     }
 
+    /**
+     * FIX (per explicit user request: 30-min gate had no bootstrap,
+     * unlike daily - meaning the first trade attempt for any symbol
+     * each day risked a real, synchronous API call delay at the exact
+     * moment of order entry). Mirrors the daily bootstrap's exact
+     * proven structure (same throttle, same error handling, same
+     * progress logging) - the only deliberate difference is timing:
+     * scheduled to start at 660 seconds (11 minutes), genuinely AFTER
+     * the daily bootstrap finishes (~360s start + ~225s runtime =
+     * ~585s completion), not competing with it - avoiding the exact
+     * rate-limit contention class of issue already found and fixed
+     * once tonight for the daily bootstrap's own timing. By this point
+     * the instrument token cache is already warm from the daily
+     * bootstrap (shared via resolveToken()), so no dedicated retry
+     * loop is needed here - a quick single check is sufficient.
+     */
+    @EventListener(ApplicationReadyEvent.class)
+    @Async("tradingExecutor")
+    public void bootstrap30MinuteCandles() {
+        try { Thread.sleep(660_000); } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return;
+        }
+
+        Set<String> symbols = sectorHeatmapDataService.getAllTrackedSymbols();
+        if (symbols.isEmpty()) {
+            log.warn("[MOMENTUM-CANDLE] 30-min candle bootstrap skipped - Sector Heatmap has " +
+                    "no symbols loaded yet. The existing cache-on-first-use fallback in " +
+                    "fetch30MinuteHistoryCandles() will still fetch on demand for any symbol " +
+                    "actually selected as a candidate.");
+            return;
+        }
+
+        // Quick check only (not the full 3-attempt dedicated retry the
+        // daily bootstrap needs) - by 11 minutes in, the instrument
+        // token cache should already be warm from the daily bootstrap's
+        // own successful run 5 minutes earlier.
+        Map<String, Long> tokenCache = getOrBuildInstrumentTokenCache();
+        if (tokenCache.isEmpty()) {
+            log.warn("[MOMENTUM-CANDLE] 30-min candle bootstrap skipped - instrument token " +
+                    "cache still empty even after the daily bootstrap should have warmed it. " +
+                    "The existing cache-on-first-use fallback will still fetch on demand for " +
+                    "any symbol actually selected as a candidate later.");
+            return;
+        }
+
+        log.info("[MOMENTUM-CANDLE] 30-min candle bootstrap starting: {} symbols (full Sector " +
+                "Heatmap universe, ~60 days each)", symbols.size());
+
+        int loaded = 0;
+        long nowMs = System.currentTimeMillis();
+        for (String symbol : symbols) {
+            try {
+                List<MomentumCandidate.Candle> thirtyMin = fetch30MinuteCandlesFromApi(symbol);
+                if (!thirtyMin.isEmpty()) {
+                    thirtyMinCandleCache.put(symbol, thirtyMin);
+                    thirtyMinCandleCacheTimestamp.put(symbol, nowMs);
+                    loaded++;
+                }
+                if (loaded % 50 == 0 && loaded > 0) {
+                    log.info("[MOMENTUM-CANDLE] 30-min candle bootstrap progress: {}/{}",
+                            loaded, symbols.size());
+                }
+                // Same throttle as the daily bootstrap - avoid Zerodha rate limits.
+                Thread.sleep(300);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            } catch (Exception e) {
+                log.debug("[MOMENTUM-CANDLE] 30-min candle bootstrap failed for {}: {}",
+                        symbol, e.getMessage());
+            }
+        }
+
+        log.info("[MOMENTUM-CANDLE] 30-min candle bootstrap complete - {}/{} symbols cached",
+                loaded, symbols.size());
+    }
+
     // ========================================================================
     // LIVE CANDLE BUFFER - fed by CandleCompleteEvent (the same live
     // WebSocket-tick-based event stream CandleAggregatorService already
@@ -233,6 +311,18 @@ public class MomentumCandleService {
     private final Map<String, List<MomentumCandidate.Candle>> dailyCandleCache =
             new ConcurrentHashMap<>();
     private final Map<String, LocalDate> dailyCandleCacheDate = new ConcurrentHashMap<>();
+
+    // FIX (per explicit user request: "same apply for 30 minute...
+    // implement same logic but 30 minutes as well"). Cache for 30-min
+    // candles, mirroring the daily cache's pattern but with a shorter,
+    // time-based refresh instead of once-per-day - a new 30-min candle
+    // genuinely completes every 30 minutes, so this cache expires after
+    // 25 minutes (slightly less than the candle interval, ensuring
+    // reasonably fresh data without excessive re-fetching).
+    private final Map<String, List<MomentumCandidate.Candle>> thirtyMinCandleCache =
+            new ConcurrentHashMap<>();
+    private final Map<String, Long> thirtyMinCandleCacheTimestamp = new ConcurrentHashMap<>();
+    private static final long THIRTY_MIN_CACHE_EXPIRY_MS = 25 * 60 * 1000;
 
     // FIX (confirmed real bug found from production logs: resolveToken()
     // was re-fetching the ENTIRE ~9,929-instrument NSE list from Kite on
@@ -344,6 +434,13 @@ public class MomentumCandleService {
             // across many trading days.
             dailyCandleCache.clear();
             dailyCandleCacheDate.clear();
+            // FIX (found during final cross-check): clear the 30-min
+            // cache on daily reset too, matching the same pattern - not
+            // a correctness issue (25-min time-based expiry already
+            // ensures data is never more than 25 minutes stale when
+            // used), purely for consistency and hygiene.
+            thirtyMinCandleCache.clear();
+            thirtyMinCandleCacheTimestamp.clear();
             lastBufferResetDate = today;
             log.info("[MOMENTUM-CANDLE] New trading day - live candle buffers reset");
         }
@@ -973,7 +1070,18 @@ public class MomentumCandleService {
         List<Double> majorLevels = new ArrayList<>();
         List<Double> cluster = new ArrayList<>();
         for (double v : rawSwings) {
-            if (cluster.isEmpty() || (v - cluster.get(cluster.size() - 1)) <= tolerance) {
+            // FIX (confirmed real bug found via direct user report,
+            // verified with concrete numbers): previously compared each
+            // new point only to the LAST-added point in the cluster
+            // (chain-linking) - this let a cluster drift well beyond the
+            // intended tolerance across a chain of points (e.g. 5 points
+            // each 0.9 apart could span 3.6 total, nearly 4x a 1.0
+            // tolerance, while each individual pairwise check still
+            // passed). Now compares each new point to the cluster's
+            // ANCHOR (the first point added to it) instead - this
+            // genuinely bounds every point in the cluster to within
+            // tolerance of where that cluster started, eliminating drift.
+            if (cluster.isEmpty() || (v - cluster.get(0)) <= tolerance) {
                 cluster.add(v);
             } else {
                 if (cluster.size() >= 2) {
@@ -1238,5 +1346,169 @@ public class MomentumCandleService {
                     "(non-fatal, will retry next cycle): {}", symbol, e.getMessage());
             return List.of();
         }
+    }
+
+    // ========================================================================
+    // NEW GATE (per explicit user request: "same apply for 30 minute...
+    // cross checking 30 minutes support/resistance/trend/retest all
+    // logic we have, please implement same logic but 30 minutes as
+    // well"). Reuses the EXACT SAME generic helper methods already used
+    // for the daily gate (findMajorLevels, projectDescendingTrendline,
+    // projectAscendingTrendline, checkRetestHolding, checkRejectionCandle,
+    // computeDailyAtr) - none of these are daily-specific, they operate
+    // on whatever candle list is passed in. This is purely additive -
+    // zero changes to the daily gate's own code or behavior.
+    // ========================================================================
+
+    /**
+     * Cache-aware entry point for 30-min candles, mirroring
+     * fetchDailyCandles()'s pattern but with a time-based (25-minute)
+     * expiry instead of once-per-day, since 30-min data changes far
+     * more frequently.
+     */
+    private List<MomentumCandidate.Candle> fetch30MinuteHistoryCandles(String symbol) {
+        long nowMs = System.currentTimeMillis();
+        Long cachedAt = thirtyMinCandleCacheTimestamp.get(symbol);
+        if (cachedAt != null && (nowMs - cachedAt) < THIRTY_MIN_CACHE_EXPIRY_MS) {
+            List<MomentumCandidate.Candle> cached = thirtyMinCandleCache.get(symbol);
+            if (cached != null) return cached;
+        }
+
+        List<MomentumCandidate.Candle> fresh = fetch30MinuteCandlesFromApi(symbol);
+        if (!fresh.isEmpty()) {
+            thirtyMinCandleCache.put(symbol, fresh);
+            thirtyMinCandleCacheTimestamp.put(symbol, nowMs);
+        }
+        return fresh;
+    }
+
+    /**
+     * Raw fetch - same proven historical_data() pattern as the daily
+     * fetch, but "30minute" interval with a 60-day lookback (well
+     * within Kite's own documented 100-day maximum for this interval,
+     * giving ~750 real 30-min candles - comfortably enough for genuine
+     * swing detection using the same 3-candle-each-side window already
+     * proven for daily).
+     */
+    private List<MomentumCandidate.Candle> fetch30MinuteCandlesFromApi(String symbol) {
+        try {
+            long token = resolveToken(symbol);
+            if (token == 0) return List.of();
+
+            LocalDateTime now = LocalDateTime.now(IST);
+            Date to = toDate(now);
+            Date from = toDate(now.minusDays(60));
+
+            HistoricalData data = kiteConnect.getHistoricalData(
+                    from, to, String.valueOf(token), "30minute", false, false);
+            if (data == null || data.dataArrayList == null || data.dataArrayList.isEmpty()) {
+                log.warn("[MOMENTUM-CANDLE] {} - 30-min S/R gate candle fetch: Kite's call " +
+                                "succeeded (no exception) but returned {} - token={}", symbol,
+                        data == null ? "a null response" : "zero candles", token);
+                return List.of();
+            }
+
+            List<MomentumCandidate.Candle> candles = new ArrayList<>();
+            for (Object obj : data.dataArrayList) {
+                HistoricalData d = (HistoricalData) obj;
+                candles.add(new MomentumCandidate.Candle(d.open, d.high, d.low, d.close,
+                        d.timeStamp, d.volume));
+            }
+            return candles;
+        } catch (KiteException | Exception e) {
+            log.warn("[MOMENTUM-CANDLE] Failed to fetch 30-min S/R gate candles for {} " +
+                    "(non-fatal, will retry next cycle): {}", symbol, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * The 30-minute equivalent of checkHigherTimeframeGate() - identical
+     * structure and logic, reusing every one of the same underlying
+     * methods (findMajorLevels, trendline projection, retest/rejection
+     * checks, ATR), just fed 30-min candles instead of daily. A lower
+     * minimum-history bar (20 candles, roughly 2 trading days at 30-min)
+     * reflects the much shorter real-world span this timeframe covers
+     * compared to daily's ~1-year requirement.
+     */
+    public HigherTimeframeGateResult check30MinuteHigherTimeframeGate(String symbol, String direction,
+                                                                      double entry, double riskPerShare) {
+        List<MomentumCandidate.Candle> thirtyMin = fetch30MinuteHistoryCandles(symbol);
+        if (thirtyMin.size() < 20) {
+            return new HigherTimeframeGateResult(false,
+                    "Not enough 30-min candle history for S/R analysis - have " +
+                            thirtyMin.size() + ", need at least 20");
+        }
+
+        boolean isLong = "LONG".equals(direction);
+        double minRequiredMove = riskPerShare * config.getRiskRewardRatio();
+
+        double atr = computeDailyAtr(thirtyMin, 14);
+        if (atr <= 0) {
+            return new HigherTimeframeGateResult(false,
+                    "Could not compute a valid ATR from 30-min data - cannot assess structure " +
+                            "reliably");
+        }
+
+        List<Double> majorResistances = findMajorLevels(thirtyMin, atr, true);
+        List<Double> majorSupports = findMajorLevels(thirtyMin, atr, false);
+        Double trendlineLevel = isLong
+                ? projectDescendingTrendline(thirtyMin, atr)
+                : projectAscendingTrendline(thirtyMin, atr);
+
+        Double nearestHorizontal = isLong
+                ? majorResistances.stream().filter(h -> h > entry).min(Double::compareTo).orElse(null)
+                : majorSupports.stream().filter(l -> l < entry).max(Double::compareTo).orElse(null);
+
+        Double nearestLevel = combineNearest(isLong, nearestHorizontal, trendlineLevel, entry);
+
+        if (nearestLevel == null) {
+            return new HigherTimeframeGateResult(true,
+                    "No significant 30-min " + (isLong ? "resistance" : "support") +
+                            " found within range - path is clear");
+        }
+
+        double availableMove = isLong ? nearestLevel - entry : entry - nearestLevel;
+        boolean sufficientRoom = availableMove >= minRequiredMove;
+
+        if (sufficientRoom) {
+            return new HigherTimeframeGateResult(true, String.format(
+                    "Sufficient room to nearest major 30-min %s at %.2f (%.2f available, %.2f " +
+                            "required for %.1f:1 R:R)", isLong ? "resistance" : "support", nearestLevel,
+                    availableMove, minRequiredMove, config.getRiskRewardRatio()));
+        }
+
+        boolean alreadyBrokenStrong = isLong
+                ? (entry - nearestLevel) >= atr
+                : (nearestLevel - entry) >= atr;
+
+        boolean retestHolding = checkRetestHolding(thirtyMin, nearestLevel, isLong, atr);
+
+        boolean rejectionConfirmed = isLong
+                ? retestHolding
+                : checkRejectionCandle(thirtyMin, nearestLevel, atr);
+
+        if (alreadyBrokenStrong) {
+            return new HigherTimeframeGateResult(true, String.format(
+                    "Nearest major 30-min %s at %.2f is close (%.2f available, %.2f required), " +
+                            "but price has ALREADY broken it by >=1x ATR (%.2f) - allowed per strong-" +
+                            "breakout exception", isLong ? "resistance" : "support", nearestLevel,
+                    availableMove, minRequiredMove, atr));
+        }
+
+        if (rejectionConfirmed) {
+            return new HigherTimeframeGateResult(true, String.format(
+                    "Nearest major 30-min %s at %.2f is close (%.2f available, %.2f required), " +
+                            "but price broke it and %s - allowed per retest-confirmation exception",
+                    isLong ? "resistance" : "support", nearestLevel, availableMove, minRequiredMove,
+                    isLong ? "is holding above it (now support)"
+                            : "was rejected on retest (bearish rejection candle confirmed)"));
+        }
+
+        return new HigherTimeframeGateResult(false, String.format(
+                "Nearest major 30-min %s at %.2f is too close (only %.2f available, need %.2f " +
+                        "for %.1f:1 R:R) - not yet broken by a strong (>=1x ATR) move, no retest " +
+                        "confirmation", isLong ? "resistance" : "support", nearestLevel, availableMove,
+                minRequiredMove, config.getRiskRewardRatio()));
     }
 }

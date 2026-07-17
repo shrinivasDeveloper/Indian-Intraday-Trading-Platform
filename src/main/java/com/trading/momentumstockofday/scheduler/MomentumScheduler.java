@@ -17,6 +17,7 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -69,6 +70,19 @@ public class MomentumScheduler {
     // consideration on a second pass through the candidate list -
     // prevents entering the SAME stock twice in one day.
     private final Set<String> tradedSymbolsToday = ConcurrentHashMap.newKeySet();
+
+    // FIX (confirmed real issue found via production logs): GOKEX was
+    // re-attempted 3 times within ~2 seconds, each time re-fetching
+    // identical, unchanged trend-filter data via a real Kite API call -
+    // the event-driven trigger fires a full monitoring pass on every
+    // tracked symbol's candle completion, not just the one that
+    // actually changed, so a candidate that JUST failed a gate can be
+    // immediately re-attempted again before any of its underlying data
+    // has genuinely changed. This is a pure efficiency fix - it does
+    // NOT change any gate's own logic, only how often a recently-failed
+    // symbol gets re-evaluated.
+    private final Map<String, Long> lastFailedEntryAttempt = new ConcurrentHashMap<>();
+    private static final long FAILED_ENTRY_COOLDOWN_MS = 60_000; // 1 minute
 
     private final AtomicBoolean selectionAttemptedToday = new AtomicBoolean(false);
     private volatile LocalDate lastResetDate = null;
@@ -251,6 +265,7 @@ public class MomentumScheduler {
         if (!today.equals(lastResetDate)) {
             tradesToday.set(0);
             tradedSymbolsToday.clear();
+            lastFailedEntryAttempt.clear(); // FIX: clear cooldown tracking for the new day too
             selectionAttemptedToday.set(false);
             todaysCandidates = List.of();
             activeTrade.set(null);
@@ -379,6 +394,19 @@ public class MomentumScheduler {
         for (MomentumCandidate candidate : todaysCandidates) {
             if (tradedSymbolsToday.contains(candidate.getSymbol())) continue; // already traded today
 
+            // FIX (confirmed real issue from production logs): skip a
+            // symbol that failed an entry attempt within the last
+            // minute - its underlying trend-filter/margin data genuinely
+            // hasn't had a chance to change yet, so immediately re-
+            // attempting is pure waste (redundant Kite API calls,
+            // unnecessary rate-limit pressure). Does not affect a
+            // symbol's first attempt, or any attempt after the cooldown
+            // has genuinely passed.
+            Long lastFail = lastFailedEntryAttempt.get(candidate.getSymbol());
+            if (lastFail != null && System.currentTimeMillis() - lastFail < FAILED_ENTRY_COOLDOWN_MS) {
+                continue;
+            }
+
             MomentumCandleService.EvaluationResult result = candleService.evaluate(candidate);
             candidate.setValidConsolidation(result.validConsolidation());
             candidate.setConsolidationHigh(result.consolidationHigh());
@@ -401,6 +429,10 @@ public class MomentumScheduler {
                     log.error("[MOMENTUM-SCHEDULER] Breakout entry FAILED for {}: {} - " +
                                     "continuing to monitor remaining candidates this cycle",
                             candidate.getSymbol(), e.getMessage());
+                    // FIX: record the failure so this symbol isn't
+                    // immediately re-attempted again on the very next
+                    // trigger with unchanged data.
+                    lastFailedEntryAttempt.put(candidate.getSymbol(), System.currentTimeMillis());
                     continue; // per spec's priority order - if THIS stock's entry fails,
                     // still respect priority and only move to the NEXT candidate
                     // in strict order, not skip ahead arbitrarily

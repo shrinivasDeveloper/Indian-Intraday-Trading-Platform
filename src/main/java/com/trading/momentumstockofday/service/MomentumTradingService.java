@@ -238,6 +238,21 @@ public class MomentumTradingService {
             }
             log.info("[MOMENTUM-TRADE] {} daily S/R gate passed: {}", symbol, srGateResult.reason());
 
+            // NEW GATE (per explicit user request: "same apply for 30
+            // minute... cross checking 30 minutes support/resistance/
+            // trend/retest all logic we have, please implement same
+            // logic but 30 minutes as well"). A new, independent,
+            // additional check running right after the daily gate above -
+            // does NOT modify the daily gate, trend filter, or any other
+            // existing validation. Same rejection path as every other
+            // gate - scanning continues to the next candidate normally.
+            var srGate30mResult = candleService.check30MinuteHigherTimeframeGate(
+                    symbol, candidate.getDirection(), entry, riskPerShare);
+            if (!srGate30mResult.passed()) {
+                throw new MomentumStrategyException(symbol + " - " + srGate30mResult.reason());
+            }
+            log.info("[MOMENTUM-TRADE] {} 30-min S/R gate passed: {}", symbol, srGate30mResult.reason());
+
             String orderId = placeMarketOrder(symbol, isLong ? Constants.TRANSACTION_TYPE_BUY
                     : Constants.TRANSACTION_TYPE_SELL, qty);
 
