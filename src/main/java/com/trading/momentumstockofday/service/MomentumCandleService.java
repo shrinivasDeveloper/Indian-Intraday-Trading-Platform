@@ -515,11 +515,54 @@ public class MomentumCandleService {
 
             // The consolidation window is the windowSize candles
             // immediately BEFORE the breakout candle - NOT including it.
+            int windowStartIndex = recent.size() - windowSize - 1;
             List<MomentumCandidate.Candle> window = recent.subList(
-                    recent.size() - windowSize - 1, recent.size() - 1);
+                    windowStartIndex, recent.size() - 1);
 
             String rejectReason = checkConsolidationValidity(window);
             if (rejectReason != null) continue; // try a different window size
+
+            // FIX (per explicit user request, deeply cross-checked
+            // against this strategy's actual 2-8 candle consolidation
+            // window before implementing - see prior discussion on why
+            // a volume-decline check was rejected as unsuitable at this
+            // scale). Uses a SEPARATE set of candles - whatever
+            // genuinely exists BEFORE the consolidation window started
+            // - not limited by the consolidation's own small sample
+            // size, and not confounded by intraday volume seasonality
+            // (this checks price movement, not volume level). A
+            // genuine continuation ("flag") pattern requires a real,
+            // directional move before the pause - not just random
+            // chop that happens to look like a tight range.
+            //
+            // Fail-open: if fewer than 2 pre-consolidation candles
+            // genuinely exist (e.g., very early in the day, or a large
+            // consolidation window leaving little buffer), this check
+            // is skipped entirely - never blocks a trade purely due to
+            // insufficient history, same principle as every other
+            // fail-open gate tonight. Zero change to fetchRecentCandles()
+            // or the buffer size it fetches - uses only data already
+            // present in the already-fetched 'recent' list.
+            boolean hasGenuinePriorMove = true; // default true (fail-open) if not enough data
+            if (windowStartIndex >= 2) {
+                // FIX: isLong is not declared until later in this method -
+                // using a separate, locally-scoped variable here instead,
+                // to avoid any conflict with or change to that existing
+                // declaration.
+                boolean isLongForPriorMove = "LONG".equals(candidate.getDirection());
+                List<MomentumCandidate.Candle> preWindow = recent.subList(0, windowStartIndex);
+                double preMoveStart = preWindow.get(0).open();
+                double preMoveEnd = preWindow.get(preWindow.size() - 1).close();
+                double priorMove = isLongForPriorMove
+                        ? (preMoveEnd - preMoveStart) : (preMoveStart - preMoveEnd);
+                double consolRangeForCheck = window.stream()
+                        .mapToDouble(MomentumCandidate.Candle::range).average().orElse(0);
+                // Require the prior move to be at least as large as the
+                // consolidation's own average candle range - a genuine,
+                // proportional impulse before the pause, not an
+                // arbitrary fixed number.
+                hasGenuinePriorMove = consolRangeForCheck <= 0 || priorMove >= consolRangeForCheck;
+            }
 
             double consolHigh = window.stream().mapToDouble(MomentumCandidate.Candle::high).max().orElse(0);
             double consolLow = window.stream().mapToDouble(MomentumCandidate.Candle::low).min().orElse(0);
@@ -599,7 +642,8 @@ public class MomentumCandleService {
                     : 0;
             boolean closedWithStrength = closeStrength >= 0.7;
 
-            boolean genuineConviction = rangeExpanded && volumeExpanded && closedWithStrength;
+            boolean genuineConviction = rangeExpanded && volumeExpanded && closedWithStrength
+                    && hasGenuinePriorMove;
 
             // FIX (per explicit user request, stop-loss-hunt resistance
             // improvement #2 - "close-beyond-level margin"): instead of
