@@ -199,7 +199,7 @@ public class MomentumCandleService {
     @EventListener(ApplicationReadyEvent.class)
     @Async("tradingExecutor")
     public void bootstrap30MinuteCandles() {
-        try { Thread.sleep(900_000); } catch (InterruptedException ie) {
+        try { Thread.sleep(660_000); } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             return;
         }
@@ -567,7 +567,39 @@ public class MomentumCandleService {
                     && breakoutCandle.range() >= consolAvgRange * 1.5;
             boolean volumeExpanded = consolAvgVolume > 0
                     && breakoutCandle.volume() >= consolAvgVolume * 1.2;
-            boolean genuineConviction = rangeExpanded && volumeExpanded;
+            // FIX (per explicit user request, stop-loss-hunt resistance
+            // improvement #4 - "close-position-within-range", a
+            // genuine gap confirmed via direct code review): range and
+            // volume checks above measure the breakout candle's overall
+            // SIZE, but never where it actually CLOSED within that
+            // size. A candle that pushed far beyond the level intraday
+            // then got rejected back down to barely clearing it (a
+            // large wick against the trade direction) can have
+            // identical range/volume to a candle that closed right at
+            // its own extreme (genuine, unrejected strength) - the
+            // checks above cannot tell these apart. This is exactly
+            // the visual "rejection" pattern visible on a chart that
+            // numeric range/volume checks alone miss entirely.
+            //
+            // closeStrength: how close to its OWN high (LONG) or OWN
+            // low (SHORT) the candle actually closed, as a 0-1 ratio
+            // of its own range. 0.7 threshold = candle closed in the
+            // top/bottom 30% of its own range - a well-established,
+            // principled bar for "closed with real conviction, minimal
+            // opposing wick" rather than an arbitrary number.
+            //
+            // Uses ONLY this same breakout candle's own high/low/close -
+            // zero new data, checked at the exact same instant as every
+            // other check here - zero added delay to entry timing.
+            double candleRange = breakoutCandle.range();
+            double closeStrength = candleRange > 0
+                    ? (isLong
+                    ? (breakoutCandle.close() - breakoutCandle.low()) / candleRange
+                    : (breakoutCandle.high() - breakoutCandle.close()) / candleRange)
+                    : 0;
+            boolean closedWithStrength = closeStrength >= 0.7;
+
+            boolean genuineConviction = rangeExpanded && volumeExpanded && closedWithStrength;
 
             // FIX (per explicit user request, stop-loss-hunt resistance
             // improvement #2 - "close-beyond-level margin"): instead of
@@ -607,24 +639,27 @@ public class MomentumCandleService {
             if (breakout) {
                 note = String.format("Valid %d-candle consolidation COMPLETE, followed by DAY'S " +
                                 "%s BREAKOUT confirmed (close %.2f vs day %s %.2f, margin=%.2f, " +
-                                "range=%.2fx avg, volume=%.2fx avg)", windowSize,
+                                "range=%.2fx avg, volume=%.2fx avg, closeStrength=%.2f)", windowSize,
                         isLong ? "HIGH" : "LOW", lastClose, isLong ? "high" : "low",
                         isLong ? dayHigh : dayLow, marginBuffer,
                         consolAvgRange > 0 ? breakoutCandle.range() / consolAvgRange : 0,
-                        consolAvgVolume > 0 ? breakoutCandle.volume() / consolAvgVolume : 0);
+                        consolAvgVolume > 0 ? breakoutCandle.volume() / consolAvgVolume : 0,
+                        closeStrength);
             } else if (priceBreakout) {
                 // FIX (per explicit user request, stop-loss-hunt
                 // resistance): price crossed the level with margin, but
-                // lacked genuine conviction (range/volume expansion) -
-                // a real, distinct case from "hasn't broken out yet",
-                // worth surfacing clearly rather than folding into the
-                // generic "waiting" message below.
+                // lacked genuine conviction (range/volume expansion, or
+                // closed with a large opposing wick) - a real, distinct
+                // case from "hasn't broken out yet", worth surfacing
+                // clearly rather than folding into the generic
+                // "waiting" message below.
                 note = String.format("Price crossed day's %s with margin (close=%.2f) but lacked " +
                                 "genuine conviction - range=%.2fx avg (need 1.5x), volume=%.2fx avg " +
-                                "(need 1.2x) - skipped as a likely false breakout/stop-hunt",
-                        isLong ? "high" : "low", lastClose,
+                                "(need 1.2x), closeStrength=%.2f (need 0.70) - skipped as a likely false " +
+                                "breakout/stop-hunt", isLong ? "high" : "low", lastClose,
                         consolAvgRange > 0 ? breakoutCandle.range() / consolAvgRange : 0,
-                        consolAvgVolume > 0 ? breakoutCandle.volume() / consolAvgVolume : 0);
+                        consolAvgVolume > 0 ? breakoutCandle.volume() / consolAvgVolume : 0,
+                        closeStrength);
             } else {
                 note = String.format("Valid %d-candle consolidation forming, waiting for " +
                                 "day's %s breakout (current=%.2f, need %s %.2f)", windowSize,

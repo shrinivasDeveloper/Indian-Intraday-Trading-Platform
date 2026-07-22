@@ -32,7 +32,7 @@ public class MomentumConfig {
     private String selectionTime = "09:25";
 
     /** Per spec: "top three performing sectors" / "top three stocks". */
-    private int topSectorsCount = 3;
+    private int topSectorsCount = 2;
     private int topStocksPerSector = 3;
 
     /** Fixed capital used for position sizing - same "fixed per trade,

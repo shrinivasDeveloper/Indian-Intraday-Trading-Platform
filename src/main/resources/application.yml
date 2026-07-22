@@ -277,7 +277,7 @@ manual-swing:
 momentum-stock-of-day:
   enabled: true         # keep false until you've watched a live day first
   selection-time: "09:30"
-  top-sectors-count: 3
+  top-sectors-count: 2
   top-stocks-per-sector: 3
   capital: 10000.0
   min-consolidation-candles: 2
