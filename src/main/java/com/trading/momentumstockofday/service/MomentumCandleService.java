@@ -546,26 +546,94 @@ public class MomentumCandleService {
             // Breakout confirmed against the DAY'S high/low, checked on
             // the SEPARATE breakout candle (not part of the consolidation
             // window itself).
-            boolean priceBreakout = isLong ? lastClose > dayHigh : lastClose < dayLow;
+
+            // FIX (per explicit user request, stop-loss-hunt resistance
+            // improvement #1 - "range-expansion + volume filter"):
+            // require the breakout candle to show genuine conviction
+            // relative to the SPECIFIC consolidation it broke out of -
+            // not a generic, fixed threshold. A genuine institutional
+            // breakout typically expands BOTH range and volume versus
+            // the quiet consolidation that preceded it; a stop-hunt
+            // spike/false breakout typically does not. Checked entirely
+            // on the same breakout candle using data already available
+            // (the consolidation window itself) - zero added delay,
+            // isolated as new local variables, doesn't touch
+            // checkConsolidationValidity() or its existing signature.
+            double consolAvgRange = window.stream()
+                    .mapToDouble(MomentumCandidate.Candle::range).average().orElse(0);
+            double consolAvgVolume = window.stream()
+                    .mapToDouble(c -> (double) c.volume()).average().orElse(0);
+            boolean rangeExpanded = consolAvgRange > 0
+                    && breakoutCandle.range() >= consolAvgRange * 1.5;
+            boolean volumeExpanded = consolAvgVolume > 0
+                    && breakoutCandle.volume() >= consolAvgVolume * 1.2;
+            boolean genuineConviction = rangeExpanded && volumeExpanded;
+
+            // FIX (per explicit user request, stop-loss-hunt resistance
+            // improvement #2 - "close-beyond-level margin"): instead of
+            // any close beyond the day's high/low counting as a
+            // breakout, require the close to clear it by a small,
+            // volatility-scaled margin (0.3x the consolidation's own
+            // average range, used here as a lightweight, already-
+            // available intraday volatility proxy - avoids adding a
+            // separate ATR calculation dependency for this isolated
+            // check). Filters marginal, barely-there closes (a common
+            // stop-hunt signature) without meaningfully raising the bar
+            // for a genuine, decisive breakout.
+            double marginBuffer = consolAvgRange * 0.3;
+            boolean priceBreakout = isLong
+                    ? lastClose > dayHigh + marginBuffer
+                    : lastClose < dayLow - marginBuffer;
 
             // FIX (per explicit user request: "please remove this gate...
             // only this gate should remove"). Volume confirmation gate
             // removed - breakout now depends purely on price crossing
             // the day's high/low, exactly as it did before this gate
             // was added. Nothing else in this method changed.
-            boolean breakout = priceBreakout;
+            //
+            // FIX (per explicit user request, stop-loss-hunt resistance,
+            // this session): the two NEW checks above (genuineConviction,
+            // the margin-adjusted priceBreakout) are ADDITIVE on top of
+            // the existing breakout definition - both must now hold, in
+            // addition to everything already required (valid
+            // consolidation, correct positioning). This does not
+            // reintroduce the specific volume gate that was explicitly
+            // removed earlier - it's a different, more complete check
+            // (range AND volume together, scaled to this consolidation
+            // specifically) added per this session's own explicit request.
+            boolean breakout = priceBreakout && genuineConviction;
+
+            String note;
+            if (breakout) {
+                note = String.format("Valid %d-candle consolidation COMPLETE, followed by DAY'S " +
+                                "%s BREAKOUT confirmed (close %.2f vs day %s %.2f, margin=%.2f, " +
+                                "range=%.2fx avg, volume=%.2fx avg)", windowSize,
+                        isLong ? "HIGH" : "LOW", lastClose, isLong ? "high" : "low",
+                        isLong ? dayHigh : dayLow, marginBuffer,
+                        consolAvgRange > 0 ? breakoutCandle.range() / consolAvgRange : 0,
+                        consolAvgVolume > 0 ? breakoutCandle.volume() / consolAvgVolume : 0);
+            } else if (priceBreakout) {
+                // FIX (per explicit user request, stop-loss-hunt
+                // resistance): price crossed the level with margin, but
+                // lacked genuine conviction (range/volume expansion) -
+                // a real, distinct case from "hasn't broken out yet",
+                // worth surfacing clearly rather than folding into the
+                // generic "waiting" message below.
+                note = String.format("Price crossed day's %s with margin (close=%.2f) but lacked " +
+                                "genuine conviction - range=%.2fx avg (need 1.5x), volume=%.2fx avg " +
+                                "(need 1.2x) - skipped as a likely false breakout/stop-hunt",
+                        isLong ? "high" : "low", lastClose,
+                        consolAvgRange > 0 ? breakoutCandle.range() / consolAvgRange : 0,
+                        consolAvgVolume > 0 ? breakoutCandle.volume() / consolAvgVolume : 0);
+            } else {
+                note = String.format("Valid %d-candle consolidation forming, waiting for " +
+                                "day's %s breakout (current=%.2f, need %s %.2f)", windowSize,
+                        isLong ? "high" : "low", lastClose, isLong ? "above" : "below",
+                        isLong ? dayHigh : dayLow);
+            }
 
             return new EvaluationResult(true, breakout, consolHigh, consolLow, dayHigh, dayLow,
-                    window,
-                    breakout
-                            ? String.format("Valid %d-candle consolidation COMPLETE, followed by DAY'S " +
-                                    "%s BREAKOUT confirmed (close %.2f vs day %s %.2f)", windowSize,
-                            isLong ? "HIGH" : "LOW", lastClose, isLong ? "high" : "low",
-                            isLong ? dayHigh : dayLow)
-                            : String.format("Valid %d-candle consolidation forming, waiting for " +
-                                    "day's %s breakout (current=%.2f, need %s %.2f)", windowSize,
-                            isLong ? "high" : "low", lastClose, isLong ? "above" : "below",
-                            isLong ? dayHigh : dayLow));
+                    window, note);
         }
 
         return new EvaluationResult(false, false, 0, 0, dayHigh, dayLow, recent,
