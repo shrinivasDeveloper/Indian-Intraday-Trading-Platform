@@ -171,12 +171,52 @@ public class MomentumTradingService {
             // only the STOP-LOSS DISTANCE itself now comes from this
             // wider, price-proportional model instead of the tight
             // consolidation range.
-            double slPct = computeSlPct(entry);
-            double stopLoss = isLong ? entry * (1 - slPct) : entry * (1 + slPct);
-            double riskPerShare = isLong ? entry - stopLoss : stopLoss - entry;
-            if (riskPerShare <= 0) {
-                throw new MomentumStrategyException(symbol + " - invalid risk (entry=" + entry +
-                        " sl=" + stopLoss + ") - price-tiered SL computation degenerate, skipping");
+            // FIX (per explicit user agreement this session, structure-
+            // based SL with skip rule): the stop now sits beyond the
+            // OPPOSITE consolidation edge + a 0.3x-range buffer - the
+            // genuine invalidation point, outside the exact zone where
+            // clustered stops get swept (the prior price-tiered-only
+            // stop could land INSIDE the consolidation on wider
+            // patterns, mechanically explaining "valid entry, immediate
+            // SL hit"). The price-tier model (computeSlPct) is RETAINED
+            // as the AFFORDABILITY CEILING: if the structural distance
+            // exceeds what the tier allows, the trade is SKIPPED
+            // entirely - a setup whose invalidation point is too far
+            // away for intraday R:R isn't a trade with a bad stop, it
+            // isn't a valid intraday trade at all (user's own correct
+            // reasoning). A proportional floor (0.3x the tier distance)
+            // guards against the historically-documented degenerate
+            // too-tight case (the Rs.0.65-risk example above) - if the
+            // structure is tighter than the floor, the stop widens to
+            // the floor, which is still beyond the structure and still
+            // within the tier ceiling.
+            double consolRangeForSl = consolidationHigh - consolidationLow;
+            double structBuffer = consolRangeForSl * 0.3;
+            double structuralStop = isLong
+                    ? consolidationLow - structBuffer
+                    : consolidationHigh + structBuffer;
+            double structuralRisk = isLong ? entry - structuralStop : structuralStop - entry;
+            double tierRisk = entry * computeSlPct(entry);
+            if (structuralRisk <= 0) {
+                throw new MomentumStrategyException(symbol + " - invalid structural risk (entry=" +
+                        entry + " structuralStop=" + structuralStop + "), skipping");
+            }
+            if (structuralRisk > tierRisk) {
+                throw new MomentumStrategyException(String.format(
+                        "%s - consolidation too wide for intraday R:R: structural stop distance " +
+                                "%.2f exceeds the price-tier maximum %.2f - correct stop is unaffordable " +
+                                "intraday, skipping rather than placing a stop inside the pattern",
+                        symbol, structuralRisk, tierRisk));
+            }
+            double floorRisk = tierRisk * 0.3;
+            double stopLoss;
+            double riskPerShare;
+            if (structuralRisk < floorRisk) {
+                riskPerShare = floorRisk;
+                stopLoss = isLong ? entry - floorRisk : entry + floorRisk;
+            } else {
+                riskPerShare = structuralRisk;
+                stopLoss = structuralStop;
             }
             double target = isLong
                     ? entry + riskPerShare * config.getRiskRewardRatio()
@@ -253,6 +293,40 @@ public class MomentumTradingService {
             }
             log.info("[MOMENTUM-TRADE] {} 30-min S/R gate passed: {}", symbol, srGate30mResult.reason());
 
+            // FIX (confirmed real gap found via direct user report: two
+            // trades today passed every gate, then immediately reversed
+            // and hit stop-loss). Root cause: entry price was fetched
+            // once at the top of this method, then used stale through
+            // risk validity, quantity, margin, trend filter, daily S/R,
+            // and 30-min S/R gates - none of which re-check the CURRENT
+            // live price. If either S/R gate hit a cache miss (a real,
+            // multi-second API fetch) or any other gate took meaningful
+            // time, the market could move significantly during that
+            // window - and since this is a MARKET order, it fills at
+            // whatever price exists at that moment, not the price all
+            // the gates validated against. This final check re-fetches
+            // a fresh LTP immediately before the order fires and rejects
+            // if price has already moved meaningfully against the
+            // intended direction - specifically, 30% of the planned
+            // risk-per-share: a proportional, principled threshold
+            // (not an arbitrary number) - if price has already moved a
+            // third of the way toward the stop-loss before the order
+            // even reaches the market, the breakout has very likely
+            // already started failing.
+            double freshLtp = fetchLtp(symbol);
+            double reversalThreshold = riskPerShare * 0.3;
+            boolean alreadyReversing = isLong
+                    ? freshLtp < entry - reversalThreshold
+                    : freshLtp > entry + reversalThreshold;
+            if (alreadyReversing) {
+                throw new MomentumStrategyException(String.format(
+                        "%s - price already moved against %s direction since entry was locked in " +
+                                "(entry=%.2f, fresh LTP=%.2f, moved %.2f of planned %.2f risk) - breakout " +
+                                "likely already reversing, skipping rather than chasing a failing move",
+                        symbol, candidate.getDirection(), entry, freshLtp,
+                        Math.abs(freshLtp - entry), riskPerShare));
+            }
+
             String orderId = placeMarketOrder(symbol, isLong ? Constants.TRANSACTION_TYPE_BUY
                     : Constants.TRANSACTION_TYPE_SELL, qty);
 
@@ -275,18 +349,36 @@ public class MomentumTradingService {
             // actual fill differs from the pre-order estimate (entirely
             // possible during a fast breakout), the recorded risk:reward
             // must reflect what was ACTUALLY entered, not the estimate.
-            // Uses the SAME price-tiered SL model as the pre-order
-            // estimate above - critical consistency, since a mismatched
-            // formula here would make the saved trade's risk:reward
-            // internally contradictory.
-            double realSlPct = computeSlPct(realEntry);
-            double realStopLoss = isLong ? realEntry * (1 - realSlPct) : realEntry * (1 + realSlPct);
-            double realRiskPerShare = isLong ? realEntry - realStopLoss : realStopLoss - realEntry;
+            // FIX (structure-based SL, same session): uses the SAME
+            // structural logic as the pre-order computation above -
+            // critical consistency. The structural stop is a fixed
+            // PRICE LEVEL (consolidation edge + buffer), so it stays
+            // put; only the risk DISTANCE recomputes from the real
+            // fill. Safety fallback: if the real fill drifted across
+            // the skip boundary (position is already open - skipping
+            // is no longer possible), fall back to the tier stop
+            // rather than ever placing a stop inside the pattern.
+            double realTierRisk = realEntry * computeSlPct(realEntry);
+            double realStructuralRisk = isLong
+                    ? realEntry - structuralStop : structuralStop - realEntry;
+            double realFloorRisk = realTierRisk * 0.3;
+            double realStopLoss;
+            double realRiskPerShare;
+            if (realStructuralRisk <= 0 || realStructuralRisk > realTierRisk) {
+                realRiskPerShare = realTierRisk;
+                realStopLoss = isLong ? realEntry - realTierRisk : realEntry + realTierRisk;
+            } else if (realStructuralRisk < realFloorRisk) {
+                realRiskPerShare = realFloorRisk;
+                realStopLoss = isLong ? realEntry - realFloorRisk : realEntry + realFloorRisk;
+            } else {
+                realRiskPerShare = realStructuralRisk;
+                realStopLoss = structuralStop;
+            }
             double realTarget = realRiskPerShare > 0
                     ? (isLong ? realEntry + realRiskPerShare * config.getRiskRewardRatio()
                     : realEntry - realRiskPerShare * config.getRiskRewardRatio())
-                    : realEntry; // should be unreachable now (a % of a positive price is
-            // always positive) - kept as a safety net regardless
+                    : realEntry; // should be unreachable now (tier fallback is always
+            // positive) - kept as a safety net regardless
 
             positionRegistry.registerPosition(symbol, "MOMENTUM_STOCK_OF_DAY");
 

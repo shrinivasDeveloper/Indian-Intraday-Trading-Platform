@@ -353,23 +353,67 @@ public class MomentumScheduler {
             List<MomentumCandidate> fresh = selectionService.selectCandidates();
             lastScanTime = java.time.LocalDateTime.now(IST);
             String scanType = dueForRescan ? "RESCAN" : "Initial scan";
-            if (fresh.isEmpty()) {
+
+            // FIX (per explicit user request, pattern-aware retention -
+            // motivated by real evidence: an earlier live day showed the
+            // Media sector's candidates dropped mid-formation when the
+            // sector rotated, killing consolidations 20-30 minutes into
+            // developing, right before they could complete). On a RESCAN
+            // (never the initial scan - there's nothing to retain yet),
+            // candidates currently showing a valid, actively-forming
+            // consolidation are KEPT across the rescan instead of being
+            // discarded mid-pattern - the setup itself (a tight flag
+            // after an impulse) is what's being traded; sector ranking
+            // is a selection tool, not an invalidation signal. Uses the
+            // validConsolidation flag ALREADY stored on every candidate
+            // by monitorForBreakout()'s evaluate() call - zero new
+            // computation, zero change to any conviction/gate logic.
+            // Symbols already traded today are never retained. A kept
+            // candidate that later loses its consolidation shape drops
+            // out naturally at the next rescan.
+            List<MomentumCandidate> merged;
+            if (dueForRescan) {
+                List<MomentumCandidate> kept = todaysCandidates.stream()
+                        .filter(MomentumCandidate::isValidConsolidation)
+                        .filter(c -> !tradedSymbolsToday.contains(c.getSymbol()))
+                        .collect(java.util.stream.Collectors.toList());
+                java.util.Set<String> keptSymbols = kept.stream()
+                        .map(MomentumCandidate::getSymbol)
+                        .collect(java.util.stream.Collectors.toSet());
+                merged = new java.util.ArrayList<>(kept);
+                for (MomentumCandidate f : fresh) {
+                    if (!keptSymbols.contains(f.getSymbol())) {
+                        merged.add(f);
+                    }
+                }
+                if (!kept.isEmpty()) {
+                    log.info("[MOMENTUM-SCHEDULER] Pattern-aware retention: kept {} candidate(s) " +
+                                    "with an actively-forming consolidation across this rescan ({}), " +
+                                    "plus {} fresh candidate(s)", kept.size(),
+                            kept.stream().map(MomentumCandidate::getSymbol)
+                                    .collect(java.util.stream.Collectors.joining(", ")),
+                            merged.size() - kept.size());
+                }
+            } else {
+                merged = fresh;
+            }
+
+            if (merged.isEmpty()) {
                 log.warn("[MOMENTUM-SCHEDULER] {} ran but found 0 candidates this cycle - " +
                                 "watchlist cleared, will rescan again in {} minutes",
                         scanType, RESCAN_INTERVAL_MINUTES);
             } else {
-                log.info("[MOMENTUM-SCHEDULER] {} complete - {} new candidate(s), replacing " +
-                        "previous watchlist entirely (previous candidates are no longer " +
-                        "monitored, per spec)", scanType, fresh.size());
+                log.info("[MOMENTUM-SCHEDULER] {} complete - {} candidate(s) now monitored",
+                        scanType, merged.size());
             }
-            todaysCandidates = fresh; // REPLACES the previous list entirely - per spec
+            todaysCandidates = merged;
             // FIX (per explicit user request: rebuild candle sourcing to
             // use the live CandleCompleteEvent stream): tell the event
             // listener which symbols to buffer candles for - it only
             // buffers symbols Momentum currently tracks, not all ~500
             // Nifty500 symbols the event stream publishes for.
             candleService.updateTrackedSymbols(
-                    fresh.stream().map(MomentumCandidate::getSymbol).collect(java.util.stream.Collectors.toSet()));
+                    merged.stream().map(MomentumCandidate::getSymbol).collect(java.util.stream.Collectors.toSet()));
             return; // let the NEXT tick begin monitoring, keeps each tick simple/fast
         }
 

@@ -190,18 +190,43 @@ public class AiOpportunityDiscoveryEngine {
                 // Count how many daily patterns confirm trade direction
                 int dailyPatternScore = 0;
                 // Group I patterns (f[54-59])
+                // FIX (pipeline validation): f[57] (channel POSITION) removed
+                // from this count - it has no family in the confidence
+                // engine's scoring table, so a candidate qualifying mainly
+                // on f57 reached the watchlist but could never earn pattern
+                // points (guaranteed sub-threshold, wasted slot). It's a
+                // location metric, not a pattern - still computed and used
+                // everywhere else (reasoning, channelPosition display),
+                // only this gate's counting changed.
                 if ("LONG".equals(direction))  {
                     if (features[54] > 0.5) dailyPatternScore++; // sweep low
                     if (features[56] > 0.5) dailyPatternScore++; // SR flip
-                    if (features[57] < 0.35) dailyPatternScore++; // near daily range low
                     if (features[58] > 0.5) dailyPatternScore++; // trendline touch
                     if (features[47] > 0.5) dailyPatternScore++; // demand zone
                 }
                 if ("SHORT".equals(direction)) {
-                    if (features[55] > 0.5) dailyPatternScore++; // sweep high
-                    if (features[56] > 0.5) dailyPatternScore++; // SR flip
-                    if (features[57] > 0.65) dailyPatternScore++; // near daily range high
-                    if (features[58] > 0.5) dailyPatternScore++; // trendline touch
+                    // FIX (pipeline validation, confirmed dead check): f[55]
+                    // (SweepHigh) is stored NEGATIVE (-1.0) when triggered -
+                    // documented sign convention in this same file - so the
+                    // old "> 0.5" test could never fire. SweepHigh, one of
+                    // the strongest SHORT patterns, contributed ZERO to
+                    // Stage 3 SHORT qualification. Now correctly < -0.5,
+                    // matching computePatternScore()'s own bearish check.
+                    if (features[55] < -0.5) dailyPatternScore++; // sweep high
+                    // FIX (same validation pass): f[56] SRFlip REMOVED from
+                    // the SHORT count - detectSRFlip() only detects the
+                    // BULLISH resistance->support flip (boolean -> 0/+1.0;
+                    // no bearish variant exists), so the old "> 0.5" check
+                    // credited SHORT qualification with a bullish signal.
+                    // Scoring already never credited SRFlip for SHORT
+                    // (its bearish check val < -0.5 can't fire on a 0/+1
+                    // feature) - gate and scoring are now consistent.
+                    // FIX (same validation pass): f[58] returns -1.0 at a
+                    // FALLING trendline (the genuine SHORT signal) and +1.0
+                    // at a rising one (LONG) - the old "> 0.5" was dead for
+                    // the bearish case and wrongly credited SHORT on the
+                    // bullish one. Now correctly < -0.5.
+                    if (features[58] < -0.5) dailyPatternScore++; // falling trendline touch
                     if (features[47] < -0.5) dailyPatternScore++; // supply zone
                 }
                 // Group K patterns (f[60-69]) - direction-aligned daily patterns
