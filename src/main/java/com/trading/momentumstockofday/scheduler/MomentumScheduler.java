@@ -84,6 +84,11 @@ public class MomentumScheduler {
     private final Map<String, Long> lastFailedEntryAttempt = new ConcurrentHashMap<>();
     private static final long FAILED_ENTRY_COOLDOWN_MS = 60_000; // 1 minute
 
+    // PULLBACK PATH: in log-only rollout mode, each symbol's signal is
+    // logged at most once per day - prevents the 30-second tick from
+    // spamming an identical signal line all day.
+    private final Set<String> pullbackLoggedToday = ConcurrentHashMap.newKeySet();
+
     private final AtomicBoolean selectionAttemptedToday = new AtomicBoolean(false);
     private volatile LocalDate lastResetDate = null;
 
@@ -266,6 +271,7 @@ public class MomentumScheduler {
             tradesToday.set(0);
             tradedSymbolsToday.clear();
             lastFailedEntryAttempt.clear(); // FIX: clear cooldown tracking for the new day too
+            pullbackLoggedToday.clear(); // pullback log-once tracking resets daily too
             selectionAttemptedToday.set(false);
             todaysCandidates = List.of();
             activeTrade.set(null);
@@ -483,6 +489,45 @@ public class MomentumScheduler {
                 }
                 return; // one trade taken this cycle - stop for now (may resume later if
                 // the daily cap still allows another)
+            }
+
+            // PULLBACK PATH (additive, per explicit user request): checked
+            // ONLY when the breakout path found nothing for this candidate
+            // this tick - breakout always wins the tick if both appear.
+            // Same cooldown/traded guards already applied above. Log-only
+            // rollout mode logs the full signal (once per symbol per day)
+            // without placing any order.
+            if (config.isPullbackEnabled()) {
+                MomentumCandleService.PullbackSignal pb = candleService.evaluatePullback(candidate);
+                if (pb.triggered()) {
+                    if (config.isPullbackLogOnly()) {
+                        if (pullbackLoggedToday.add(candidate.getSymbol())) {
+                            log.info("[MOMENTUM-SCHEDULER] PULLBACK-SIGNAL (LOG-ONLY, no order): {} " +
+                                            "(sector #{} '{}', {}) - {}", candidate.getSymbol(),
+                                    candidate.getSectorRank(), candidate.getSector(),
+                                    candidate.getDirection(), pb.note());
+                        }
+                    } else {
+                        log.info("[MOMENTUM-SCHEDULER] PULLBACK: {} (sector #{} '{}', {}) - {} " +
+                                        "[trade {}/{} today]", candidate.getSymbol(), candidate.getSectorRank(),
+                                candidate.getSector(), candidate.getDirection(), pb.note(),
+                                tradesToday.get() + 1, config.getMaxTradesPerDay());
+                        try {
+                            MomentumTrade trade = tradingService.enterPullback(candidate,
+                                    pb.level(), pb.dailyAtr());
+                            activeTrade.set(trade);
+                            tradesToday.incrementAndGet();
+                            tradedSymbolsToday.add(candidate.getSymbol());
+                        } catch (Exception e) {
+                            log.error("[MOMENTUM-SCHEDULER] Pullback entry FAILED for {}: {} - " +
+                                            "continuing to monitor remaining candidates this cycle",
+                                    candidate.getSymbol(), e.getMessage());
+                            lastFailedEntryAttempt.put(candidate.getSymbol(), System.currentTimeMillis());
+                            continue;
+                        }
+                        return; // one trade this cycle, same as breakout path
+                    }
+                }
             }
         }
     }

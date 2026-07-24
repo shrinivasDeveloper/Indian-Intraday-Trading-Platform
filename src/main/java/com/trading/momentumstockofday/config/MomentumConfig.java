@@ -88,4 +88,12 @@ public class MomentumConfig {
 
     private long orderPollIntervalMs = 3000;
     private int orderPollMaxAttempts = 10;
+
+    /** PULLBACK ENTRY PATH (additive, per explicit request): detection
+     *  on/off, and the agreed safe-rollout mode - logOnly=true logs
+     *  "PULLBACK-SIGNAL would fire" with full values but places NO
+     *  orders. Flip to false only after observing real signal quality
+     *  in logs for a few days. */
+    private boolean pullbackEnabled = true;
+    private boolean pullbackLogOnly = true;
 }

@@ -143,6 +143,31 @@ public class MomentumTradingService {
      */
     public MomentumTrade enterBreakout(MomentumCandidate candidate, double consolidationHigh,
                                        double consolidationLow) {
+        return enterBreakoutInternal(candidate, consolidationHigh, consolidationLow, false);
+    }
+
+    /**
+     * PULLBACK ENTRY (per explicit user request, additive path): enters at
+     * a confluence-validated daily/30-min resistance (SHORT) or support
+     * (LONG) rejection, detected by evaluatePullback(). Routes through the
+     * EXACT SAME full machinery as breakout entries via synthetic bounds:
+     * passing (level, level - dailyAtr) for SHORT / (level + dailyAtr,
+     * level) for LONG makes the existing structural-stop code compute stop
+     * = level +/- 0.3x dailyAtr and the trailing distance 0.5x dailyAtr -
+     * mathematically exactly the intended pullback risk model, with zero
+     * duplicated sizing/margin/S-R-gate/fresh-price/fill/DB code. The ONLY
+     * behavioral difference is pullbackMode=true switching the trend
+     * filter to the pullback-aware variant (see checkPullbackTrendFilter).
+     */
+    public MomentumTrade enterPullback(MomentumCandidate candidate, double level, double dailyAtr) {
+        boolean isLong = "LONG".equals(candidate.getDirection());
+        double syntheticHigh = isLong ? level + dailyAtr : level;
+        double syntheticLow  = isLong ? level : level - dailyAtr;
+        return enterBreakoutInternal(candidate, syntheticHigh, syntheticLow, true);
+    }
+
+    private MomentumTrade enterBreakoutInternal(MomentumCandidate candidate, double consolidationHigh,
+                                                double consolidationLow, boolean pullbackMode) {
         String symbol = candidate.getSymbol();
         boolean isLong = "LONG".equals(candidate.getDirection());
 
@@ -257,7 +282,9 @@ public class MomentumTradingService {
             // "A trade should only be placed if every validation step
             // passes successfully." Rejects clearly if either the 4H
             // VWAP or 4H EMA alignment filter fails - both are mandatory.
-            var trendResult = candleService.checkTrendFilters(symbol, candidate.getDirection(), entry);
+            var trendResult = pullbackMode
+                    ? candleService.checkPullbackTrendFilter(symbol, candidate.getDirection(), entry)
+                    : candleService.checkTrendFilters(symbol, candidate.getDirection(), entry);
             if (!trendResult.passed()) {
                 throw new MomentumStrategyException(symbol + " - " + trendResult.reason());
             }

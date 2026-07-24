@@ -1658,4 +1658,180 @@ public class MomentumCandleService {
                         "confirmation", isLong ? "resistance" : "support", nearestLevel, availableMove,
                 minRequiredMove, config.getRiskRewardRatio()));
     }
+
+    // ========================================================================
+    // PULLBACK ENTRY DETECTION (per explicit user request, additive path -
+    // see enterPullback() in MomentumTradingService). Detects a genuine
+    // pullback INTO a confluence-validated higher-timeframe level with a
+    // rejection candle - the entry trigger for candidates that never gave
+    // a same-side breakout. Reuses only existing, already-cache-warm
+    // helpers; zero new data fetching; zero change to any existing method.
+    // ========================================================================
+
+    public record PullbackSignal(boolean triggered, double level, double dailyAtr, String note) {}
+
+    /**
+     * V1-V4 of the agreed design. SHORT: pullback UP into overhead
+     * resistance confirmed by TWO independent structures (daily major /
+     * 30-min major / projected daily trendline) within 0.3x dailyATR of
+     * each other, touched but never closed beyond, on corrective volume,
+     * finished by a rejection candle (closeStrength >= 0.7 away from the
+     * level). LONG fully mirrored at support. Fail-closed on missing
+     * data - a pullback entry is an optional bonus path, never worth
+     * taking on incomplete evidence (opposite of the breakout path's
+     * fail-open prior-move check, deliberately).
+     */
+    public PullbackSignal evaluatePullback(MomentumCandidate candidate) {
+        String symbol = candidate.getSymbol();
+        boolean isLong = "LONG".equals(candidate.getDirection());
+        try {
+            List<MomentumCandidate.Candle> daily = fetchDailyCandles(symbol);
+            List<MomentumCandidate.Candle> thirtyMin = fetch30MinuteHistoryCandles(symbol);
+            List<MomentumCandidate.Candle> recent = fetchRecentCandles(symbol, 10);
+            if (daily.size() < 30 || thirtyMin.size() < 20 || recent.size() < 7) {
+                return new PullbackSignal(false, 0, 0, "insufficient data for pullback analysis");
+            }
+            double dailyAtr = computeDailyAtr(daily, 14);
+            double atr30 = computeDailyAtr(thirtyMin, 14);
+            if (dailyAtr <= 0 || atr30 <= 0) {
+                return new PullbackSignal(false, 0, 0, "no valid ATR");
+            }
+            double tol = dailyAtr * 0.3;
+            double price = recent.get(recent.size() - 1).close();
+
+            // V1 - collect independent structures on the relevant side and
+            // require TWO within tol of each other (confluence).
+            List<Double> structures = new ArrayList<>();
+            for (double l : findMajorLevels(daily, dailyAtr, !isLong)) {
+                if (isLong ? l < price : l > price) structures.add(l);
+            }
+            for (double l : findMajorLevels(thirtyMin, atr30, !isLong)) {
+                if (isLong ? l < price : l > price) structures.add(l);
+            }
+            Double tl = isLong ? projectAscendingTrendline(daily, dailyAtr)
+                    : projectDescendingTrendline(daily, dailyAtr);
+            if (tl != null && (isLong ? tl < price : tl > price)) structures.add(tl);
+
+            Double confluenceLevel = null;
+            structures.sort(Double::compareTo);
+            for (int i = 0; i + 1 < structures.size(); i++) {
+                if (structures.get(i + 1) - structures.get(i) <= tol) {
+                    double lvl = (structures.get(i) + structures.get(i + 1)) / 2.0;
+                    // pick the confluence pair CLOSEST to current price
+                    if (confluenceLevel == null
+                            || Math.abs(lvl - price) < Math.abs(confluenceLevel - price)) {
+                        confluenceLevel = lvl;
+                    }
+                }
+            }
+            if (confluenceLevel == null) {
+                return new PullbackSignal(false, 0, dailyAtr, "no 2-structure confluence level on the "
+                        + (isLong ? "support" : "resistance") + " side");
+            }
+            // The level must be genuinely NEAR - a rejection 3 ATRs away
+            // is not a tradeable pullback at the current price.
+            if (Math.abs(confluenceLevel - price) > dailyAtr) {
+                return new PullbackSignal(false, confluenceLevel, dailyAtr,
+                        "confluence level too far from price");
+            }
+
+            // V2 - touched, never closed beyond (last 6 candles).
+            List<MomentumCandidate.Candle> window = recent.subList(recent.size() - 6, recent.size());
+            boolean touched = false;
+            for (MomentumCandidate.Candle c : window) {
+                double extreme = isLong ? c.low() : c.high();
+                if (Math.abs(extreme - confluenceLevel) <= tol) touched = true;
+                boolean closedBeyond = isLong ? c.close() < confluenceLevel - tol * 0.5
+                        : c.close() > confluenceLevel + tol * 0.5;
+                if (closedBeyond) {
+                    return new PullbackSignal(false, confluenceLevel, dailyAtr,
+                            "a candle CLOSED beyond the level - level failed, not a pullback hold");
+                }
+            }
+            if (!touched) {
+                return new PullbackSignal(false, confluenceLevel, dailyAtr,
+                        "level not yet touched within tolerance");
+            }
+
+            // V3 - rejection candle = the LAST completed candle.
+            MomentumCandidate.Candle rej = window.get(window.size() - 1);
+            double range = rej.range();
+            if (range <= 0) return new PullbackSignal(false, confluenceLevel, dailyAtr, "flat rejection candle");
+            double rejExtreme = isLong ? rej.low() : rej.high();
+            if (Math.abs(rejExtreme - confluenceLevel) > tol) {
+                return new PullbackSignal(false, confluenceLevel, dailyAtr,
+                        "last candle did not test the level - no rejection yet");
+            }
+            double closeStrength = isLong ? (rej.close() - rej.low()) / range
+                    : (rej.high() - rej.close()) / range;
+            if (closeStrength < 0.7) {
+                return new PullbackSignal(false, confluenceLevel, dailyAtr, String.format(
+                        "touch without rejection - closeStrength %.2f (need 0.70)", closeStrength));
+            }
+
+            // V4 - volume character: rejection vol >= pullback-leg avg;
+            // pullback leg lighter than the prior leg (fail-closed only on
+            // the first half; leg comparison fail-open if history short).
+            double pullbackLegAvgVol = window.subList(2, 5).stream()
+                    .mapToDouble(c -> (double) c.volume()).average().orElse(0);
+            if (pullbackLegAvgVol > 0 && rej.volume() < pullbackLegAvgVol) {
+                return new PullbackSignal(false, confluenceLevel, dailyAtr,
+                        "rejection candle volume below pullback-leg average - no supply/demand step-in");
+            }
+            if (recent.size() >= 10) {
+                double priorLegAvgVol = recent.subList(recent.size() - 9, recent.size() - 5).stream()
+                        .mapToDouble(c -> (double) c.volume()).average().orElse(0);
+                if (priorLegAvgVol > 0 && pullbackLegAvgVol > priorLegAvgVol) {
+                    return new PullbackSignal(false, confluenceLevel, dailyAtr,
+                            "pullback leg on RISING volume vs prior leg - genuine buyers/sellers, not corrective");
+                }
+            }
+
+            return new PullbackSignal(true, confluenceLevel, dailyAtr, String.format(
+                    "PULLBACK %s at confluence %.2f (tol %.2f): touched-not-broken, rejection " +
+                            "closeStrength %.2f, rejVol %.0f >= legAvg %.0f",
+                    isLong ? "support hold" : "resistance rejection", confluenceLevel, tol,
+                    closeStrength, (double) rej.volume(), pullbackLegAvgVol));
+        } catch (Exception e) {
+            return new PullbackSignal(false, 0, 0, "pullback evaluation error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * V5 - pullback-aware trend filter. The strict 20<50<200 stack is
+     * temporarily inverted at any genuine pullback extreme BY DEFINITION
+     * (the counter-move drags EMA20 across EMA50 - that IS the pullback).
+     * This variant checks structural trend intactness instead: SHORT
+     * requires price < EMA200 AND EMA50 < EMA200; LONG mirrored. Used
+     * ONLY by the pullback entry path - the breakout path's strict
+     * filter is untouched.
+     */
+    public TrendFilterResult checkPullbackTrendFilter(String symbol, String direction,
+                                                      double currentPrice) {
+        List<MomentumCandidate.Candle> trendCandles = fetch5MinuteHistoryCandles(symbol);
+        if (trendCandles.size() < 200) {
+            return new TrendFilterResult(false, "Not enough 5-minute candle history for EMA(200) - " +
+                    "have " + trendCandles.size() + ", need 200", 0, 0, 0, 0);
+        }
+        double vwap4h = computeVwap(trendCandles);
+        double ema20 = computeEma(trendCandles, 20);
+        double ema50 = computeEma(trendCandles, 50);
+        double ema200 = computeEma(trendCandles, 200);
+        boolean isLong = "LONG".equals(direction);
+        boolean structureIntact = isLong
+                ? (currentPrice > ema200 && ema50 > ema200)
+                : (currentPrice < ema200 && ema50 < ema200);
+        if (!structureIntact) {
+            return new TrendFilterResult(false, String.format(
+                    "Pullback trend structure FAILED: price=%.2f EMA50=%.2f EMA200=%.2f - need %s",
+                    currentPrice, ema50, ema200,
+                    isLong ? "price>EMA200 and EMA50>EMA200" : "price<EMA200 and EMA50<EMA200"),
+                    vwap4h, ema20, ema50, ema200);
+        }
+        return new TrendFilterResult(true, String.format(
+                "Pullback trend structure intact: price=%.2f EMA50=%.2f EMA200=%.2f (%s; transient " +
+                        "EMA20/50 cross tolerated by design at a pullback extreme)",
+                currentPrice, ema50, ema200, isLong ? "bullish" : "bearish"),
+                vwap4h, ema20, ema50, ema200);
+    }
 }
