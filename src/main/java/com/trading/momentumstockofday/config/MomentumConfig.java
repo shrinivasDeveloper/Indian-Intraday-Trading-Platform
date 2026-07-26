@@ -95,5 +95,7 @@ public class MomentumConfig {
      *  orders. Flip to false only after observing real signal quality
      *  in logs for a few days. */
     private boolean pullbackEnabled = true;
-    private boolean pullbackLogOnly = true;
+    private boolean pullbackLogOnly = false; // per explicit user decision: LIVE pullback
+    // trading enabled immediately, both directions -
+    // log-only observation phase skipped
 }

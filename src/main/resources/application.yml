@@ -292,6 +292,8 @@ momentum-stock-of-day:
   force-exit-time: "15:15"
   order-poll-interval-ms: 3000
   order-poll-max-attempts: 10
+  pullback-enabled: true
+  pullback-log-only: false
 # ================================
 # HERO OR ZERO — MONTHLY EXPIRY OPTIONS STRATEGY
 #

@@ -81,8 +81,19 @@ public class AiTradingSystem {
     // TRENDING / 85 RANGING - now unified to a single 80-point minimum
     // for both regimes, serving as the compensating quality control for
     // the removed extension gate.
-    private static final int TRENDING_EXECUTION_THRESHOLD = 80;
-    private static final int RANGING_EXECUTION_THRESHOLD  = 80;
+    // THRESHOLD RECALIBRATION (this session, per confirmed math after 3
+    // zero-trade sessions with healthy 21-23 stock watchlists): 80 was
+    // calibrated for the OLD binary pattern scoring (any pattern = 50
+    // pts). The family-based redesign awards 30 (1 family) / 40 (2) /
+    // 50 (3+), and the freshness fixes deliberately make simultaneous
+    // fresh families rarer - so real days score 55-75 and 80 became
+    // near-unreachable. At 70: 1-family needs 40/55 confirmation
+    // (stellar-only), 2-family needs 30/55 (realistic bread-and-butter),
+    // 3-family fires readily - trade flow restored at a HIGHER quality
+    // bar than the old regime, since 2+ independent families is a
+    // stronger requirement than any-single-pattern ever was.
+    private static final int TRENDING_EXECUTION_THRESHOLD = 70;
+    private static final int RANGING_EXECUTION_THRESHOLD  = 70;
 
     // -- Pure observability: WHY didn't an eligible-or-close candidate
     // actually execute? Pipeline has several gates AFTER the pattern-
