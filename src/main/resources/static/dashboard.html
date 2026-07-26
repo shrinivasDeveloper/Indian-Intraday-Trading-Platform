@@ -365,6 +365,63 @@
         <div class="card"><div class="ct">Active Trades</div><div class="stat sb" id="hz-active-count">—</div></div>
     </div>
 
+    <!-- MANUAL EXPIRY SELECTION (additive, per explicit user request):
+         calendar-picked expiry per index, persisted in MySQL via
+         /api/dashboard/hero-zero/expiry - survives restarts/crashes,
+         visible until manually changed. Zero changes to any existing
+         element or the hzLoad() machinery above/below. -->
+    <div class="card" style="margin-top:16px">
+        <div class="ct">📅 Manual Expiry Selection (persisted — survives restart)</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0">
+            <select id="hz-exp-index" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px">
+                <option>NIFTY</option><option>BANKNIFTY</option><option>FINNIFTY</option>
+                <option>MIDCPNIFTY</option><option>SENSEX</option>
+            </select>
+            <input type="date" id="hz-exp-date" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">
+            <button onclick="hzExpSet()" style="background:var(--green,#238636);color:#fff;border:none;border-radius:6px;padding:7px 14px;cursor:pointer">Set</button>
+            <span id="hz-exp-msg" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:4px">Currently set:</div>
+        <div id="hz-exp-list" style="font-size:13px">Loading…</div>
+    </div>
+    <script>
+        async function hzExpLoad(){
+            try{
+                const r=await fetch('/api/dashboard/hero-zero/expiry');const j=await r.json();
+                const el=document.getElementById('hz-exp-list');
+                if(!j.available){el.textContent='Service unavailable';return;}
+                if(!j.overrides||j.overrides.length===0){
+                    el.innerHTML='<span style="color:var(--muted)">None — automatic expiry computation in use for all indices</span>';return;}
+                el.innerHTML=j.overrides.map(o=>{
+                    const ix=o.index_name||o.INDEX_NAME, dt=(o.expiry_date||o.EXPIRY_DATE||'').toString().substring(0,10);
+                    return `<div style="display:flex;align-items:center;gap:10px;padding:3px 0">
+                        <span style="min-width:110px;font-weight:600">${ix}</span>
+                        <span style="color:var(--blue)">${dt}</span>
+                        <button onclick="hzExpClear('${ix}')" style="background:var(--border);color:var(--text);border:none;border-radius:5px;padding:2px 10px;cursor:pointer;font-size:11px">Clear</button>
+                    </div>`;}).join('');
+            }catch(e){document.getElementById('hz-exp-list').textContent='Load failed: '+e.message;}
+        }
+        async function hzExpSet(){
+            const msg=document.getElementById('hz-exp-msg');
+            const indexName=document.getElementById('hz-exp-index').value;
+            const expiryDate=document.getElementById('hz-exp-date').value;
+            if(!expiryDate){msg.textContent='Pick a date first';msg.style.color='var(--yellow,#f0883e)';return;}
+            msg.textContent='Saving…';msg.style.color='var(--muted)';
+            try{
+                const r=await fetch('/api/dashboard/hero-zero/expiry',{method:'POST',
+                    headers:{'Content-Type':'application/json'},body:JSON.stringify({indexName,expiryDate})});
+                const j=await r.json();
+                if(j.success){msg.textContent='✓ Saved (persists across restarts)';msg.style.color='var(--green,#3fb950)';}
+                else{msg.textContent='✗ '+(j.error||'failed');msg.style.color='var(--red,#f85149)';}
+                hzExpLoad();
+            }catch(e){msg.textContent='✗ '+e.message;msg.style.color='var(--red,#f85149)';}
+        }
+        async function hzExpClear(ix){
+            await fetch('/api/dashboard/hero-zero/expiry/'+ix,{method:'DELETE'});hzExpLoad();
+        }
+        hzExpLoad();setInterval(hzExpLoad,30000);
+    </script>
+
     <div class="card" style="margin-top:16px">
         <div class="ct">📅 Monthly Expiry Status - All Indexes</div>
         <table style="width:100%;font-size:12px;margin-top:8px">

@@ -29,6 +29,20 @@ public class AiNewsCapitalLedger {
         ensureTableExists();
     }
 
+    /**
+     * ROOT-CAUSE FIX (capital vanishing on every restart): this check
+     * runs in the constructor on EVERY boot, and previously DROPPED the
+     * entire ledger table whenever its information_schema column-probe
+     * returned 0 - on the new MySQL 9.4 deployment that destroyed all
+     * capital data each restart, and with no prior-day history on the
+     * fresh DB, ensureRowExists() then fell back to trading.capital
+     * (Rs.5000). A destructive DROP re-evaluated on every startup has
+     * no place in production code. The migration era is definitively
+     * over - this deployment's DB was created with the new schema, so
+     * the old schema can no longer exist anywhere. The check now only
+     * WARNS (with manual instructions) in that impossible case, and can
+     * NEVER destroy data.
+     */
     private void migrateOldSchemaIfNeeded() {
         try {
             Integer tableExists = jdbc.queryForObject("""
@@ -44,11 +58,12 @@ public class AiNewsCapitalLedger {
                 """, Integer.class);
             if (hasStrategyColumn != null && hasStrategyColumn > 0) return;
 
-            log.warn("[AI-LEDGER] Detected OLD schema (pre-per-strategy, no strategy_name " +
-                    "column) - dropping and recreating with the new schema. This is expected " +
-                    "exactly once, on the first startup after this change; any pre-existing " +
-                    "PAPER-mode test data in this table is intentionally discarded.");
-            jdbc.execute("DROP TABLE ai_news_capital_ledger");
+            log.error("[AI-LEDGER] Column-probe could not confirm the strategy_name column. " +
+                    "NOT dropping anything (a previous version destroyed the table here on " +
+                    "every restart - that destructive path is permanently removed). If this " +
+                    "table genuinely has the pre-per-strategy schema, migrate it MANUALLY: " +
+                    "ALTER TABLE ai_news_capital_ledger ADD COLUMN strategy_name VARCHAR(50) " +
+                    "NOT NULL DEFAULT 'AI_TRADING_V2', then adjust the primary key.");
         } catch (Exception e) {
             log.warn("[AI-LEDGER] Schema migration check failed (non-fatal): {}", e.getMessage());
         }

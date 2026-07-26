@@ -6,6 +6,7 @@ import com.trading.herozero.exception.HeroZeroException;
 import com.trading.herozero.repository.HeroZeroTradeRepository;
 import com.trading.herozero.util.HeroZeroHolidayChecker;
 import com.trading.herozero.util.MonthlyExpiryCalculator;
+import com.trading.herozero.service.HeroZeroExpiryOverrideService;
 import com.zerodhatech.kiteconnect.KiteConnect;
 import com.zerodhatech.kiteconnect.kitehttp.exceptions.KiteException;
 import com.zerodhatech.models.Instrument;
@@ -62,6 +63,13 @@ public class HeroZeroTradingService {
     private final KiteConnect kiteConnect;
     private final com.trading.shared.risk.AccountMarginGuard marginGuard;
     private final com.trading.shared.risk.CrossStrategyPositionRegistry positionRegistry;
+    // FIX (per explicit user request - wiring the dashboard's manual
+    // expiry picker into actual trading, previously display-only):
+    // additive dependency, optional by construction (Spring supplies
+    // null-safe absence handling is not needed here since this bean
+    // always exists once the module is wired - if ever removed, add
+    // @Autowired(required=false) at the field instead of constructor).
+    private final HeroZeroExpiryOverrideService expiryOverrideService;
 
     // Duplicate-protection: per-index lock, cleared daily. Prevents a
     // rapid double-invocation (e.g. scheduler race, manual trigger
@@ -72,13 +80,15 @@ public class HeroZeroTradingService {
     public HeroZeroTradingService(HeroZeroConfig config, HeroZeroTradeRepository repo,
                                   MonthlyExpiryCalculator expiryCalculator, KiteConnect kiteConnect,
                                   com.trading.shared.risk.AccountMarginGuard marginGuard,
-                                  com.trading.shared.risk.CrossStrategyPositionRegistry positionRegistry) {
+                                  com.trading.shared.risk.CrossStrategyPositionRegistry positionRegistry,
+                                  HeroZeroExpiryOverrideService expiryOverrideService) {
         this.config = config;
         this.repo = repo;
         this.expiryCalculator = expiryCalculator;
         this.kiteConnect = kiteConnect;
         this.marginGuard = marginGuard;
         this.positionRegistry = positionRegistry;
+        this.expiryOverrideService = expiryOverrideService;
     }
 
     // =======================================================================
@@ -105,7 +115,28 @@ public class HeroZeroTradingService {
         LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
 
         // STEP 1: Validate Monthly Expiry
-        MonthlyExpiryCalculator.ExpiryResult expiry = expiryCalculator.calculate(index, today);
+        // FIX (per explicit user request, root cause confirmed live on
+        // the dashboard: a manually-picked date was stored and
+        // displayed but never actually consulted here - entry still
+        // ran purely off the automatic calculation). If a manual
+        // override exists for this index, it now DEFINES actualExpiry
+        // for every step below (steps 2-10 only ever consume
+        // expiry.actualExpiry() - they are completely unaware of and
+        // unaffected by WHERE that date came from). No override = the
+        // automatic calculation runs exactly as before, byte-identical.
+        MonthlyExpiryCalculator.ExpiryResult automatic = expiryCalculator.calculate(index, today);
+        var manualOverride = expiryOverrideService.getOverride(index.toUpperCase());
+        MonthlyExpiryCalculator.ExpiryResult expiry;
+        if (manualOverride.isPresent()) {
+            LocalDate manualDate = manualOverride.get();
+            expiry = new MonthlyExpiryCalculator.ExpiryResult(
+                    automatic.naturalExpiry(), manualDate, !manualDate.isEqual(automatic.naturalExpiry()),
+                    manualDate.isEqual(automatic.naturalExpiry()) ? null : automatic.naturalExpiry());
+            log.info("[HERO-ZERO] {} - using MANUAL override expiry {} (automatic calculation " +
+                    "would have been {}) - set via dashboard", index, manualDate, automatic.actualExpiry());
+        } else {
+            expiry = automatic;
+        }
         if (!expiry.actualExpiry().isEqual(today)) {
             log.info("[HERO-ZERO] {} - today is NOT monthly expiry (actual expiry: {}) - skip, no order",
                     index, expiry.actualExpiry());

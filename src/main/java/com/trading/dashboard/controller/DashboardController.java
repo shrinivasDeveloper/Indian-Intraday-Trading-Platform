@@ -319,6 +319,74 @@ public class DashboardController {
     // PER-STRATEGY CAPITAL - UI-editable, AI and News independently
     // ======================================================================
 
+    // ======================================================================
+    // HERO-ZERO MANUAL EXPIRY (per explicit user request): calendar-picked
+    // expiry per index, persisted in MySQL (survives restart/crash),
+    // visible until manually changed. required=false so this controller
+    // keeps working even if the new service bean is ever absent.
+    // ======================================================================
+    @Autowired(required = false)
+    private com.trading.herozero.service.HeroZeroExpiryOverrideService heroZeroExpiryService;
+
+    @GetMapping("/hero-zero/expiry")
+    public ResponseEntity<Map<String, Object>> getHeroZeroExpiry() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (heroZeroExpiryService == null) {
+            out.put("available", false);
+            return ResponseEntity.ok(out);
+        }
+        out.put("available", true);
+        out.put("overrides", heroZeroExpiryService.getAllOverrides());
+        out.put("timestamp", Instant.now().toString());
+        return ResponseEntity.ok(out);
+    }
+
+    /** Body: {"indexName": "NIFTY", "expiryDate": "2026-07-30"} */
+    @PostMapping("/hero-zero/expiry")
+    public ResponseEntity<Map<String, Object>> setHeroZeroExpiry(@RequestBody Map<String, Object> body) {
+        Map<String, Object> resp = new LinkedHashMap<>();
+        if (heroZeroExpiryService == null) {
+            resp.put("success", false);
+            resp.put("error", "Hero-Zero expiry service not available");
+            return ResponseEntity.badRequest().body(resp);
+        }
+        try {
+            String indexName = String.valueOf(body.get("indexName")).toUpperCase().trim();
+            List<String> allowed = List.of("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX");
+            if (!allowed.contains(indexName)) {
+                resp.put("success", false);
+                resp.put("error", "indexName must be one of " + allowed + ", got: " + indexName);
+                return ResponseEntity.badRequest().body(resp);
+            }
+            java.time.LocalDate expiry = java.time.LocalDate.parse(String.valueOf(body.get("expiryDate")));
+            boolean ok = heroZeroExpiryService.setOverride(indexName, expiry);
+            resp.put("success", ok);
+            if (!ok) resp.put("error", "rejected (past date or persistence failure - see logs)");
+            resp.put("indexName", indexName);
+            resp.put("expiryDate", expiry.toString());
+            return ok ? ResponseEntity.ok(resp) : ResponseEntity.badRequest().body(resp);
+        } catch (Exception e) {
+            resp.put("success", false);
+            resp.put("error", "invalid request: " + e.getMessage() +
+                    " (expected {\"indexName\":\"NIFTY\",\"expiryDate\":\"YYYY-MM-DD\"})");
+            return ResponseEntity.badRequest().body(resp);
+        }
+    }
+
+    @DeleteMapping("/hero-zero/expiry/{indexName}")
+    public ResponseEntity<Map<String, Object>> clearHeroZeroExpiry(@PathVariable String indexName) {
+        Map<String, Object> resp = new LinkedHashMap<>();
+        if (heroZeroExpiryService == null) {
+            resp.put("success", false);
+            return ResponseEntity.badRequest().body(resp);
+        }
+        boolean ok = heroZeroExpiryService.clearOverride(indexName.toUpperCase().trim());
+        resp.put("success", ok);
+        resp.put("indexName", indexName.toUpperCase().trim());
+        return ResponseEntity.ok(resp);
+    }
+
+
     /**
      * Returns today's capital summary for AI and News, for the UI to
      * display current values before editing.
