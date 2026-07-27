@@ -318,7 +318,7 @@ momentum-stock-of-day:
 # directly. Verify both before trusting this with real capital.
 # ================================
 hero-zero:
-  enabled: ${HERO_ZERO_ENABLED:false}
+  enabled: ${HERO_ZERO_ENABLED:true}
   entry-time: "14:30"
   exit-time: "15:10"
   strike-selection-start-time: "14:25"
