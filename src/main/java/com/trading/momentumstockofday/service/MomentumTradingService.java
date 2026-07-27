@@ -234,6 +234,38 @@ public class MomentumTradingService {
                         symbol, structuralRisk, tierRisk));
             }
             double floorRisk = tierRisk * 0.3;
+            // FIX (per explicit user request, live evidence: TATACOMM
+            // SHORT stopped out on a 3.08-rupee move on a Rs.1745 stock
+            // - a fixed 0.3x-tier floor has no relationship to what the
+            // stock is ACTUALLY moving right now, so a tight
+            // consolidation could produce a stop sitting well inside
+            // normal noise). The floor is now the LARGER of the old
+            // 0.3x-tier value and 0.5x the stock's LIVE 5-min ATR - a
+            // noise-aware minimum. If even this floor exceeds the tier
+            // ceiling, the trade is SKIPPED (same already-agreed
+            // principle: an unaffordable-but-correct stop is not a
+            // valid intraday trade) rather than forcing a stop tighter
+            // than the stock's real movement. Fails open to the
+            // original floor only if live ATR data is unavailable -
+            // never blocks a trade on a data hiccup.
+            double liveAtr5m = candleService.compute5MinAtr(symbol);
+            if (liveAtr5m > 0) {
+                double noiseFloor = liveAtr5m * 0.5;
+                if (noiseFloor > floorRisk) {
+                    if (noiseFloor > tierRisk) {
+                        throw new MomentumStrategyException(String.format(
+                                "%s - even the noise-aware minimum stop (0.5x live 5-min ATR = " +
+                                        "%.2f) exceeds the price-tier maximum %.2f - this stock's current " +
+                                        "volatility makes any correct stop unaffordable intraday, skipping",
+                                symbol, noiseFloor, tierRisk));
+                    }
+                    log.info("[MOMENTUM-TRADE] {} - structural/old floor ({}) was tighter than " +
+                                    "this stock's live 5-min noise (0.5x ATR = {}) - widening the stop " +
+                                    "to the noise-aware floor to avoid a stop-hunt", symbol,
+                            String.format("%.2f", floorRisk), String.format("%.2f", noiseFloor));
+                    floorRisk = noiseFloor;
+                }
+            }
             double stopLoss;
             double riskPerShare;
             if (structuralRisk < floorRisk) {
@@ -389,6 +421,16 @@ public class MomentumTradingService {
             double realStructuralRisk = isLong
                     ? realEntry - structuralStop : structuralStop - realEntry;
             double realFloorRisk = realTierRisk * 0.3;
+            // FIX (same noise-aware floor as the pre-order computation,
+            // reusing liveAtr5m already fetched above in this method -
+            // zero extra API call). Position is already open here, so
+            // skipping isn't possible; widen toward the noise floor,
+            // capped at the tier ceiling exactly like the existing
+            // tier-fallback branch below already does.
+            if (liveAtr5m > 0) {
+                double realNoiseFloor = Math.min(liveAtr5m * 0.5, realTierRisk);
+                if (realNoiseFloor > realFloorRisk) realFloorRisk = realNoiseFloor;
+            }
             double realStopLoss;
             double realRiskPerShare;
             if (realStructuralRisk <= 0 || realStructuralRisk > realTierRisk) {
@@ -437,13 +479,29 @@ public class MomentumTradingService {
     }
 
     /** Per spec: "Once the initial target is reached, automatically
-     *  activate a trailing stop-loss to capture additional momentum." */
-    public void checkAndUpdateTrailingStop(MomentumTrade trade, double currentPrice) {
+     *  activate a trailing stop-loss to capture additional momentum."
+     *
+     *  FIX (confirmed real bug via direct code trace - root cause of
+     *  "target reached but profit not booked"): this method used to
+     *  update ONLY the database row via repository.updateTrailingStop()
+     *  and return void. MomentumTrade has @Getter only (no setters), so
+     *  the in-memory trade object handed in was NEVER updated - every
+     *  subsequent call (from the SAME stale object the scheduler kept
+     *  reusing) still read trade.getCurrentTrailStop()==null and fell
+     *  back to the ORIGINAL stop-loss for the actual exit decision,
+     *  even though the database (and dashboard) correctly showed the
+     *  tightened trailing stop. The position could ride all the way
+     *  back to the original SL - giving back the entire target gain -
+     *  before ever exiting. Now RETURNS the updated trade (via
+     *  toBuilder(), since fields are immutable) so the caller can keep
+     *  its reference current; returns the SAME object unchanged if no
+     *  update happened this tick. */
+    public MomentumTrade checkAndUpdateTrailingStop(MomentumTrade trade, double currentPrice) {
         boolean isLong = "LONG".equals(trade.getDirection());
         double target = trade.getTarget().doubleValue();
         boolean targetReached = isLong ? currentPrice >= target : currentPrice <= target;
 
-        if (!targetReached && !trade.isTrailingActive()) return;
+        if (!targetReached && !trade.isTrailingActive()) return trade;
 
         double consolidationRange = trade.getConsolidationHigh().doubleValue()
                 - trade.getConsolidationLow().doubleValue();
@@ -457,11 +515,18 @@ public class MomentumTradingService {
         // never loosens, per standard trailing-stop discipline.
         boolean shouldUpdate = isLong ? newTrailStop > currentStop : newTrailStop < currentStop;
         if (shouldUpdate) {
-            repository.updateTrailingStop(trade.getTradeId(),
-                    BigDecimal.valueOf(newTrailStop).setScale(2, RoundingMode.HALF_UP));
+            BigDecimal newStopBd = BigDecimal.valueOf(newTrailStop).setScale(2, RoundingMode.HALF_UP);
+            repository.updateTrailingStop(trade.getTradeId(), newStopBd);
             log.info("[MOMENTUM-TRADE] {} trailing stop updated: {} -> {}", trade.getSymbol(),
                     currentStop, newTrailStop);
+            // FIX: return an updated COPY so the caller's reference is
+            // no longer stale - this is what was missing before.
+            return trade.toBuilder()
+                    .trailingActive(true)
+                    .currentTrailStop(newStopBd)
+                    .build();
         }
+        return trade;
     }
 
     /**
@@ -533,14 +598,15 @@ public class MomentumTradingService {
 
     /** Per spec: monitor an active trade for SL hit, target hit
      *  (activating trailing stop), or trailing stop hit.
-     *  Returns true if the trade is still active, false if it just
-     *  closed - lets the caller (scheduler) know when it's safe to
-     *  resume monitoring for a next trade, per the 2-trades-per-day
-     *  enhancement. */
-    public boolean monitorActiveTrade(MomentumTrade trade) {
+     *  FIX (same root-cause fix as checkAndUpdateTrailingStop): now
+     *  returns the CURRENT trade object (updated if the trailing stop
+     *  moved this tick) instead of a bare boolean, so the caller can
+     *  keep its reference fresh instead of reusing a permanently-stale
+     *  object. Returns null if the trade just closed. */
+    public MomentumTrade monitorActiveTrade(MomentumTrade trade) {
         try {
             double ltp = fetchLtp(trade.getSymbol());
-            if (ltp <= 0) return true; // couldn't check this cycle - assume still active, retry next cycle
+            if (ltp <= 0) return trade; // couldn't check this cycle - assume still active, retry next cycle
 
             boolean isLong = "LONG".equals(trade.getDirection());
             double sl = trade.getStopLoss().doubleValue();
@@ -550,16 +616,20 @@ public class MomentumTradingService {
             boolean slHit = isLong ? ltp <= trailStop : ltp >= trailStop;
             if (slHit) {
                 boolean exited = exitTrade(trade, trade.isTrailingActive() ? "TRAILING_STOP_HIT" : "SL_HIT");
-                return !exited; // FIX: only report "closed" if the exit genuinely succeeded -
-                // otherwise stay ACTIVE so the scheduler keeps retrying next cycle
+                return exited ? null : trade; // FIX: only report "closed" (null) if the exit genuinely
+                // succeeded - otherwise stay ACTIVE so the scheduler
+                // keeps retrying next cycle with the same trade
             }
 
-            checkAndUpdateTrailingStop(trade, ltp);
-            return true; // still active
+            // FIX: use the RETURNED (possibly-updated) trade from here
+            // on - this is the actual fix for the stale-object bug.
+            // Same tick, so if the trail stop just moved, the very
+            // next monitoring cycle already sees the fresh value.
+            return checkAndUpdateTrailingStop(trade, ltp);
         } catch (KiteException | Exception e) {
             log.warn("[MOMENTUM-TRADE] Monitoring check failed for {} (non-fatal, retry next " +
                     "cycle): {}", trade.getSymbol(), e.getMessage());
-            return true; // couldn't determine - assume still active, retry next cycle
+            return trade; // couldn't determine - assume still active, retry next cycle
         }
     }
 

@@ -323,13 +323,22 @@ public class MomentumScheduler {
         }
 
         // If a trade is currently open, monitor it. If it just CLOSED
-        // (monitorActiveTrade returns false), fall through to see if
+        // (monitorActiveTrade returns null), fall through to see if
         // the daily cap allows resuming monitoring for another trade -
         // this is the core of the 2-trades-per-day enhancement.
         active = activeTrade.get(); // re-read - reconciliation above may have cleared it
         if (active != null) {
-            boolean stillActive = tradingService.monitorActiveTrade(active);
-            if (stillActive) return;
+            // FIX (root cause of "target reached but profit not
+            // booked"): monitorActiveTrade now returns the CURRENT
+            // trade object (refreshed if the trailing stop moved this
+            // tick) instead of a bare boolean - activeTrade.set() here
+            // is what keeps the scheduler's reference from going stale,
+            // which was the actual bug. A null return means closed.
+            MomentumTrade updated = tradingService.monitorActiveTrade(active);
+            if (updated != null) {
+                activeTrade.set(updated);
+                return;
+            }
             activeTrade.set(null); // closed - fall through below
         }
 

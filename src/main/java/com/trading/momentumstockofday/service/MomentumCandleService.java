@@ -1170,6 +1170,19 @@ public class MomentumCandleService {
      * Independently implemented here (not reused from AI) to preserve
      * Momentum's required independence.
      */
+    /**
+     * FIX (per explicit user request - stop-hunt on tight structural
+     * stops for high-priced stocks): the real-time 5-min ATR, used as a
+     * noise-aware floor for the structural stop-loss. Reuses
+     * computeDailyAtr() as-is - it operates on any candle list
+     * regardless of timeframe, per its own existing documentation.
+     */
+    public double compute5MinAtr(String symbol) {
+        List<MomentumCandidate.Candle> recent = fetchRecentCandles(symbol, 20);
+        if (recent.size() < 14) return 0; // insufficient data - caller fails open to the old floor
+        return computeDailyAtr(recent, 14);
+    }
+
     private double computeDailyAtr(List<MomentumCandidate.Candle> daily, int period) {
         if (daily.size() < period + 1) return 0;
         int start = daily.size() - period;
