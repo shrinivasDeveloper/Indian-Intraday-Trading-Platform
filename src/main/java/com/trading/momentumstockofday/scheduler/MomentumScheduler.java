@@ -512,18 +512,18 @@ public class MomentumScheduler {
                     if (config.isPullbackLogOnly()) {
                         if (pullbackLoggedToday.add(candidate.getSymbol())) {
                             log.info("[MOMENTUM-SCHEDULER] PULLBACK-SIGNAL (LOG-ONLY, no order): {} " +
-                                            "(sector #{} '{}', {}) - {}", candidate.getSymbol(),
-                                    candidate.getSectorRank(), candidate.getSector(),
-                                    candidate.getDirection(), pb.note());
+                                            "(sector #{} '{}', sector-direction={}, pullback-direction={}) - {}",
+                                    candidate.getSymbol(), candidate.getSectorRank(), candidate.getSector(),
+                                    candidate.getDirection(), pb.direction(), pb.note());
                         }
                     } else {
-                        log.info("[MOMENTUM-SCHEDULER] PULLBACK: {} (sector #{} '{}', {}) - {} " +
-                                        "[trade {}/{} today]", candidate.getSymbol(), candidate.getSectorRank(),
-                                candidate.getSector(), candidate.getDirection(), pb.note(),
-                                tradesToday.get() + 1, config.getMaxTradesPerDay());
+                        log.info("[MOMENTUM-SCHEDULER] PULLBACK: {} (sector #{} '{}', sector-direction={}, " +
+                                        "pullback-direction={}) - {} [trade {}/{} today]", candidate.getSymbol(),
+                                candidate.getSectorRank(), candidate.getSector(), candidate.getDirection(),
+                                pb.direction(), pb.note(), tradesToday.get() + 1, config.getMaxTradesPerDay());
                         try {
                             MomentumTrade trade = tradingService.enterPullback(candidate,
-                                    pb.level(), pb.dailyAtr());
+                                    pb.level(), pb.dailyAtr(), pb.direction());
                             activeTrade.set(trade);
                             tradesToday.incrementAndGet();
                             tradedSymbolsToday.add(candidate.getSymbol());

@@ -1681,7 +1681,8 @@ public class MomentumCandleService {
     // helpers; zero new data fetching; zero change to any existing method.
     // ========================================================================
 
-    public record PullbackSignal(boolean triggered, double level, double dailyAtr, String note) {}
+    public record PullbackSignal(boolean triggered, double level, double dailyAtr, String note,
+                                 String direction) {}
 
     /**
      * V1-V4 of the agreed design. SHORT: pullback UP into overhead
@@ -1694,20 +1695,75 @@ public class MomentumCandleService {
      * taking on incomplete evidence (opposite of the breakout path's
      * fail-open prior-move check, deliberately).
      */
+    /**
+     * FIX (per explicit user request, with full understanding of the
+     * tradeoff confirmed): pullback no longer inherits its direction
+     * from the sector's own direction. Sector % change is an AVERAGE
+     * across all its stocks - an individual stock can genuinely move
+     * opposite to its own sector intraday. This checks BOTH directions
+     * independently and trades whichever one actually validates - even
+     * if that's opposite to what the sector's move suggested. The
+     * BREAKOUT path is completely untouched: it still reads
+     * candidate.getDirection() from the sector exactly as before; this
+     * change is scoped to the pullback path ONLY.
+     */
     public PullbackSignal evaluatePullback(MomentumCandidate candidate) {
+        PullbackSignal longSignal = evaluatePullbackForDirection(candidate, true);
+        PullbackSignal shortSignal = evaluatePullbackForDirection(candidate, false);
+
+        if (longSignal.triggered() && shortSignal.triggered()) {
+            // Both validated on the same tick (rare - a stock genuinely
+            // sitting at both a support AND a resistance confluence
+            // simultaneously). A stock cannot trade both directions at
+            // once - deterministic tie-break: the stronger rejection
+            // (higher closeStrength, embedded in the note text since
+            // the record doesn't carry it separately) wins. Simpler and
+            // equally safe: prefer whichever confluence level is
+            // CLOSER to current price - the nearer level is the one
+            // actually being tested right now.
+            double price = fetchRecentCandles(candidate.getSymbol(), 1).stream()
+                    .findFirst().map(MomentumCandidate.Candle::close).orElse(0.0);
+            double longDist = Math.abs(longSignal.level() - price);
+            double shortDist = Math.abs(shortSignal.level() - price);
+            PullbackSignal chosen = longDist <= shortDist ? longSignal : shortSignal;
+            log.info("[MOMENTUM-PULLBACK] {} - BOTH directions validated this tick - choosing {} " +
+                    "(nearer confluence level)", candidate.getSymbol(), chosen.direction());
+            return chosen;
+        }
+        if (longSignal.triggered()) return longSignal;
+        if (shortSignal.triggered()) return shortSignal;
+        // Neither triggered - return the LONG-side note by convention
+        // (arbitrary but consistent for logging); no trade either way.
+        return longSignal;
+    }
+
+    /**
+     * V1-V4 of the agreed design, now taking direction EXPLICITLY
+     * rather than deriving it from candidate.getDirection() (see
+     * evaluatePullback() above for why). SHORT: pullback UP into
+     * overhead resistance confirmed by TWO independent structures
+     * (daily major / 30-min major / projected daily trendline) within
+     * 0.3x dailyATR of each other, touched but never closed beyond, on
+     * corrective volume, finished by a rejection candle (closeStrength
+     * >= 0.7 away from the level). LONG fully mirrored at support.
+     * Fail-closed on missing data - a pullback entry is an optional
+     * bonus path, never worth taking on incomplete evidence (opposite
+     * of the breakout path's fail-open prior-move check, deliberately).
+     */
+    private PullbackSignal evaluatePullbackForDirection(MomentumCandidate candidate, boolean isLong) {
         String symbol = candidate.getSymbol();
-        boolean isLong = "LONG".equals(candidate.getDirection());
+        String dirLabel = isLong ? "LONG" : "SHORT";
         try {
             List<MomentumCandidate.Candle> daily = fetchDailyCandles(symbol);
             List<MomentumCandidate.Candle> thirtyMin = fetch30MinuteHistoryCandles(symbol);
             List<MomentumCandidate.Candle> recent = fetchRecentCandles(symbol, 10);
             if (daily.size() < 30 || thirtyMin.size() < 20 || recent.size() < 7) {
-                return new PullbackSignal(false, 0, 0, "insufficient data for pullback analysis");
+                return new PullbackSignal(false, 0, 0, "insufficient data for pullback analysis", dirLabel);
             }
             double dailyAtr = computeDailyAtr(daily, 14);
             double atr30 = computeDailyAtr(thirtyMin, 14);
             if (dailyAtr <= 0 || atr30 <= 0) {
-                return new PullbackSignal(false, 0, 0, "no valid ATR");
+                return new PullbackSignal(false, 0, 0, "no valid ATR", dirLabel);
             }
             double tol = dailyAtr * 0.3;
             double price = recent.get(recent.size() - 1).close();
@@ -1739,13 +1795,13 @@ public class MomentumCandleService {
             }
             if (confluenceLevel == null) {
                 return new PullbackSignal(false, 0, dailyAtr, "no 2-structure confluence level on the "
-                        + (isLong ? "support" : "resistance") + " side");
+                        + (isLong ? "support" : "resistance") + " side", dirLabel);
             }
             // The level must be genuinely NEAR - a rejection 3 ATRs away
             // is not a tradeable pullback at the current price.
             if (Math.abs(confluenceLevel - price) > dailyAtr) {
                 return new PullbackSignal(false, confluenceLevel, dailyAtr,
-                        "confluence level too far from price");
+                        "confluence level too far from price", dirLabel);
             }
 
             // V2 - touched, never closed beyond (last 6 candles).
@@ -1758,28 +1814,28 @@ public class MomentumCandleService {
                         : c.close() > confluenceLevel + tol * 0.5;
                 if (closedBeyond) {
                     return new PullbackSignal(false, confluenceLevel, dailyAtr,
-                            "a candle CLOSED beyond the level - level failed, not a pullback hold");
+                            "a candle CLOSED beyond the level - level failed, not a pullback hold", dirLabel);
                 }
             }
             if (!touched) {
                 return new PullbackSignal(false, confluenceLevel, dailyAtr,
-                        "level not yet touched within tolerance");
+                        "level not yet touched within tolerance", dirLabel);
             }
 
             // V3 - rejection candle = the LAST completed candle.
             MomentumCandidate.Candle rej = window.get(window.size() - 1);
             double range = rej.range();
-            if (range <= 0) return new PullbackSignal(false, confluenceLevel, dailyAtr, "flat rejection candle");
+            if (range <= 0) return new PullbackSignal(false, confluenceLevel, dailyAtr, "flat rejection candle", dirLabel);
             double rejExtreme = isLong ? rej.low() : rej.high();
             if (Math.abs(rejExtreme - confluenceLevel) > tol) {
                 return new PullbackSignal(false, confluenceLevel, dailyAtr,
-                        "last candle did not test the level - no rejection yet");
+                        "last candle did not test the level - no rejection yet", dirLabel);
             }
             double closeStrength = isLong ? (rej.close() - rej.low()) / range
                     : (rej.high() - rej.close()) / range;
             if (closeStrength < 0.7) {
                 return new PullbackSignal(false, confluenceLevel, dailyAtr, String.format(
-                        "touch without rejection - closeStrength %.2f (need 0.70)", closeStrength));
+                        "touch without rejection - closeStrength %.2f (need 0.70)", closeStrength), dirLabel);
             }
 
             // V4 - volume character: rejection vol >= pullback-leg avg;
@@ -1789,24 +1845,24 @@ public class MomentumCandleService {
                     .mapToDouble(c -> (double) c.volume()).average().orElse(0);
             if (pullbackLegAvgVol > 0 && rej.volume() < pullbackLegAvgVol) {
                 return new PullbackSignal(false, confluenceLevel, dailyAtr,
-                        "rejection candle volume below pullback-leg average - no supply/demand step-in");
+                        "rejection candle volume below pullback-leg average - no supply/demand step-in", dirLabel);
             }
             if (recent.size() >= 10) {
                 double priorLegAvgVol = recent.subList(recent.size() - 9, recent.size() - 5).stream()
                         .mapToDouble(c -> (double) c.volume()).average().orElse(0);
                 if (priorLegAvgVol > 0 && pullbackLegAvgVol > priorLegAvgVol) {
                     return new PullbackSignal(false, confluenceLevel, dailyAtr,
-                            "pullback leg on RISING volume vs prior leg - genuine buyers/sellers, not corrective");
+                            "pullback leg on RISING volume vs prior leg - genuine buyers/sellers, not corrective", dirLabel);
                 }
             }
 
             return new PullbackSignal(true, confluenceLevel, dailyAtr, String.format(
-                    "PULLBACK %s at confluence %.2f (tol %.2f): touched-not-broken, rejection " +
-                            "closeStrength %.2f, rejVol %.0f >= legAvg %.0f",
+                    "PULLBACK %s %s at confluence %.2f (tol %.2f): touched-not-broken, rejection " +
+                            "closeStrength %.2f, rejVol %.0f >= legAvg %.0f", dirLabel,
                     isLong ? "support hold" : "resistance rejection", confluenceLevel, tol,
-                    closeStrength, (double) rej.volume(), pullbackLegAvgVol));
+                    closeStrength, (double) rej.volume(), pullbackLegAvgVol), dirLabel);
         } catch (Exception e) {
-            return new PullbackSignal(false, 0, 0, "pullback evaluation error: " + e.getMessage());
+            return new PullbackSignal(false, 0, 0, "pullback evaluation error: " + e.getMessage(), dirLabel);
         }
     }
 

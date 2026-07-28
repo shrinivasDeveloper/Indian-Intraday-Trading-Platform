@@ -143,7 +143,8 @@ public class MomentumTradingService {
      */
     public MomentumTrade enterBreakout(MomentumCandidate candidate, double consolidationHigh,
                                        double consolidationLow) {
-        return enterBreakoutInternal(candidate, consolidationHigh, consolidationLow, false);
+        return enterBreakoutInternal(candidate, consolidationHigh, consolidationLow, false,
+                candidate.getDirection());
     }
 
     /**
@@ -159,17 +160,19 @@ public class MomentumTradingService {
      * behavioral difference is pullbackMode=true switching the trend
      * filter to the pullback-aware variant (see checkPullbackTrendFilter).
      */
-    public MomentumTrade enterPullback(MomentumCandidate candidate, double level, double dailyAtr) {
-        boolean isLong = "LONG".equals(candidate.getDirection());
+    public MomentumTrade enterPullback(MomentumCandidate candidate, double level, double dailyAtr,
+                                       String direction) {
+        boolean isLong = "LONG".equals(direction);
         double syntheticHigh = isLong ? level + dailyAtr : level;
         double syntheticLow  = isLong ? level : level - dailyAtr;
-        return enterBreakoutInternal(candidate, syntheticHigh, syntheticLow, true);
+        return enterBreakoutInternal(candidate, syntheticHigh, syntheticLow, true, direction);
     }
 
     private MomentumTrade enterBreakoutInternal(MomentumCandidate candidate, double consolidationHigh,
-                                                double consolidationLow, boolean pullbackMode) {
+                                                double consolidationLow, boolean pullbackMode,
+                                                String direction) {
         String symbol = candidate.getSymbol();
-        boolean isLong = "LONG".equals(candidate.getDirection());
+        boolean isLong = "LONG".equals(direction);
 
         try {
             double ltp = fetchLtp(symbol);
@@ -315,8 +318,8 @@ public class MomentumTradingService {
             // passes successfully." Rejects clearly if either the 4H
             // VWAP or 4H EMA alignment filter fails - both are mandatory.
             var trendResult = pullbackMode
-                    ? candleService.checkPullbackTrendFilter(symbol, candidate.getDirection(), entry)
-                    : candleService.checkTrendFilters(symbol, candidate.getDirection(), entry);
+                    ? candleService.checkPullbackTrendFilter(symbol, direction, entry)
+                    : candleService.checkTrendFilters(symbol, direction, entry);
             if (!trendResult.passed()) {
                 throw new MomentumStrategyException(symbol + " - " + trendResult.reason());
             }
@@ -331,7 +334,7 @@ public class MomentumTradingService {
             // used for every other gate fires - scanning simply
             // continues to the next candidate, exactly as before.
             var srGateResult = candleService.checkHigherTimeframeGate(
-                    symbol, candidate.getDirection(), entry, riskPerShare);
+                    symbol, direction, entry, riskPerShare);
             if (!srGateResult.passed()) {
                 throw new MomentumStrategyException(symbol + " - " + srGateResult.reason());
             }
@@ -346,7 +349,7 @@ public class MomentumTradingService {
             // existing validation. Same rejection path as every other
             // gate - scanning continues to the next candidate normally.
             var srGate30mResult = candleService.check30MinuteHigherTimeframeGate(
-                    symbol, candidate.getDirection(), entry, riskPerShare);
+                    symbol, direction, entry, riskPerShare);
             if (!srGate30mResult.passed()) {
                 throw new MomentumStrategyException(symbol + " - " + srGate30mResult.reason());
             }
@@ -382,7 +385,7 @@ public class MomentumTradingService {
                         "%s - price already moved against %s direction since entry was locked in " +
                                 "(entry=%.2f, fresh LTP=%.2f, moved %.2f of planned %.2f risk) - breakout " +
                                 "likely already reversing, skipping rather than chasing a failing move",
-                        symbol, candidate.getDirection(), entry, freshLtp,
+                        symbol, direction, entry, freshLtp,
                         Math.abs(freshLtp - entry), riskPerShare));
             }
 
@@ -455,7 +458,7 @@ public class MomentumTradingService {
                     .symbol(symbol)
                     .sector(candidate.getSector())
                     .sectorRank(candidate.getSectorRank())
-                    .direction(candidate.getDirection())
+                    .direction(direction)
                     .entryPrice(BigDecimal.valueOf(realEntry).setScale(2, RoundingMode.HALF_UP))
                     .stopLoss(BigDecimal.valueOf(realStopLoss).setScale(2, RoundingMode.HALF_UP))
                     .target(BigDecimal.valueOf(realTarget).setScale(2, RoundingMode.HALF_UP))
@@ -467,7 +470,7 @@ public class MomentumTradingService {
 
             MomentumTrade saved = repository.save(trade);
             log.info("[MOMENTUM-TRADE] ENTRY CONFIRMED: {} {} qty={} realEntry={} sl={} " +
-                            "target={} (consolidation {}-{})", candidate.getDirection(), symbol, realQty,
+                            "target={} (consolidation {}-{})", direction, symbol, realQty,
                     realEntry, realStopLoss, realTarget, consolidationLow, consolidationHigh);
             return saved;
 
