@@ -72,7 +72,7 @@ public class AiTradeManagementEngine {
     private Consumer<AiTradeOutcome> onClosedCallback;
 
     // ── EOD exit time ─────────────────────────────────────────────────────
-    private static final LocalTime EOD_EXIT_TIME = LocalTime.of(15, 15); // standardized with News
+    private static final LocalTime EOD_EXIT_TIME = LocalTime.of(14, 55); // standardized with News
 
     // ── Trailing SL distance ──────────────────────────────────────────────
     private static final double TRAIL_PCT = 0.005; // 0.5% trailing
@@ -95,7 +95,24 @@ public class AiTradeManagementEngine {
         liveOrderService.setOnExitRejected("AI_TRADING_V2", this::onLiveExitRejected);
         liveOrderService.setOurOpenPositionsSupplier(() -> {
             Map<String, Integer> qtyMap = new java.util.HashMap<>();
-            openPositions.forEach((sym, pos) -> qtyMap.put(sym, pos.trade.getQuantity()));
+            // FIX (found via direct user report - real Railway log: "⚠️
+            // POSITION MISMATCH for COLPAL: broker shows qty=-49, our
+            // records show qty=49" - a FALSE POSITIVE, not a real
+            // mismatch). Confirmed real cause: trade.getQuantity() is
+            // always a positive magnitude regardless of direction, but
+            // Zerodha's own netQuantity uses SIGNED convention (negative
+            // for a net-SHORT position) - the exact same, genuinely
+            // correct position was being compared using two different
+            // sign conventions, causing this false alarm for EVERY
+            // SHORT trade. Now signs our own quantity to match
+            // Zerodha's convention before comparison, using the same
+            // proven getDirection() pattern already used throughout
+            // this file.
+            openPositions.forEach((sym, pos) -> {
+                int signedQty = pos.trade.getDirection() == TradeDirection.LONG
+                        ? pos.trade.getQuantity() : -pos.trade.getQuantity();
+                qtyMap.put(sym, signedQty);
+            });
             return qtyMap;
         });
     }
@@ -433,16 +450,46 @@ public class AiTradeManagementEngine {
 
     // ═══════════════════════════════════════════════════════════════════════
     // EOD EXIT — 15:15 IST every trading day (standardized with News)
+    //
+    // FIX (confirmed real bug via direct user report - a position stayed
+    // open until a 3:20 PM MANUAL exit, well past 15:15): this was
+    // previously a single-shot cron firing EXACTLY ONCE at 15:15:00 with
+    // NO retry. Two concrete ways that single shot could silently fail:
+    //   1. marketData.getLastPricesSimple() had no price for the symbol
+    //      at that exact millisecond (a momentary feed gap) - the old
+    //      code did nothing in that case, no log, no retry, ever.
+    //   2. In LIVE mode, if the exit order placement failed/was rejected
+    //      at that exact moment, the old code logged "will retry next
+    //      cycle" - but no such cycle existed anywhere in this file for
+    //      EOD specifically; onTick()/onCandle() only ever check SL/T1/T2.
+    // FIX: converted to the SAME proven recurring-retry pattern already
+    // used for Momentum's EOD force-exit - runs every 30s from 15:15
+    // onward and keeps retrying any symbol still in openPositions until
+    // it's genuinely empty. Reuses close() completely unchanged: LIVE
+    // mode's exitOrderPending guard already makes a repeat call for a
+    // position whose order is already in flight a safe no-op, and PAPER
+    // mode closes immediately on the first successful call - so this
+    // recurring call is idempotent-safe with zero new locking needed.
     // ═══════════════════════════════════════════════════════════════════════
 
-    @Scheduled(cron = "0 15 15 * * MON-FRI", zone = "Asia/Kolkata")
+    @Scheduled(fixedRate = 30_000)
     public void eodExit() {
+        LocalTime now = LocalTime.now(ZoneId.of("Asia/Kolkata"));
+        if (now.isBefore(EOD_EXIT_TIME)) return; // cheap no-op before 15:15, every 30s
         if (openPositions.isEmpty()) return;
-        log.info("[AI-MGMT] EOD exit — closing {} positions", openPositions.size());
+
+        log.info("[AI-MGMT] EOD exit check ({}) - {} position(s) still open, attempting close",
+                now, openPositions.size());
         Map<String, BigDecimal> prices = marketData.getLastPricesSimple();
         new ArrayList<>(openPositions.keySet()).forEach(symbol -> {
             BigDecimal ltpBD = prices.get(symbol);
-            if (ltpBD != null) close(symbol, ltpBD.doubleValue(), "AI_EOD");
+            if (ltpBD != null) {
+                close(symbol, ltpBD.doubleValue(), "AI_EOD");
+            } else {
+                log.warn("[AI-MGMT] EOD exit - no live price available for {} this cycle - " +
+                                "will retry in 30s (previously this failure was permanent and silent)",
+                        symbol);
+            }
         });
     }
 

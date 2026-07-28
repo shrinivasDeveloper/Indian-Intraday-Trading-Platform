@@ -231,7 +231,7 @@ manual-swing:
   profit-target-pct: 5.0           # quick-exit threshold, see service docstring
   force-exit-time: "09:20"         # unconditional exit time, day after purchase
   market-open-time: "09:15"
-  market-close-time: "15:30"
+  market-close-time: "14:55"
   monitoring-interval-ms: 60000    # scheduler tick — 1 min, swing-trade granularity
   order-poll-interval-ms: 3000     # fill-confirmation poll, same cadence as rest of app
   order-poll-max-attempts: 10
@@ -289,7 +289,7 @@ momentum-stock-of-day:
   max-trades-per-day: 2
   trailing-stop-consolidation-range-multiple: 0.5
   monitoring-interval-ms: 60000
-  force-exit-time: "15:15"
+  force-exit-time: "15:00"
   order-poll-interval-ms: 3000
   order-poll-max-attempts: 10
   pullback-enabled: true
