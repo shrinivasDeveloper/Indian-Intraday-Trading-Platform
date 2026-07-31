@@ -98,4 +98,15 @@ public class MomentumConfig {
     private boolean pullbackLogOnly = false; // per explicit user decision: LIVE pullback
     // trading enabled immediately, both directions -
     // log-only observation phase skipped
+
+    /** INSTITUTIONAL CONFLUENCE ENGINE (Volume Profile + Order Flow +
+     *  Order Book + Confluence scoring) - additive, per explicit user
+     *  request. Defaults to LOG-ONLY: unlike pullback/order-book, this
+     *  combines three brand-new modules with several disclosed
+     *  heuristics (spoofing proxy, acceptance proxy, default liquidity/
+     *  spread thresholds) that have had zero live market validation -
+     *  observe real ConfluenceResult logs for a few sessions before
+     *  flipping to live, same caution level pullback originally had. */
+    private boolean confluenceEngineEnabled = true;
+    private boolean confluenceEngineLogOnly = true;
 }

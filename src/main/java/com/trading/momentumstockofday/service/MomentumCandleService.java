@@ -727,6 +727,17 @@ public class MomentumCandleService {
      * reliance on an API Zerodha's own docs say isn't meant for
      * same-day intraday use.
      */
+    /**
+     * ADDITIVE (Institutional Confluence Engine integration, per
+     * explicit user request): exposes recent candle volumes publicly
+     * for the Volume Profile confirmation module. Wraps the existing
+     * fetchRecentCandles() without modifying it at all.
+     */
+    public List<Long> getRecentCandleVolumes(String symbol, int count) {
+        return fetchRecentCandles(symbol, count).stream()
+                .map(MomentumCandidate.Candle::volume).toList();
+    }
+
     private List<MomentumCandidate.Candle> fetchRecentCandles(String symbol, int count) {
         Deque<MomentumCandidate.Candle> buffer = fiveMinBuffers.get(symbol);
         if (buffer == null || buffer.isEmpty()) return List.of();

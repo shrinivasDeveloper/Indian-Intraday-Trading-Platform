@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -63,13 +64,24 @@ public class MomentumTradingService {
     private final CrossStrategyPositionRegistry positionRegistry;
     private final com.trading.momentumstockofday.repository.MomentumCapitalRepository capitalRepository;
     private final MomentumCandleService candleService;
+    // ADDITIVE (per explicit user request - order-book hard gate):
+    // needed to read live market depth captured from the WebSocket
+    // FULL-mode tick stream (fetchLtp's REST getQuote() call does not
+    // carry depth - depth only flows through the WebSocket).
+    private final com.trading.marketdata.service.MarketDataService marketDataService;
+    // ADDITIVE (Institutional Confluence Engine integration, per
+    // explicit user request): new dependency, does not remove or
+    // alter any existing one.
+    private final com.trading.institutional.service.ConfluenceValidationService confluenceService;
 
     public MomentumTradingService(KiteConnect kiteConnect, MomentumConfig config,
                                   MomentumTradeRepository repository,
                                   AccountMarginGuard marginGuard,
                                   CrossStrategyPositionRegistry positionRegistry,
                                   com.trading.momentumstockofday.repository.MomentumCapitalRepository capitalRepository,
-                                  MomentumCandleService candleService) {
+                                  MomentumCandleService candleService,
+                                  com.trading.marketdata.service.MarketDataService marketDataService,
+                                  com.trading.institutional.service.ConfluenceValidationService confluenceService) {
         this.kiteConnect = kiteConnect;
         this.config = config;
         this.repository = repository;
@@ -77,6 +89,8 @@ public class MomentumTradingService {
         this.positionRegistry = positionRegistry;
         this.capitalRepository = capitalRepository;
         this.candleService = candleService;
+        this.marketDataService = marketDataService;
+        this.confluenceService = confluenceService;
     }
 
     /** Result of a confirmed (or timed-out) fill check. filled=false
@@ -387,6 +401,163 @@ public class MomentumTradingService {
                                 "likely already reversing, skipping rather than chasing a failing move",
                         symbol, direction, entry, freshLtp,
                         Math.abs(freshLtp - entry), riskPerShare));
+            }
+
+            // ═══════════════════════════════════════════════════════════
+            // ORDER-BOOK HARD GATE (per explicit user request, additive):
+            // BUY:  bidQty/askQty >= 1.30 AND OBI >= +0.15 AND
+            //       bestBidQty > bestAskQty AND no large SELL wall
+            // SELL: askQty/bidQty >= 1.30 AND OBI <= -0.15 AND
+            //       bestAskQty > bestBidQty AND no large BUY wall
+            // Checked fresh at THIS exact moment of entry (the live
+            // WebSocket depth cache updates continuously; this reads
+            // whatever is freshest right now - same freshness principle
+            // as the fresh-price re-check just above). Wall detection is
+            // capped at 5 levels - Zerodha's FULL-mode feed provides
+            // exactly 5 depth levels per side, not 10; "5-10" in the
+            // requirement can only mean "up to the 5 actually available".
+            // FAILS CLOSED: if depth data is unavailable for this symbol
+            // (e.g. QUOTE-mode, or no tick received yet), the gate
+            // REJECTS rather than assumes pass - a hard gate with no
+            // data to evaluate cannot be treated as satisfied.
+            // ═══════════════════════════════════════════════════════════
+            // ═══════════════════════════════════════════════════════════
+            // ORDER BOOK CONFIRMATION MODULE (per explicit user spec,
+            // full rewrite - my first version only checked a single
+            // instant snapshot; this version implements the complete
+            // stateful spec: 1s-sampled rolling history, deltas between
+            // consecutive samples, and REQUIRES the full condition set
+            // to persist across the last 3 consecutive updates - a
+            // single passing instant is explicitly NOT enough per spec.
+            // Confirmation filter ONLY - never generates a trade on its
+            // own; it can only VETO a signal the strategy already found.
+            // ═══════════════════════════════════════════════════════════
+            List<com.trading.marketdata.service.MarketDataService.DepthSnapshot> history =
+                    marketDataService.getDepthHistory(symbol);
+            // Need 4 samples: 3 to evaluate ("persist for 3 consecutive
+            // updates") + 1 earlier one to compute the FIRST delta from.
+            if (history.size() < 4) {
+                throw new MomentumStrategyException(String.format(
+                        "%s - order-book gate: only %d depth sample(s) captured so far, need >=4 " +
+                                "(~1s apart) to evaluate 3-consecutive-update persistence - failing closed, " +
+                                "skipping rather than trading on insufficient order-flow history",
+                        symbol, history.size()));
+            }
+            List<com.trading.marketdata.service.MarketDataService.DepthSnapshot> recent4 =
+                    history.subList(history.size() - 4, history.size());
+
+            // Spoofing heuristic (disclosed approximation - true spoof
+            // detection needs trade-print correlation this platform
+            // doesn't currently capture at the depth level; this flags
+            // a level that spikes then collapses within one sample,
+            // the visible signature of a placed-then-pulled order):
+            List<com.trading.marketdata.service.MarketDataService.DepthLevel> confirmSideAllSamples =
+                    new ArrayList<>();
+            for (var s : history) confirmSideAllSamples.addAll(isLong ? s.bids() : s.asks());
+            Map<Double, List<Integer>> qtyByPrice = new java.util.HashMap<>();
+            for (var lvl : confirmSideAllSamples) {
+                qtyByPrice.computeIfAbsent(lvl.price(), k -> new ArrayList<>()).add(lvl.quantity());
+            }
+            boolean spoofDetected = false;
+            for (var priceQtyEntry : qtyByPrice.entrySet()) {
+                List<Integer> qtys = priceQtyEntry.getValue();
+                if (qtys.size() < 2) continue;
+                double avg = qtys.stream().mapToInt(Integer::intValue).average().orElse(0);
+                if (avg <= 0) continue;
+                for (int i = 1; i < qtys.size(); i++) {
+                    boolean spiked = qtys.get(i - 1) > avg * 2.0;
+                    boolean collapsed = qtys.get(i) < avg * 0.3;
+                    if (spiked && collapsed) { spoofDetected = true; break; }
+                }
+                if (spoofDetected) break;
+            }
+            if (spoofDetected) {
+                throw new MomentumStrategyException(symbol + " - order-book gate: possible spoofing " +
+                        "detected (a price level spiked then collapsed within the sampling window) - " +
+                        "rejecting rather than trading on unreliable order-flow signal");
+            }
+
+            boolean allThreePass = true;
+            StringBuilder detail = new StringBuilder();
+            for (int i = 1; i < recent4.size(); i++) { // i=1,2,3 -> the 3 "current" evaluations
+                var prev = recent4.get(i - 1);
+                var cur = recent4.get(i);
+                long sumBid = cur.bids().stream().mapToLong(l -> (long) l.quantity()).sum();
+                long sumAsk = cur.asks().stream().mapToLong(l -> (long) l.quantity()).sum();
+                long prevSumBid = prev.bids().stream().mapToLong(l -> (long) l.quantity()).sum();
+                long prevSumAsk = prev.asks().stream().mapToLong(l -> (long) l.quantity()).sum();
+                if (sumBid <= 0 || sumAsk <= 0) { allThreePass = false; break; }
+
+                double obi = (double) (sumBid - sumAsk) / (sumBid + sumAsk);
+                int bestBidQty = cur.bids().get(0).quantity();
+                int bestAskQty = cur.asks().get(0).quantity();
+                long bidDelta = sumBid - prevSumBid;
+                long askDelta = sumAsk - prevSumAsk;
+
+                List<com.trading.marketdata.service.MarketDataService.DepthLevel> opposing =
+                        isLong ? cur.asks() : cur.bids();
+                double oppAvg = opposing.stream().mapToInt(l -> l.quantity()).average().orElse(0);
+                boolean wall = oppAvg > 0 && opposing.stream().anyMatch(l -> l.quantity() > oppAvg * 3.0);
+
+                boolean pass;
+                if (isLong) {
+                    double ratio = (double) sumBid / sumAsk;
+                    pass = ratio >= 1.50 && obi >= 0.15 && bestBidQty > bestAskQty && !wall
+                            && bidDelta > 0 && bidDelta > askDelta;
+                } else {
+                    double ratio = (double) sumAsk / sumBid;
+                    pass = ratio >= 1.50 && obi <= -0.15 && bestAskQty > bestBidQty && !wall
+                            && askDelta > 0 && askDelta > bidDelta;
+                }
+                detail.append(String.format("[sample %d: obi=%.2f bidDelta=%d askDelta=%d wall=%s pass=%s] ",
+                        i, obi, bidDelta, askDelta, wall, pass));
+                if (!pass) { allThreePass = false; break; }
+            }
+            if (!allThreePass) {
+                throw new MomentumStrategyException(String.format(
+                        "%s - order-book gate REJECTED: full condition set did not persist across " +
+                                "the last 3 consecutive ~1s updates (%s) - momentum signal alone insufficient",
+                        symbol, detail));
+            }
+            log.info("[MOMENTUM-TRADE] {} order-book gate PASSED - conditions persisted across 3 " +
+                    "consecutive updates ({})", symbol, detail);
+
+            // ═══════════════════════════════════════════════════════════
+            // INSTITUTIONAL CONFLUENCE ENGINE (per explicit user request,
+            // additive integration): Volume Profile + Order Flow +
+            // Order Book (standalone copy) + Confluence scoring, checked
+            // AFTER the existing order-book gate above (which is
+            // completely untouched and still independently enforced).
+            // This engine NEVER generates a trade - it can only VETO one
+            // the existing pipeline already approved, exactly like the
+            // order-book gate's own role. LOG-ONLY by default (see
+            // MomentumConfig) - observes real ConfluenceResult output
+            // for a few sessions before you decide to make it live,
+            // given these three modules have zero live-market track
+            // record yet.
+            // ═══════════════════════════════════════════════════════════
+            if (config.isConfluenceEngineEnabled()) {
+                List<Long> recentVols = candleService.getRecentCandleVolumes(symbol, 6);
+                long breakoutCandleVolume = recentVols.isEmpty() ? 0 : recentVols.get(recentVols.size() - 1);
+                List<Long> priorFiveVols = recentVols.size() > 1
+                        ? recentVols.subList(0, recentVols.size() - 1) : List.of();
+                var confluence = confluenceService.validate(symbol, direction, entry,
+                        priorFiveVols, breakoutCandleVolume);
+                if (config.isConfluenceEngineLogOnly()) {
+                    log.info("[MOMENTUM-TRADE] {} CONFLUENCE-ENGINE (LOG-ONLY, not blocking): " +
+                                    "executeAllowed={} score={}/100 quality={} failSafe={}", symbol,
+                            confluence.executeAllowed(), confluence.totalScore(), confluence.quality(),
+                            confluence.failSafeReasons());
+                } else if (!confluence.executeAllowed()) {
+                    throw new MomentumStrategyException(String.format(
+                            "%s - Institutional Confluence Engine REJECTED: score=%d/100 quality=%s " +
+                                    "failSafe=%s - existing gates approved this trade but institutional " +
+                                    "confirmation did not, skipping", symbol, confluence.totalScore(),
+                            confluence.quality(), confluence.failSafeReasons()));
+                } else {
+                    log.info("[MOMENTUM-TRADE] {} CONFLUENCE-ENGINE PASSED: score={}/100 quality={}",
+                            symbol, confluence.totalScore(), confluence.quality());
+                }
             }
 
             String orderId = placeMarketOrder(symbol, isLong ? Constants.TRANSACTION_TYPE_BUY

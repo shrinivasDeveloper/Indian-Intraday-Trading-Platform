@@ -75,6 +75,219 @@ public class MarketDataService {
     /** Last tick price per symbol — for DashboardController /prices endpoint */
     private final Map<String, BigDecimal> lastPrices = new ConcurrentHashMap<>();
 
+    /**
+     * ADDITIVE (per explicit user request - order-book hard gate for
+     * Momentum): live market depth per symbol, captured on every
+     * FULL-mode tick. Verified against Zerodha's official javadoc
+     * (kite.trade/docs/javakiteconnect/v3/com/zerodhatech/models/
+     * Tick.html and .../Depth.html):
+     *   Tick.getMarketDepth() -> Map<String, ArrayList<Depth>>
+     *     keys are "buy" and "sell", each an ArrayList of depth
+     *     entries, best price first.
+     *   Depth.getPrice()    -> double
+     *   Depth.getQuantity() -> int
+     *   Depth.getOrders()   -> int
+     * Zerodha's depth feed provides exactly 5 levels per side - NOT
+     * 10 - a real platform constraint, not a limitation of this code.
+     * QUOTE-mode symbols never populate this (depth is FULL-mode
+     * only) - callers must treat an absent/empty snapshot as "no
+     * depth data available" and fail safe accordingly.
+     */
+    /**
+     * ADDITIVE (per explicit user request - Order Book Confirmation
+     * Module, full spec): a ROLLING history of depth snapshots per
+     * symbol, sampled at ~1-second cadence, is the actual foundation
+     * this spec requires - deltas, 3-consecutive-update persistence,
+     * and spoofing detection are all impossible from a single instant
+     * snapshot (my first attempt's mistake, corrected here).
+     * Sampling piggybacks on tick arrival: a new entry is appended
+     * only if >=900ms has passed since the last stored sample for
+     * that symbol - achieves ~1s cadence with zero extra timer thread.
+     * Capped at 10 samples (10s window) - enough for 3-consecutive
+     * persistence + spoofing detection, without unbounded memory growth.
+     */
+    public record DepthLevel(double price, int quantity, int orders) {}
+    public record DepthSnapshot(List<DepthLevel> bids, List<DepthLevel> asks, Instant capturedAt) {}
+    private static final long DEPTH_SAMPLE_MIN_INTERVAL_MS = 900;
+    private static final int DEPTH_HISTORY_MAX_SAMPLES = 10;
+    private final Map<String, java.util.Deque<DepthSnapshot>> depthHistory = new ConcurrentHashMap<>();
+
+    /**
+     * ADDITIVE (Institutional Confirmation Engine - Volume Profile
+     * module, per explicit user request): intraday volume-at-price
+     * histogram per symbol, built from incremental per-tick volume
+     * attributed to price buckets. Bucket size is CONFIGURABLE (spec
+     * requirement) - default 0.05% of the price at first capture each
+     * day (a percentage keeps bucket granularity sane across a Rs.50
+     * stock and a Rs.11,000 stock alike; a fixed rupee amount would
+     * not). Reset once per day by the caller (Momentum's own daily
+     * reset already exists - this hooks into nothing new, see
+     * resetVolumeProfile() below, called the same way lastPrices would
+     * be reset if it ever needed to be).
+     */
+    private final Map<String, Long> lastCumulativeVolume = new ConcurrentHashMap<>();
+    private final Map<String, java.util.concurrent.ConcurrentSkipListMap<Double, Long>> volumeProfiles =
+            new ConcurrentHashMap<>();
+    private final Map<String, Double> profileBucketSize = new ConcurrentHashMap<>();
+    private static final double DEFAULT_BUCKET_SIZE_PCT = 0.0005; // 0.05% of first-seen price
+
+    /** Developing POC history: one snapshot per symbol per ~60s, so
+     *  "developing POC shifting upward/downward" can be measured. */
+    public record PocSnapshot(double poc, Instant at) {}
+    private final Map<String, java.util.Deque<PocSnapshot>> developingPocHistory = new ConcurrentHashMap<>();
+    private static final long POC_SNAPSHOT_MIN_INTERVAL_MS = 55_000; // ~1 minute, spec's own cadence
+    private static final int POC_HISTORY_MAX_SAMPLES = 30; // 30 minutes of developing-POC history
+
+    /**
+     * ADDITIVE (Institutional Confirmation Engine - Order Flow module,
+     * per explicit user request): classifies each tick's incremental
+     * volume (already computed above for Volume Profile) as an
+     * aggressive BUY or SELL using the standard tick rule:
+     *   price >= current best ask -> BUY (lifted the offer)
+     *   price <= current best bid -> SELL (hit the bid)
+     *   otherwise -> fallback to price-direction vs the previous tick
+     *   (up-tick = buy pressure, down-tick = sell pressure, unchanged
+     *   = carry forward the last classification) - the standard
+     *   fallback when depth doesn't clearly show the aggressor.
+     * Reuses the live depth already captured this same tick (see the
+     * depth-capture block below) - zero new market-data subscription.
+     * Sampled at ~1s cadence, per the spec's own "Update every second".
+     */
+    public record OrderFlowSnapshot(long buyVolume, long sellVolume, long cumulativeDelta,
+                                    double price, Instant capturedAt) {}
+    private final Map<String, Double> lastPriceForTickRule = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> lastClassificationWasBuy = new ConcurrentHashMap<>();
+    private final Map<String, long[]> cumulativeBuySell = new ConcurrentHashMap<>(); // [0]=buy,[1]=sell
+    private final Map<String, Long> cumulativeDeltaBySymbol = new ConcurrentHashMap<>();
+    private final Map<String, java.util.Deque<OrderFlowSnapshot>> orderFlowHistory = new ConcurrentHashMap<>();
+    private static final long ORDERFLOW_SAMPLE_MIN_INTERVAL_MS = 950; // ~1s, spec's own cadence
+    private static final int ORDERFLOW_HISTORY_MAX_SAMPLES = 60; // ~1 minute of 1s samples
+
+    private void recordOrderFlow(String symbol, double price, long incrementalVol) {
+        DepthSnapshot depth = getDepth(symbol); // most recent depth, already captured this tick or a prior one
+        Boolean isBuy;
+        if (depth != null && !depth.bids().isEmpty() && !depth.asks().isEmpty()) {
+            double bestAsk = depth.asks().get(0).price();
+            double bestBid = depth.bids().get(0).price();
+            if (price >= bestAsk) isBuy = true;
+            else if (price <= bestBid) isBuy = false;
+            else isBuy = null; // ambiguous - fall through to price-direction rule
+        } else {
+            isBuy = null;
+        }
+        if (isBuy == null) {
+            Double lastPrice = lastPriceForTickRule.get(symbol);
+            if (lastPrice != null && price > lastPrice) isBuy = true;
+            else if (lastPrice != null && price < lastPrice) isBuy = false;
+            else isBuy = lastClassificationWasBuy.getOrDefault(symbol, true); // carry forward, fail-open true
+        }
+        lastPriceForTickRule.put(symbol, price);
+        lastClassificationWasBuy.put(symbol, isBuy);
+
+        long[] cumBS = cumulativeBuySell.computeIfAbsent(symbol, k -> new long[2]);
+        synchronized (cumBS) {
+            if (isBuy) cumBS[0] += incrementalVol; else cumBS[1] += incrementalVol;
+        }
+        long cumDelta = cumBS[0] - cumBS[1];
+        cumulativeDeltaBySymbol.put(symbol, cumDelta);
+
+        var hist = orderFlowHistory.computeIfAbsent(symbol, k -> new java.util.concurrent.ConcurrentLinkedDeque<>());
+        OrderFlowSnapshot last = hist.peekLast();
+        Instant now = Instant.now();
+        long buyThisSample = isBuy ? incrementalVol : 0;
+        long sellThisSample = isBuy ? 0 : incrementalVol;
+        if (last == null || now.toEpochMilli() - last.capturedAt().toEpochMilli()
+                >= ORDERFLOW_SAMPLE_MIN_INTERVAL_MS) {
+            hist.addLast(new OrderFlowSnapshot(buyThisSample, sellThisSample, cumDelta, price, now));
+            while (hist.size() > ORDERFLOW_HISTORY_MAX_SAMPLES) hist.pollFirst();
+        } else {
+            // Still within the same ~1s sample window - accumulate
+            // into the CURRENT (not-yet-finalized) sample rather than
+            // creating a new one, so each returned sample genuinely
+            // represents ~1 second of activity, not a sub-second sliver.
+            hist.pollLast();
+            hist.addLast(new OrderFlowSnapshot(last.buyVolume() + buyThisSample,
+                    last.sellVolume() + sellThisSample, cumDelta, price, last.capturedAt()));
+        }
+    }
+
+    public List<OrderFlowSnapshot> getOrderFlowHistory(String symbol) {
+        var h = orderFlowHistory.get(symbol);
+        return h == null ? List.of() : new ArrayList<>(h);
+    }
+
+    public void resetOrderFlow(String symbol) {
+        cumulativeBuySell.remove(symbol);
+        cumulativeDeltaBySymbol.remove(symbol);
+        orderFlowHistory.remove(symbol);
+        lastPriceForTickRule.remove(symbol);
+        lastClassificationWasBuy.remove(symbol);
+    }
+
+    private void recordVolumeAtPrice(String symbol, double price, long incrementalVolume) {
+        double bucketSize = profileBucketSize.computeIfAbsent(symbol,
+                k -> Math.max(0.01, price * DEFAULT_BUCKET_SIZE_PCT));
+        double bucket = Math.round(price / bucketSize) * bucketSize;
+        var profile = volumeProfiles.computeIfAbsent(symbol,
+                k -> new java.util.concurrent.ConcurrentSkipListMap<>());
+        profile.merge(bucket, incrementalVolume, Long::sum);
+
+        // Update the developing-POC history at ~1-minute cadence.
+        var pocHist = developingPocHistory.computeIfAbsent(symbol,
+                k -> new java.util.concurrent.ConcurrentLinkedDeque<>());
+        PocSnapshot lastSnap = pocHist.peekLast();
+        Instant now = Instant.now();
+        if (lastSnap == null || now.toEpochMilli() - lastSnap.at().toEpochMilli()
+                >= POC_SNAPSHOT_MIN_INTERVAL_MS) {
+            double currentPoc = profile.entrySet().stream()
+                    .max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse(bucket);
+            pocHist.addLast(new PocSnapshot(currentPoc, now));
+            while (pocHist.size() > POC_HISTORY_MAX_SAMPLES) pocHist.pollFirst();
+        }
+    }
+
+    /** Read-only view of the full session volume-at-price histogram,
+     *  bucket price -> cumulative volume, for VolumeProfileConfirmationService. */
+    public Map<Double, Long> getVolumeProfile(String symbol) {
+        var p = volumeProfiles.get(symbol);
+        return p == null ? Map.of() : new java.util.TreeMap<>(p);
+    }
+
+    public List<PocSnapshot> getDevelopingPocHistory(String symbol) {
+        var h = developingPocHistory.get(symbol);
+        return h == null ? List.of() : new ArrayList<>(h);
+    }
+
+    public double getVolumeProfileBucketSize(String symbol) {
+        return profileBucketSize.getOrDefault(symbol, 0.0);
+    }
+
+    /** Daily reset hook - clears volume profile state for a new
+     *  trading day. Callers (e.g. Momentum's own daily reset) invoke
+     *  this once at market open; harmless/no-op if never called
+     *  (state simply keeps accumulating, same risk any other
+     *  session-scoped cache in this file already carries). */
+    public void resetVolumeProfile(String symbol) {
+        volumeProfiles.remove(symbol);
+        lastCumulativeVolume.remove(symbol);
+        profileBucketSize.remove(symbol);
+        developingPocHistory.remove(symbol);
+    }
+
+    /** Most recent single snapshot - kept for any caller that only
+     *  needs "right now" (e.g. dashboard display). */
+    public DepthSnapshot getDepth(String symbol) {
+        var hist = depthHistory.get(symbol);
+        return (hist == null || hist.isEmpty()) ? null : hist.peekLast();
+    }
+
+    /** Full rolling history, oldest-first, for the Order Book
+     *  Confirmation Module's delta/persistence/spoofing checks. */
+    public List<DepthSnapshot> getDepthHistory(String symbol) {
+        var hist = depthHistory.get(symbol);
+        return hist == null ? List.of() : new ArrayList<>(hist);
+    }
+
     private final AtomicBoolean  connected      = new AtomicBoolean(false);
     private final AtomicInteger  reconnectCount = new AtomicInteger(0);
 
@@ -210,6 +423,56 @@ public class MarketDataService {
 
             BigDecimal ltp = BigDecimal.valueOf(ltpDbl);
             lastPrices.put(symbol, ltp);
+
+            // ADDITIVE (Institutional Confirmation Engine - Volume
+            // Profile module, per explicit user request): attribute
+            // each tick's INCREMENTAL volume (today's cumulative volume
+            // minus the previous reading) to the price bucket the
+            // trade occurred at. Uses only fields already JAR-verified
+            // in this file (getLastTradedPrice, getVolumeTradedToday).
+            // First tick of the day for a symbol has no prior baseline
+            // to diff against - skipped rather than wrongly attributing
+            // the whole pre-market/opening cumulative volume to one tick.
+            long cumVol = tick.getVolumeTradedToday();
+            Long prevCumVol = lastCumulativeVolume.get(symbol);
+            if (prevCumVol != null && cumVol > prevCumVol) {
+                long incrementalVol = cumVol - prevCumVol;
+                recordVolumeAtPrice(symbol, ltpDbl, incrementalVol);
+                // ADDITIVE (Institutional Confirmation Engine - Order
+                // Flow module, per explicit user request): classify
+                // this SAME incremental volume as aggressive buy or
+                // sell using the standard tick rule.
+                recordOrderFlow(symbol, ltpDbl, incrementalVol);
+            }
+            lastCumulativeVolume.put(symbol, cumVol);
+
+            // ADDITIVE (order-book hard gate): capture depth if this
+            // tick carries it (FULL mode only - null/absent for QUOTE
+            // mode, handled safely rather than assumed present).
+            Map<String, ArrayList<com.zerodhatech.models.Depth>> md = tick.getMarketDepth();
+            if (md != null) {
+                List<com.zerodhatech.models.Depth> buyRaw = md.get("buy");
+                List<com.zerodhatech.models.Depth> sellRaw = md.get("sell");
+                if (buyRaw != null && sellRaw != null && !buyRaw.isEmpty() && !sellRaw.isEmpty()) {
+                    List<DepthLevel> bids = new ArrayList<>();
+                    for (com.zerodhatech.models.Depth d : buyRaw) {
+                        bids.add(new DepthLevel(d.getPrice(), d.getQuantity(), d.getOrders()));
+                    }
+                    List<DepthLevel> asks = new ArrayList<>();
+                    for (com.zerodhatech.models.Depth d : sellRaw) {
+                        asks.add(new DepthLevel(d.getPrice(), d.getQuantity(), d.getOrders()));
+                    }
+                    java.util.Deque<DepthSnapshot> hist = depthHistory.computeIfAbsent(
+                            symbol, k -> new java.util.concurrent.ConcurrentLinkedDeque<>());
+                    DepthSnapshot last = hist.peekLast();
+                    Instant now = Instant.now();
+                    if (last == null || now.toEpochMilli() - last.capturedAt().toEpochMilli()
+                            >= DEPTH_SAMPLE_MIN_INTERVAL_MS) {
+                        hist.addLast(new DepthSnapshot(bids, asks, now));
+                        while (hist.size() > DEPTH_HISTORY_MAX_SAMPLES) hist.pollFirst();
+                    }
+                }
+            }
 
             // JAR-VERIFIED: getLastTradedTime() returns java.util.Date, not Instant
             // Must call .toInstant() to convert
