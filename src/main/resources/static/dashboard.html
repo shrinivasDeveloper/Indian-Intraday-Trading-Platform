@@ -581,12 +581,61 @@
         <div id="mt-candidates"></div>
     </div>
 
+    <!-- GATE STATUS PANEL (additive, per explicit user request): live
+         Pass/Fail/Pending view of every validation gate, per watchlist
+         symbol. Purely a read-only display of what MomentumGateStatusService
+         already recorded - triggers no computation, makes no decision. -->
+    <div class="card" style="margin-top:16px">
+        <div class="ct">🧩 Validation Gate Status <span class="sub" id="mt-gate-updated"></span></div>
+        <div class="sub" style="padding:6px 0 12px">
+            Live per-gate result for every watchlist symbol. Scanning gates
+            (consolidation, breakout, pullback) update every ~30s for every
+            symbol. Entry gates (risk, margin, order-book, institutional
+            confirmation) only run once a signal actually fires — until
+            then they show <b>Pending</b>, which is the honest state, not
+            a placeholder pass.
+        </div>
+        <div id="mt-gate-table-wrap" style="overflow-x:auto">
+            <table id="mt-gate-table" style="width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap">
+                <thead><tr id="mt-gate-header"></tr></thead>
+                <tbody id="mt-gate-body"></tbody>
+            </table>
+        </div>
+        <div id="mt-gate-cards" style="display:none"></div>
+    </div>
+
     <div class="card" id="mt-trade-card" style="display:none;margin-top:16px">
         <div class="ct">📈 Today's Trade</div>
         <div id="mt-trade-body"></div>
     </div>
 </div>
 
+<style>
+    /* Gate status panel - responsive: table on wide screens, stacked
+       cards on narrow/mobile screens. Scoped IDs, zero collision risk
+       with any existing dashboard styling. */
+    #mt-gate-table th, #mt-gate-table td {
+        padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left;
+    }
+    #mt-gate-table th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--card); }
+    .mt-gate-pill {
+        display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;
+    }
+    .mt-gate-pass { background: rgba(63,185,80,0.15); color: #3fb950; }
+    .mt-gate-fail { background: rgba(248,81,73,0.15); color: #f85149; }
+    .mt-gate-pending { background: rgba(139,148,158,0.15); color: var(--muted); }
+    .mt-gate-symbol-card {
+        background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+        padding: 10px 12px; margin-bottom: 10px;
+    }
+    .mt-gate-symbol-card .sym-name { font-weight: 700; margin-bottom: 6px; }
+    .mt-gate-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
+    .mt-gate-row .gname { color: var(--muted); }
+    @media (max-width: 720px) {
+        #mt-gate-table-wrap { display: none; }
+        #mt-gate-cards { display: block !important; }
+    }
+</style>
 <script>
     // ============================================================
     // MOMENTUM STOCK OF THE DAY - completely independent module.
@@ -678,6 +727,80 @@
                 ${t.status === 'CLOSED' ? `<div><div class="sub">Exit</div><div>₹${t.exitPrice} (${t.exitReason})</div></div>` : ''}
             </div>`;
     }
+
+    // ============================================================
+    // GATE STATUS PANEL (additive, per explicit user request). Own
+    // namespace (mtGate*), zero shared state with anything above.
+    // Purely reads the new read-only endpoint - never triggers any
+    // computation or decision.
+    // ============================================================
+    const GATE_LABELS = {
+        CONSOLIDATION_FOUND: 'Consolidation', POSITIONING: 'Positioning', PRIOR_MOVE: 'Prior Move',
+        PRICE_CROSSED_LEVEL: 'Price Crossed', CONVICTION_RANGE: 'Range', CONVICTION_VOLUME: 'Volume',
+        CONVICTION_CLOSE_STRENGTH: 'Close Strength', PULLBACK_CONFLUENCE: 'PB Confluence',
+        PULLBACK_TOUCH_NOT_BROKEN: 'PB Touch', PULLBACK_REJECTION_CANDLE: 'PB Rejection',
+        PULLBACK_VOLUME_CHARACTER: 'PB Volume', STRUCTURAL_RISK: 'Struct Risk',
+        SKIP_RULE_TIER_CEILING: 'Tier Ceiling', NOISE_FLOOR: 'Noise Floor', POSITION_SIZING: 'Sizing',
+        MARGIN_CHECK: 'Margin', TREND_FILTER: 'Trend', DAILY_SR_GATE: 'Daily S/R',
+        THIRTY_MIN_SR_GATE: '30m S/R', FRESH_PRICE_CHECK: 'Fresh Price', ORDER_BOOK_GATE: 'Order Book',
+        VOLUME_PROFILE_GATE: 'Vol Profile', ORDER_FLOW_GATE: 'Order Flow'
+    };
+
+    function gatePill(gate) {
+        if (!gate) return `<span class="mt-gate-pill mt-gate-pending">—</span>`;
+        const cls = gate.state === 'PASS' ? 'mt-gate-pass' : gate.state === 'FAIL' ? 'mt-gate-fail' : 'mt-gate-pending';
+        const label = gate.state === 'PASS' ? '✓' : gate.state === 'FAIL' ? '✗' : '…';
+        return `<span class="mt-gate-pill ${cls}" title="${(gate.reason || '').replace(/"/g, '&quot;')}">${label}</span>`;
+    }
+
+    async function mtGateLoad() {
+        try {
+            const res = await fetch('/api/dashboard/momentum/gate-status');
+            const data = await res.json();
+            const symbols = Object.keys(data.symbols || {});
+            const allGates = [...(data.scanningGates || []), ...(data.entryGates || [])];
+
+            q('mt-gate-updated').textContent = symbols.length
+                ? `— live, ${symbols.length} symbol(s)` : '— no candidates tracked yet';
+
+            if (symbols.length === 0) {
+                q('mt-gate-header').innerHTML = '';
+                q('mt-gate-body').innerHTML = '';
+                q('mt-gate-cards').innerHTML = '<div class="sub">No watchlist symbols yet today.</div>';
+                return;
+            }
+
+            // Desktop table
+            q('mt-gate-header').innerHTML = '<th>Symbol</th>' +
+                allGates.map(g => `<th>${GATE_LABELS[g] || g}</th>`).join('');
+            q('mt-gate-body').innerHTML = symbols.map(sym => {
+                const gates = data.symbols[sym] || {};
+                return `<tr><td style="font-weight:600">${sym}</td>` +
+                    allGates.map(g => `<td>${gatePill(gates[g])}</td>`).join('') + '</tr>';
+            }).join('');
+
+            // Mobile stacked cards (same data, alternate layout - CSS
+            // media query decides which is actually visible)
+            q('mt-gate-cards').innerHTML = symbols.map(sym => {
+                const gates = data.symbols[sym] || {};
+                return `<div class="mt-gate-symbol-card">
+                    <div class="sym-name">${sym}</div>
+                    ${allGates.map(g => `<div class="mt-gate-row">
+                        <span class="gname">${GATE_LABELS[g] || g}</span>${gatePill(gates[g])}
+                    </div>`).join('')}
+                </div>`;
+            }).join('');
+        } catch (e) {
+            q('mt-gate-updated').textContent = '— load failed: ' + e.message;
+        }
+    }
+</script>
+<script>
+    // Refresh the gate panel alongside the existing Momentum refresh
+    // cadence, without altering mtLoad() itself.
+    const _origMtLoad = mtLoad;
+    mtLoad = async function() { await _origMtLoad(); await mtGateLoad(); };
+    setInterval(() => { const el = q('tc-momentum'); if (el && el.classList.contains('active')) mtGateLoad(); }, 30000);
 </script>
 
 <script>
@@ -1640,10 +1763,17 @@
             const todayPill = info.isMonthlyExpiryToday
                 ? '<span class="pill pg">YES</span>'
                 : '<span class="pill" style="color:var(--muted)">No</span>';
+            // FIX (additive): actualExpiry already reflects the manual
+            // override automatically (backend now returns the
+            // effective date there) - this only adds a visual tag
+            // showing WHY, using the new isManualOverride field.
+            const manualTag = info.isManualOverride
+                ? ` <span style="color:var(--blue,#4fc3f7);font-size:10px">(MANUAL)</span>`
+                : '';
             return `<tr>
                 <td>${index}</td>
                 <td>${info.naturalExpiry}</td>
-                <td>${info.actualExpiry}</td>
+                <td>${info.actualExpiry}${manualTag}</td>
                 <td class="sub">${shiftText}</td>
                 <td>${todayPill}</td>
             </tr>`;

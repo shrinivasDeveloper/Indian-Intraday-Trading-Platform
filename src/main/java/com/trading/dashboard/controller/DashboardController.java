@@ -64,6 +64,9 @@ public class DashboardController {
     private final CircuitBreakerService       circuitBreaker;
     private final com.trading.herozero.repository.HeroZeroTradeRepository heroZeroRepo;
     private final com.trading.momentumstockofday.repository.MomentumTradeRepository momentumRepo;
+    // ADDITIVE (dashboard gate-visibility feature, per explicit user
+    // request): read-only access to real-time gate pass/fail state.
+    private final com.trading.momentumstockofday.service.MomentumGateStatusService momentumGateStatusService;
     private final SectorStrengthService       sectorStrength;
     private final SectorClassificationService sectorClassify;
 
@@ -327,6 +330,36 @@ public class DashboardController {
     // ======================================================================
     @Autowired(required = false)
     private com.trading.herozero.service.HeroZeroExpiryOverrideService heroZeroExpiryService;
+
+    // ======================================================================
+    // MOMENTUM GATE STATUS (per explicit user request): real-time,
+    // per-symbol Pass/Fail/Pending status for every validation gate in
+    // the watchlist pipeline. Read-only - this endpoint only exposes
+    // what MomentumGateStatusService already recorded; it triggers no
+    // computation and makes no trading decision.
+    // ======================================================================
+    @GetMapping("/momentum/gate-status")
+    public ResponseEntity<Map<String, Object>> getMomentumGateStatus() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        var snapshot = momentumGateStatusService.getAllStatus();
+        Map<String, Object> bySymbol = new LinkedHashMap<>();
+        for (var entry : snapshot.entrySet()) {
+            Map<String, Object> gates = new LinkedHashMap<>();
+            for (var g : entry.getValue().entrySet()) {
+                Map<String, Object> gateInfo = new LinkedHashMap<>();
+                gateInfo.put("state", g.getValue().state().name());
+                gateInfo.put("reason", g.getValue().reason());
+                gateInfo.put("updatedAt", g.getValue().updatedAt().toString());
+                gates.put(g.getKey(), gateInfo);
+            }
+            bySymbol.put(entry.getKey(), gates);
+        }
+        out.put("symbols", bySymbol);
+        out.put("scanningGates", com.trading.momentumstockofday.service.MomentumGateStatusService.SCANNING_GATE_NAMES);
+        out.put("entryGates", com.trading.momentumstockofday.service.MomentumGateStatusService.ENTRY_GATE_NAMES);
+        out.put("timestamp", Instant.now().toString());
+        return ResponseEntity.ok(out);
+    }
 
     @GetMapping("/hero-zero/expiry")
     public ResponseEntity<Map<String, Object>> getHeroZeroExpiry() {

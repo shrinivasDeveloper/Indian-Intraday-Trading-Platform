@@ -108,5 +108,7 @@ public class MomentumConfig {
      *  observe real ConfluenceResult logs for a few sessions before
      *  flipping to live, same caution level pullback originally had. */
     private boolean confluenceEngineEnabled = true;
-    private boolean confluenceEngineLogOnly = true;
+    private boolean confluenceEngineLogOnly = false; // per explicit user decision: LIVE
+    // immediately, log-only observation
+    // period skipped
 }

@@ -277,8 +277,8 @@ manual-swing:
 momentum-stock-of-day:
   enabled: true         # keep false until you've watched a live day first
   selection-time: "09:30"
-  top-sectors-count: 2
-  top-stocks-per-sector: 3
+  top-sectors-count: 4
+  top-stocks-per-sector: 2
   capital: 10000.0
   min-consolidation-candles: 2
   max-consolidation-candles: 8
@@ -316,7 +316,12 @@ momentum-stock-of-day:
 # own MarketHolidayChecker) were compiled from public sources, NOT
 # verified against NSE/BSE's own official JS-rendered calendar
 # directly. Verify both before trusting this with real capital.
+
 # ================================
+dual-entry-strategy:
+  enabled: true
+  capital: 20000
+
 hero-zero:
   enabled: ${HERO_ZERO_ENABLED:true}
   entry-time: "14:30"

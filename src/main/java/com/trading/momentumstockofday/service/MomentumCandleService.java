@@ -61,12 +61,19 @@ public class MomentumCandleService {
     private final MomentumConfig config;
 
     private final com.trading.sectorheatmap.service.SectorHeatmapDataService sectorHeatmapDataService;
+    // ADDITIVE (dashboard gate-visibility feature, per explicit user
+    // request): records the real-time pass/fail result of each
+    // scanning-stage gate for dashboard display - never makes any
+    // decision itself.
+    private final MomentumGateStatusService gateStatusService;
 
     public MomentumCandleService(KiteConnect kiteConnect, MomentumConfig config,
-                                 com.trading.sectorheatmap.service.SectorHeatmapDataService sectorHeatmapDataService) {
+                                 com.trading.sectorheatmap.service.SectorHeatmapDataService sectorHeatmapDataService,
+                                 MomentumGateStatusService gateStatusService) {
         this.kiteConnect = kiteConnect;
         this.config = config;
         this.sectorHeatmapDataService = sectorHeatmapDataService;
+        this.gateStatusService = gateStatusService;
     }
 
     /**
@@ -520,6 +527,12 @@ public class MomentumCandleService {
                     windowStartIndex, recent.size() - 1);
 
             String rejectReason = checkConsolidationValidity(window);
+            // ADDITIVE (dashboard gate-visibility, per explicit user
+            // request): records the outcome for the dashboard - does
+            // NOT alter the existing continue below in any way.
+            gateStatusService.record(candidate.getSymbol(), "CONSOLIDATION_FOUND",
+                    rejectReason == null, rejectReason == null ? "Valid consolidation found ("
+                            + windowSize + "-candle window)" : rejectReason);
             if (rejectReason != null) continue; // try a different window size
 
             // FIX (per explicit user request, deeply cross-checked
@@ -563,6 +576,12 @@ public class MomentumCandleService {
                 // arbitrary fixed number.
                 hasGenuinePriorMove = consolRangeForCheck <= 0 || priorMove >= consolRangeForCheck;
             }
+            // ADDITIVE (dashboard gate-visibility): records the
+            // already-computed hasGenuinePriorMove value - does not
+            // change the fail-open default or any downstream usage.
+            gateStatusService.record(candidate.getSymbol(), "PRIOR_MOVE", hasGenuinePriorMove,
+                    hasGenuinePriorMove ? "Genuine prior impulse move confirmed"
+                            : "No genuine prior move before consolidation");
 
             double consolHigh = window.stream().mapToDouble(MomentumCandidate.Candle::high).max().orElse(0);
             double consolLow = window.stream().mapToDouble(MomentumCandidate.Candle::low).min().orElse(0);
@@ -583,6 +602,12 @@ public class MomentumCandleService {
             // different window size (still within the same YAML-
             // configured min/max candle range, unchanged) is tried.
             boolean correctlyPositioned = isLong ? consolHigh < dayHigh : consolLow > dayLow;
+            // ADDITIVE (dashboard gate-visibility): zero change to the
+            // continue below.
+            gateStatusService.record(candidate.getSymbol(), "POSITIONING", correctlyPositioned,
+                    correctlyPositioned ? "Consolidation correctly positioned vs day "
+                            + (isLong ? "high" : "low")
+                            : "Consolidation already breached the day's " + (isLong ? "high" : "low"));
             if (!correctlyPositioned) continue; // try a different window size
 
             double lastClose = breakoutCandle.close();
@@ -642,6 +667,16 @@ public class MomentumCandleService {
                     : 0;
             boolean closedWithStrength = closeStrength >= 0.7;
 
+            // ADDITIVE (dashboard gate-visibility): records the 3
+            // already-computed conviction booleans - zero change to
+            // genuineConviction's own formula below.
+            gateStatusService.record(candidate.getSymbol(), "CONVICTION_RANGE", rangeExpanded,
+                    String.format("Breakout range %s consolidation avg x1.5", rangeExpanded ? ">=" : "<"));
+            gateStatusService.record(candidate.getSymbol(), "CONVICTION_VOLUME", volumeExpanded,
+                    String.format("Breakout volume %s consolidation avg x1.2", volumeExpanded ? ">=" : "<"));
+            gateStatusService.record(candidate.getSymbol(), "CONVICTION_CLOSE_STRENGTH", closedWithStrength,
+                    String.format("closeStrength=%.2f (need >=0.70)", closeStrength));
+
             boolean genuineConviction = rangeExpanded && volumeExpanded && closedWithStrength
                     && hasGenuinePriorMove;
 
@@ -660,6 +695,11 @@ public class MomentumCandleService {
             boolean priceBreakout = isLong
                     ? lastClose > dayHigh + marginBuffer
                     : lastClose < dayLow - marginBuffer;
+            // ADDITIVE (dashboard gate-visibility): records the
+            // already-computed priceBreakout value.
+            gateStatusService.record(candidate.getSymbol(), "PRICE_CROSSED_LEVEL", priceBreakout,
+                    priceBreakout ? "Price closed beyond day's " + (isLong ? "high" : "low") + " + margin"
+                            : "Price has not yet crossed the day's " + (isLong ? "high" : "low") + " + margin");
 
             // FIX (per explicit user request: "please remove this gate...
             // only this gate should remove"). Volume confirmation gate
@@ -1461,6 +1501,33 @@ public class MomentumCandleService {
      * The actual fetch logic itself (below, fetchDailyCandlesFromApi())
      * is completely unchanged from before this caching was added.
      */
+    /**
+     * ADDITIVE (per explicit user request - new isolated Breakout/
+     * Pullback strategy reusing shared market-data infrastructure):
+     * read-only public accessors exposing the SAME cached candle data
+     * and day high/low this class already fetches for Momentum - zero
+     * change to any existing private method, zero new market-data
+     * subscriptions, zero shared decision-logic or dashboard state.
+     * The new strategy owns its OWN breakout/pullback detection
+     * entirely; these accessors only avoid re-fetching identical raw
+     * market data a second time.
+     */
+    public List<MomentumCandidate.Candle> getDailyCandlesPublic(String symbol) {
+        return fetchDailyCandles(symbol);
+    }
+
+    public List<MomentumCandidate.Candle> getThirtyMinCandlesPublic(String symbol) {
+        return fetch30MinuteHistoryCandles(symbol);
+    }
+
+    public List<MomentumCandidate.Candle> getFiveMinRecentCandlesPublic(String symbol, int count) {
+        return fetchRecentCandles(symbol, count);
+    }
+
+    public double[] getDayHighLowPublic(String symbol) {
+        return fetchDayHighLow(symbol);
+    }
+
     private List<MomentumCandidate.Candle> fetchDailyCandles(String symbol) {
         LocalDate today = LocalDate.now(IST);
         LocalDate cachedDate = dailyCandleCacheDate.get(symbol);
@@ -1696,17 +1763,6 @@ public class MomentumCandleService {
                                  String direction) {}
 
     /**
-     * V1-V4 of the agreed design. SHORT: pullback UP into overhead
-     * resistance confirmed by TWO independent structures (daily major /
-     * 30-min major / projected daily trendline) within 0.3x dailyATR of
-     * each other, touched but never closed beyond, on corrective volume,
-     * finished by a rejection candle (closeStrength >= 0.7 away from the
-     * level). LONG fully mirrored at support. Fail-closed on missing
-     * data - a pullback entry is an optional bonus path, never worth
-     * taking on incomplete evidence (opposite of the breakout path's
-     * fail-open prior-move check, deliberately).
-     */
-    /**
      * FIX (per explicit user request, with full understanding of the
      * tradeoff confirmed): pullback no longer inherits its direction
      * from the sector's own direction. Sector % change is an AVERAGE
@@ -1805,8 +1861,16 @@ public class MomentumCandleService {
                 }
             }
             if (confluenceLevel == null) {
+                if (dirLabel.equals(candidate.getDirection())) {
+                    gateStatusService.record(symbol, "PULLBACK_CONFLUENCE", false,
+                            "No 2-structure confluence level on the " + (isLong ? "support" : "resistance") + " side");
+                }
                 return new PullbackSignal(false, 0, dailyAtr, "no 2-structure confluence level on the "
                         + (isLong ? "support" : "resistance") + " side", dirLabel);
+            }
+            if (dirLabel.equals(candidate.getDirection())) {
+                gateStatusService.record(symbol, "PULLBACK_CONFLUENCE", true,
+                        String.format("Confluence level found at %.2f", confluenceLevel));
             }
             // The level must be genuinely NEAR - a rejection 3 ATRs away
             // is not a tradeable pullback at the current price.
@@ -1829,8 +1893,16 @@ public class MomentumCandleService {
                 }
             }
             if (!touched) {
+                if (dirLabel.equals(candidate.getDirection())) {
+                    gateStatusService.record(symbol, "PULLBACK_TOUCH_NOT_BROKEN", false,
+                            "Level not yet touched within tolerance");
+                }
                 return new PullbackSignal(false, confluenceLevel, dailyAtr,
                         "level not yet touched within tolerance", dirLabel);
+            }
+            if (dirLabel.equals(candidate.getDirection())) {
+                gateStatusService.record(symbol, "PULLBACK_TOUCH_NOT_BROKEN", true,
+                        "Level touched, never closed beyond");
             }
 
             // V3 - rejection candle = the LAST completed candle.
@@ -1845,8 +1917,16 @@ public class MomentumCandleService {
             double closeStrength = isLong ? (rej.close() - rej.low()) / range
                     : (rej.high() - rej.close()) / range;
             if (closeStrength < 0.7) {
+                if (dirLabel.equals(candidate.getDirection())) {
+                    gateStatusService.record(symbol, "PULLBACK_REJECTION_CANDLE", false,
+                            String.format("closeStrength=%.2f (need >=0.70)", closeStrength));
+                }
                 return new PullbackSignal(false, confluenceLevel, dailyAtr, String.format(
                         "touch without rejection - closeStrength %.2f (need 0.70)", closeStrength), dirLabel);
+            }
+            if (dirLabel.equals(candidate.getDirection())) {
+                gateStatusService.record(symbol, "PULLBACK_REJECTION_CANDLE", true,
+                        String.format("Rejection candle confirmed, closeStrength=%.2f", closeStrength));
             }
 
             // V4 - volume character: rejection vol >= pullback-leg avg;
@@ -1855,6 +1935,10 @@ public class MomentumCandleService {
             double pullbackLegAvgVol = window.subList(2, 5).stream()
                     .mapToDouble(c -> (double) c.volume()).average().orElse(0);
             if (pullbackLegAvgVol > 0 && rej.volume() < pullbackLegAvgVol) {
+                if (dirLabel.equals(candidate.getDirection())) {
+                    gateStatusService.record(symbol, "PULLBACK_VOLUME_CHARACTER", false,
+                            "Rejection candle volume below pullback-leg average - no step-in");
+                }
                 return new PullbackSignal(false, confluenceLevel, dailyAtr,
                         "rejection candle volume below pullback-leg average - no supply/demand step-in", dirLabel);
             }
@@ -1862,9 +1946,17 @@ public class MomentumCandleService {
                 double priorLegAvgVol = recent.subList(recent.size() - 9, recent.size() - 5).stream()
                         .mapToDouble(c -> (double) c.volume()).average().orElse(0);
                 if (priorLegAvgVol > 0 && pullbackLegAvgVol > priorLegAvgVol) {
+                    if (dirLabel.equals(candidate.getDirection())) {
+                        gateStatusService.record(symbol, "PULLBACK_VOLUME_CHARACTER", false,
+                                "Pullback leg on rising volume vs prior leg - not corrective");
+                    }
                     return new PullbackSignal(false, confluenceLevel, dailyAtr,
                             "pullback leg on RISING volume vs prior leg - genuine buyers/sellers, not corrective", dirLabel);
                 }
+            }
+            if (dirLabel.equals(candidate.getDirection())) {
+                gateStatusService.record(symbol, "PULLBACK_VOLUME_CHARACTER", true,
+                        "Volume character confirmed - step-in + corrective leg");
             }
 
             return new PullbackSignal(true, confluenceLevel, dailyAtr, String.format(

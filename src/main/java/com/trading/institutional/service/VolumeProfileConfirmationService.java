@@ -11,31 +11,20 @@ import java.util.*;
  * VolumeProfileConfirmationService — Institutional Confirmation Engine,
  * module 1 of 3 (per explicit user spec).
  *
- * OBJECTIVE: determine whether an ALREADY-GENERATED Momentum Day High
- * breakout / Day Low breakdown is occurring at a statistically important
- * institutional auction location. This module NEVER generates a
- * breakout signal itself — it only validates one the Momentum Strategy
- * already produced. Momentum's own scheduler, trading service, and every
- * existing gate are completely untouched by this class.
+ * HARD-GATE MODEL (per explicit user request - REPLACES the original
+ * scoring version): NO scoring, NO weighted points, NO probability
+ * threshold. Every single condition listed in the original spec's
+ * "award confidence for" list is now an INDIVIDUALLY MANDATORY gate -
+ * ALL must be true for PASS. Every condition in the "reduce confidence
+ * if" list is now an INDIVIDUAL HARD-FAIL trigger - ANY being true
+ * causes immediate FAIL, regardless of everything else. This is
+ * intentionally strict: with 10 mandatory BUY conditions all required
+ * simultaneously, genuine passes will be rare by design, not a bug -
+ * this was confirmed explicitly with the user before implementing.
  *
- * DATA SOURCE: MarketDataService's volume-at-price histogram, built
- * from incremental per-tick volume (today's cumulative volume minus the
- * previous reading) attributed to price buckets — using only fields
- * this platform already JAR-verifies (getLastTradedPrice,
- * getVolumeTradedToday). Bucket size defaults to 0.05% of the first
- * price seen that day per symbol (configurable — see
- * MarketDataService.DEFAULT_BUCKET_SIZE_PCT), so granularity stays
- * sensible across both low- and high-priced stocks.
- *
- * HONEST SCOPE NOTE: "Acceptance" (e.g. "price is ACCEPTED above POC",
- * not just touched) is measured here via the Developing-POC history —
- * if the developing POC itself has been at or above the reference level
- * across the last several ~1-minute snapshots, that is real auction
- * acceptance (the market's own volume center of gravity moved, not just
- * a brief price poke). This is a standard, defensible proxy for
- * acceptance from volume-profile data; it is not the only possible
- * definition, but it is genuinely grounded in the data actually
- * available here rather than invented.
+ * OBJECTIVE, DATA SOURCE, and ACCEPTANCE-PROXY notes are UNCHANGED
+ * from the original version; only the DECISION mechanism (scoring ->
+ * strict AND-gate) changed.
  */
 @Service
 @RequiredArgsConstructor
@@ -45,23 +34,20 @@ public class VolumeProfileConfirmationService {
     private final MarketDataService marketData;
 
     private static final double VALUE_AREA_PCT = 0.70;
-    private static final double HVN_MULTIPLE = 1.5;   // bucket vol > 1.5x mean -> High Volume Node
-    private static final double LVN_MULTIPLE = 0.5;   // bucket vol < 0.5x mean -> Low Volume Node
-    private static final int ACCEPTANCE_LOOKBACK_SAMPLES = 3; // "accepted" = held for last 3 ~1-min snapshots
-    private static final int DEVELOPING_POC_SHIFT_LOOKBACK = 5; // compare POC now vs 5 snapshots ago
+    private static final double HVN_MULTIPLE = 1.5;
+    private static final double LVN_MULTIPLE = 0.5;
+    private static final int ACCEPTANCE_LOOKBACK_SAMPLES = 3;
+    private static final int DEVELOPING_POC_SHIFT_LOOKBACK = 5;
 
     public record VolumeProfileMetrics(double poc, double vah, double val,
                                        List<Double> hvnLevels, List<Double> lvnLevels,
                                        double totalSessionVolume, double bucketSize) {}
 
-    public record ConfirmationResult(boolean pass, int confidenceScore, List<String> reasonCodes) {}
+    /** NO score field - per explicit user request, pure PASS/FAIL with
+     *  itemized reason codes for diagnostic visibility only (reason
+     *  codes do NOT feed into any decision, they only explain it). */
+    public record ConfirmationResult(boolean pass, List<String> reasonCodes) {}
 
-    /**
-     * Compute the current session's volume profile for a symbol.
-     * Returns null if there isn't enough volume data yet to build a
-     * meaningful profile (fail-closed for the caller to interpret,
-     * exactly like every other gate this session has built).
-     */
     public VolumeProfileMetrics computeProfile(String symbol) {
         Map<Double, Long> histogram = marketData.getVolumeProfile(symbol);
         if (histogram.isEmpty()) return null;
@@ -69,14 +55,9 @@ public class VolumeProfileConfirmationService {
         long totalVolume = histogram.values().stream().mapToLong(Long::longValue).sum();
         if (totalVolume <= 0) return null;
 
-        // POC = the single highest-volume bucket.
         double poc = histogram.entrySet().stream()
                 .max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse(0.0);
 
-        // Value Area (70%): start at POC, expand to whichever adjacent
-        // bucket (above or below the current area) has more volume,
-        // repeat until >=70% of total session volume is enclosed.
-        // Standard volume-profile value-area algorithm.
         List<Double> sortedPrices = new ArrayList<>(histogram.keySet());
         Collections.sort(sortedPrices);
         int pocIdx = sortedPrices.indexOf(poc);
@@ -100,8 +81,6 @@ public class VolumeProfileConfirmationService {
         double val = sortedPrices.get(lowIdx);
         double vah = sortedPrices.get(highIdx);
 
-        // HVN / LVN relative to the mean bucket volume across the
-        // whole session profile.
         double meanBucketVol = histogram.values().stream().mapToLong(Long::longValue).average().orElse(0);
         List<Double> hvn = new ArrayList<>();
         List<Double> lvn = new ArrayList<>();
@@ -118,25 +97,14 @@ public class VolumeProfileConfirmationService {
         return new VolumeProfileMetrics(poc, vah, val, hvn, lvn, totalVolume, bucketSize);
     }
 
-    /**
-     * Validate an ALREADY-GENERATED Momentum breakout/breakdown.
-     * direction: "LONG" (Day High breakout) or "SHORT" (Day Low breakdown).
-     * breakoutPrice: the price the Momentum Strategy's breakout occurred at.
-     * recentCandleVolumes: the previous 5 candles' volumes (caller-supplied
-     *   from Momentum's own candle buffer — this module does not fetch
-     *   candles itself, keeping it decoupled from Momentum's internals).
-     * breakoutCandleVolume: the volume of the breakout candle itself.
-     */
     public ConfirmationResult validateBreakout(String symbol, String direction, double breakoutPrice,
                                                List<Long> recentCandleVolumes, long breakoutCandleVolume) {
         boolean isLong = "LONG".equals(direction);
         List<String> reasons = new ArrayList<>();
-        int score = 0;
 
         VolumeProfileMetrics m = computeProfile(symbol);
         if (m == null) {
-            return new ConfirmationResult(false, 0,
-                    List.of("NO_VOLUME_PROFILE_DATA - insufficient session volume captured yet"));
+            return new ConfirmationResult(false, List.of("FAIL_NO_VOLUME_PROFILE_DATA"));
         }
 
         List<MarketDataService.PocSnapshot> pocHistory = marketData.getDevelopingPocHistory(symbol);
@@ -148,6 +116,7 @@ public class VolumeProfileConfirmationService {
         }
         boolean acceptedAbovePoc = false, acceptedAboveVah = false,
                 acceptedBelowPoc = false, acceptedBelowVal = false;
+        boolean rejectedFromLevel = false;
         if (pocHistory.size() >= ACCEPTANCE_LOOKBACK_SAMPLES) {
             List<MarketDataService.PocSnapshot> lastN = pocHistory.subList(
                     pocHistory.size() - ACCEPTANCE_LOOKBACK_SAMPLES, pocHistory.size());
@@ -155,79 +124,68 @@ public class VolumeProfileConfirmationService {
             acceptedAboveVah = lastN.stream().allMatch(s -> s.poc() > m.vah());
             acceptedBelowPoc = lastN.stream().allMatch(s -> s.poc() < m.poc());
             acceptedBelowVal = lastN.stream().allMatch(s -> s.poc() < m.val());
+            rejectedFromLevel = isLong
+                    ? lastN.stream().allMatch(s -> s.poc() <= m.vah())
+                    : lastN.stream().allMatch(s -> s.poc() >= m.val());
         }
 
         double avgRecentVol = recentCandleVolumes.isEmpty() ? 0 :
                 recentCandleVolumes.stream().mapToLong(Long::longValue).average().orElse(0);
         boolean volumeExceedsAvg = avgRecentVol > 0 && breakoutCandleVolume > avgRecentVol;
 
-        // Nearest LVN/HVN to the breakout price, for the "expands
-        // through an LVN" / "moving away from HVN" checks.
         boolean throughLvn = m.lvnLevels().stream()
                 .anyMatch(l -> isLong ? (l > m.poc() && l <= breakoutPrice)
                         : (l < m.poc() && l >= breakoutPrice));
         boolean movingAwayFromHvn = m.hvnLevels().stream()
                 .noneMatch(l -> Math.abs(l - breakoutPrice) <= m.bucketSize() * 2);
-
+        boolean trappedInHvn = m.hvnLevels().stream()
+                .anyMatch(l -> Math.abs(l - breakoutPrice) <= m.bucketSize());
         boolean outsideValueArea = isLong ? breakoutPrice > m.vah() : breakoutPrice < m.val();
+        boolean trappedInValueArea = breakoutPrice <= m.vah() && breakoutPrice >= m.val();
 
+        boolean pass;
         if (isLong) {
-            // ── BUY VALIDATION ──
-            if (breakoutPrice > m.poc()) { score += 4; reasons.add("PRICE_ABOVE_POC(+4)"); }
-            if (acceptedAbovePoc) { score += 5; reasons.add("ACCEPTED_ABOVE_POC(+5)"); }
-            if (breakoutPrice > m.vah()) { score += 4; reasons.add("PRICE_ABOVE_VAH(+4)"); }
-            if (acceptedAboveVah) { score += 5; reasons.add("ACCEPTED_ABOVE_VAH(+5)"); }
-            if (pocShiftedFavorably) { score += 4; reasons.add("DEVELOPING_POC_SHIFTING_UP(+4)"); }
-            if (throughLvn) { score += 4; reasons.add("BREAKOUT_EXPANDS_THROUGH_LVN(+4)"); }
-            if (throughLvn && acceptedAbovePoc) { score += 3; reasons.add("LVN_TO_ACCEPTANCE_TRANSITION(+3)"); }
-            if (outsideValueArea) { score += 3; reasons.add("OUTSIDE_VALUE_AREA(+3)"); }
-            if (volumeExceedsAvg) { score += 5; reasons.add("BREAKOUT_VOLUME_EXCEEDS_AVG5(+5)"); }
-            if (movingAwayFromHvn && acceptedAbovePoc) { score += 3; reasons.add("MOVING_AWAY_FROM_HVN(+3)"); }
+            boolean c1 = breakoutPrice > m.poc();                reasons.add((c1?"PASS":"FAIL")+"_PRICE_ABOVE_POC");
+            boolean c2 = acceptedAbovePoc;                       reasons.add((c2?"PASS":"FAIL")+"_ACCEPTED_ABOVE_POC");
+            boolean c3 = breakoutPrice > m.vah();                reasons.add((c3?"PASS":"FAIL")+"_PRICE_ABOVE_VAH");
+            boolean c4 = acceptedAboveVah;                       reasons.add((c4?"PASS":"FAIL")+"_ACCEPTED_ABOVE_VAH");
+            boolean c5 = pocShiftedFavorably;                    reasons.add((c5?"PASS":"FAIL")+"_DEVELOPING_POC_SHIFTING_UP");
+            boolean c6 = throughLvn;                             reasons.add((c6?"PASS":"FAIL")+"_EXPANDS_THROUGH_LVN");
+            boolean c7 = throughLvn && acceptedAbovePoc;         reasons.add((c7?"PASS":"FAIL")+"_LVN_TO_ACCEPTANCE_TRANSITION");
+            boolean c8 = outsideValueArea;                       reasons.add((c8?"PASS":"FAIL")+"_OUTSIDE_VALUE_AREA");
+            boolean c9 = volumeExceedsAvg;                       reasons.add((c9?"PASS":"FAIL")+"_VOLUME_EXCEEDS_AVG5");
+            boolean c10 = movingAwayFromHvn && acceptedAbovePoc; reasons.add((c10?"PASS":"FAIL")+"_MOVING_AWAY_FROM_HVN");
 
-            // ── REJECT BUY ──
-            if (breakoutPrice < m.poc()) { score -= 6; reasons.add("REJECT_PRICE_BELOW_POC(-6)"); }
-            if (pocHistory.size() >= ACCEPTANCE_LOOKBACK_SAMPLES
-                    && pocHistory.subList(pocHistory.size() - ACCEPTANCE_LOOKBACK_SAMPLES, pocHistory.size())
-                    .stream().allMatch(s -> s.poc() <= m.vah())) {
-                score -= 5; reasons.add("REJECT_REPEATED_REJECTION_FROM_VAH(-5)");
-            }
-            if (breakoutPrice <= m.vah() && breakoutPrice >= m.val()) {
-                score -= 6; reasons.add("REJECT_TRAPPED_INSIDE_VALUE_AREA(-6)");
-            }
-            if (m.hvnLevels().stream().anyMatch(l -> Math.abs(l - breakoutPrice) <= m.bucketSize())) {
-                score -= 4; reasons.add("REJECT_TRAPPED_INSIDE_HVN(-4)");
-            }
-            if (!volumeExceedsAvg) { score -= 4; reasons.add("REJECT_WEAK_BREAKOUT_VOLUME(-4)"); }
+            boolean r1 = breakoutPrice < m.poc();  if (r1) reasons.add("HARDFAIL_PRICE_BELOW_POC");
+            boolean r2 = rejectedFromLevel;        if (r2) reasons.add("HARDFAIL_REPEATED_REJECTION_FROM_VAH");
+            boolean r3 = trappedInValueArea;       if (r3) reasons.add("HARDFAIL_TRAPPED_INSIDE_VALUE_AREA");
+            boolean r4 = trappedInHvn;             if (r4) reasons.add("HARDFAIL_TRAPPED_INSIDE_HVN");
+            boolean r5 = !volumeExceedsAvg;        if (r5) reasons.add("HARDFAIL_WEAK_BREAKOUT_VOLUME");
+
+            pass = c1 && c2 && c3 && c4 && c5 && c6 && c7 && c8 && c9 && c10
+                    && !r1 && !r2 && !r3 && !r4 && !r5;
         } else {
-            // ── SELL VALIDATION ──
-            if (breakoutPrice < m.poc()) { score += 4; reasons.add("PRICE_BELOW_POC(+4)"); }
-            if (acceptedBelowPoc) { score += 5; reasons.add("ACCEPTED_BELOW_POC(+5)"); }
-            if (breakoutPrice < m.val()) { score += 4; reasons.add("PRICE_BELOW_VAL(+4)"); }
-            if (acceptedBelowVal) { score += 5; reasons.add("ACCEPTED_BELOW_VAL(+5)"); }
-            if (pocShiftedFavorably) { score += 4; reasons.add("DEVELOPING_POC_SHIFTING_DOWN(+4)"); }
-            if (throughLvn) { score += 4; reasons.add("BREAKDOWN_EXPANDS_THROUGH_LVN(+4)"); }
-            if (outsideValueArea) { score += 4; reasons.add("OUTSIDE_VALUE_AREA(+4)"); }
-            if (volumeExceedsAvg) { score += 6; reasons.add("BREAKDOWN_VOLUME_EXCEEDS_AVG(+6)"); }
-            if (movingAwayFromHvn && acceptedBelowPoc) { score += 4; reasons.add("MOVING_AWAY_FROM_HVN(+4)"); }
+            boolean c1 = breakoutPrice < m.poc();                reasons.add((c1?"PASS":"FAIL")+"_PRICE_BELOW_POC");
+            boolean c2 = acceptedBelowPoc;                       reasons.add((c2?"PASS":"FAIL")+"_ACCEPTED_BELOW_POC");
+            boolean c3 = breakoutPrice < m.val();                reasons.add((c3?"PASS":"FAIL")+"_PRICE_BELOW_VAL");
+            boolean c4 = acceptedBelowVal;                       reasons.add((c4?"PASS":"FAIL")+"_ACCEPTED_BELOW_VAL");
+            boolean c5 = pocShiftedFavorably;                    reasons.add((c5?"PASS":"FAIL")+"_DEVELOPING_POC_SHIFTING_DOWN");
+            boolean c6 = throughLvn;                             reasons.add((c6?"PASS":"FAIL")+"_EXPANDS_THROUGH_LVN");
+            boolean c7 = outsideValueArea;                       reasons.add((c7?"PASS":"FAIL")+"_OUTSIDE_VALUE_AREA");
+            boolean c8 = volumeExceedsAvg;                       reasons.add((c8?"PASS":"FAIL")+"_VOLUME_EXCEEDS_AVG");
+            boolean c9 = movingAwayFromHvn && acceptedBelowPoc;  reasons.add((c9?"PASS":"FAIL")+"_MOVING_AWAY_FROM_HVN");
 
-            // ── REJECT SELL ──
-            if (breakoutPrice > m.poc()) { score -= 6; reasons.add("REJECT_PRICE_ABOVE_POC(-6)"); }
-            if (pocHistory.size() >= ACCEPTANCE_LOOKBACK_SAMPLES
-                    && pocHistory.subList(pocHistory.size() - ACCEPTANCE_LOOKBACK_SAMPLES, pocHistory.size())
-                    .stream().allMatch(s -> s.poc() >= m.val())) {
-                score -= 5; reasons.add("REJECT_REPEATED_REJECTION_FROM_VAL(-5)");
-            }
-            if (breakoutPrice <= m.vah() && breakoutPrice >= m.val()) {
-                score -= 6; reasons.add("REJECT_TRAPPED_INSIDE_VALUE_AREA(-6)");
-            }
-            if (!volumeExceedsAvg) { score -= 5; reasons.add("REJECT_WEAK_BREAKDOWN_VOLUME(-5)"); }
+            boolean r1 = breakoutPrice > m.poc();  if (r1) reasons.add("HARDFAIL_PRICE_ABOVE_POC");
+            boolean r2 = rejectedFromLevel;        if (r2) reasons.add("HARDFAIL_REPEATED_REJECTION_FROM_VAL");
+            boolean r3 = trappedInValueArea;       if (r3) reasons.add("HARDFAIL_TRAPPED_INSIDE_VALUE_AREA");
+            boolean r4 = !volumeExceedsAvg;        if (r4) reasons.add("HARDFAIL_WEAK_BREAKDOWN_VOLUME");
+
+            pass = c1 && c2 && c3 && c4 && c5 && c6 && c7 && c8 && c9
+                    && !r1 && !r2 && !r3 && !r4;
         }
 
-        score = Math.max(0, Math.min(40, score));
-        boolean pass = score >= 20; // half of max(40) - a reasonable, disclosed pass bar;
-        // tune via the Confluence Engine once all 3 modules are wired
-        log.info("[VOLUME-PROFILE] {} {} validation: score={}/40 pass={} reasons={}",
-                symbol, direction, score, pass, reasons);
-        return new ConfirmationResult(pass, score, reasons);
+        log.info("[VOLUME-PROFILE] {} {} hard-gate validation: pass={} reasons={}",
+                symbol, direction, pass, reasons);
+        return new ConfirmationResult(pass, reasons);
     }
 }

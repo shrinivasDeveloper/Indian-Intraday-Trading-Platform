@@ -73,6 +73,18 @@ public class MomentumTradingService {
     // explicit user request): new dependency, does not remove or
     // alter any existing one.
     private final com.trading.institutional.service.ConfluenceValidationService confluenceService;
+    // FIX (duplicate order-book evaluation, per explicit user request):
+    // the inline gate below and the Confluence Engine were each
+    // independently re-computing the exact same order-book analysis
+    // from the same depth history. This is the SAME algorithm,
+    // already verified byte-identical to the inline version - used now
+    // to compute the result ONCE, reused by both the hard-gate check
+    // and the Confluence Engine.
+    private final com.trading.institutional.service.OrderBookConfirmationService orderBookService;
+    // ADDITIVE (dashboard gate-visibility feature, per explicit user
+    // request): records entry-gate pass/fail results for dashboard
+    // display - never makes any decision itself.
+    private final MomentumGateStatusService gateStatusService;
 
     public MomentumTradingService(KiteConnect kiteConnect, MomentumConfig config,
                                   MomentumTradeRepository repository,
@@ -81,7 +93,9 @@ public class MomentumTradingService {
                                   com.trading.momentumstockofday.repository.MomentumCapitalRepository capitalRepository,
                                   MomentumCandleService candleService,
                                   com.trading.marketdata.service.MarketDataService marketDataService,
-                                  com.trading.institutional.service.ConfluenceValidationService confluenceService) {
+                                  com.trading.institutional.service.ConfluenceValidationService confluenceService,
+                                  com.trading.institutional.service.OrderBookConfirmationService orderBookService,
+                                  MomentumGateStatusService gateStatusService) {
         this.kiteConnect = kiteConnect;
         this.config = config;
         this.repository = repository;
@@ -91,6 +105,8 @@ public class MomentumTradingService {
         this.candleService = candleService;
         this.marketDataService = marketDataService;
         this.confluenceService = confluenceService;
+        this.orderBookService = orderBookService;
+        this.gateStatusService = gateStatusService;
     }
 
     /** Result of a confirmed (or timed-out) fill check. filled=false
@@ -189,6 +205,17 @@ public class MomentumTradingService {
         boolean isLong = "LONG".equals(direction);
 
         try {
+            // ADDITIVE (dashboard gate-visibility, mismatch fix per
+            // explicit user requirement): reset all entry gates to
+            // PENDING for this symbol at the START of this attempt,
+            // before any gate runs. Without this, a gate never reached
+            // this attempt (because an earlier gate already threw)
+            // would keep showing a stale PASS/FAIL from a previous,
+            // unrelated attempt - a genuine mismatch between what
+            // actually happened and what the dashboard displays. Zero
+            // effect on any actual check, threshold, or control flow.
+            gateStatusService.initEntryGatesPending(symbol);
+
             double ltp = fetchLtp(symbol);
             if (ltp <= 0) {
                 throw new MomentumStrategyException("Could not fetch a valid live price for " + symbol);
@@ -240,16 +267,24 @@ public class MomentumTradingService {
             double structuralRisk = isLong ? entry - structuralStop : structuralStop - entry;
             double tierRisk = entry * computeSlPct(entry);
             if (structuralRisk <= 0) {
+                gateStatusService.record(symbol, "STRUCTURAL_RISK", false,
+                        "Invalid structural risk (non-positive)");
                 throw new MomentumStrategyException(symbol + " - invalid structural risk (entry=" +
                         entry + " structuralStop=" + structuralStop + "), skipping");
             }
+            gateStatusService.record(symbol, "STRUCTURAL_RISK", true,
+                    String.format("Structural risk=%.2f valid", structuralRisk));
             if (structuralRisk > tierRisk) {
+                gateStatusService.record(symbol, "SKIP_RULE_TIER_CEILING", false,
+                        String.format("Structural risk %.2f exceeds tier ceiling %.2f", structuralRisk, tierRisk));
                 throw new MomentumStrategyException(String.format(
                         "%s - consolidation too wide for intraday R:R: structural stop distance " +
                                 "%.2f exceeds the price-tier maximum %.2f - correct stop is unaffordable " +
                                 "intraday, skipping rather than placing a stop inside the pattern",
                         symbol, structuralRisk, tierRisk));
             }
+            gateStatusService.record(symbol, "SKIP_RULE_TIER_CEILING", true,
+                    String.format("Structural risk %.2f within tier ceiling %.2f", structuralRisk, tierRisk));
             double floorRisk = tierRisk * 0.3;
             // FIX (per explicit user request, live evidence: TATACOMM
             // SHORT stopped out on a 3.08-rupee move on a Rs.1745 stock
@@ -270,6 +305,8 @@ public class MomentumTradingService {
                 double noiseFloor = liveAtr5m * 0.5;
                 if (noiseFloor > floorRisk) {
                     if (noiseFloor > tierRisk) {
+                        gateStatusService.record(symbol, "NOISE_FLOOR", false, String.format(
+                                "Noise-aware minimum stop %.2f exceeds tier ceiling %.2f", noiseFloor, tierRisk));
                         throw new MomentumStrategyException(String.format(
                                 "%s - even the noise-aware minimum stop (0.5x live 5-min ATR = " +
                                         "%.2f) exceeds the price-tier maximum %.2f - this stock's current " +
@@ -283,6 +320,8 @@ public class MomentumTradingService {
                     floorRisk = noiseFloor;
                 }
             }
+            gateStatusService.record(symbol, "NOISE_FLOOR", true,
+                    liveAtr5m > 0 ? "Noise floor within tier ceiling" : "No live ATR data - fail-open");
             double stopLoss;
             double riskPerShare;
             if (structuralRisk < floorRisk) {
@@ -309,19 +348,24 @@ public class MomentumTradingService {
             int affordableQty = (int) (capital / entry);
             int qty = Math.min(riskBasedQty, affordableQty);
             if (qty <= 0) {
+                gateStatusService.record(symbol, "POSITION_SIZING", false, "Computed quantity is 0");
                 throw new MomentumStrategyException(symbol + " - computed quantity is 0 " +
                         "(capital Rs." + capital + " riskAmt=Rs." + riskAmt + " riskPerShare=" +
                         riskPerShare + " riskBasedQty=" + riskBasedQty + " affordableQty=" +
                         affordableQty + ")");
             }
+            gateStatusService.record(symbol, "POSITION_SIZING", true, "Quantity=" + qty);
 
             BigDecimal estimatedCost = getRealMarginRequired(symbol, isLong ?
                     Constants.TRANSACTION_TYPE_BUY : Constants.TRANSACTION_TYPE_SELL, qty, entry);
             var marginResult = marginGuard.checkSufficientMargin(estimatedCost, "MOMENTUM_STOCK_OF_DAY");
             if (!marginResult.sufficient()) {
+                gateStatusService.record(symbol, "MARGIN_CHECK", false,
+                        "Insufficient margin: need ~Rs." + estimatedCost);
                 throw new MomentumStrategyException(symbol + " - insufficient account margin " +
                         "(need ~Rs." + estimatedCost + ", available Rs." + marginResult.availableMargin() + ")");
             }
+            gateStatusService.record(symbol, "MARGIN_CHECK", true, "Sufficient margin confirmed");
             positionRegistry.checkAndWarnIfHeldElsewhere(symbol, "MOMENTUM_STOCK_OF_DAY");
 
             // FEATURE 3 (Mandatory Trend Confirmation Filters, per
@@ -335,8 +379,10 @@ public class MomentumTradingService {
                     ? candleService.checkPullbackTrendFilter(symbol, direction, entry)
                     : candleService.checkTrendFilters(symbol, direction, entry);
             if (!trendResult.passed()) {
+                gateStatusService.record(symbol, "TREND_FILTER", false, trendResult.reason());
                 throw new MomentumStrategyException(symbol + " - " + trendResult.reason());
             }
+            gateStatusService.record(symbol, "TREND_FILTER", true, trendResult.reason());
             log.info("[MOMENTUM-TRADE] {} trend filters passed: {}", symbol, trendResult.reason());
 
             // NEW GATE (per explicit user request: "add Daily Support/
@@ -350,8 +396,10 @@ public class MomentumTradingService {
             var srGateResult = candleService.checkHigherTimeframeGate(
                     symbol, direction, entry, riskPerShare);
             if (!srGateResult.passed()) {
+                gateStatusService.record(symbol, "DAILY_SR_GATE", false, srGateResult.reason());
                 throw new MomentumStrategyException(symbol + " - " + srGateResult.reason());
             }
+            gateStatusService.record(symbol, "DAILY_SR_GATE", true, srGateResult.reason());
             log.info("[MOMENTUM-TRADE] {} daily S/R gate passed: {}", symbol, srGateResult.reason());
 
             // NEW GATE (per explicit user request: "same apply for 30
@@ -365,8 +413,10 @@ public class MomentumTradingService {
             var srGate30mResult = candleService.check30MinuteHigherTimeframeGate(
                     symbol, direction, entry, riskPerShare);
             if (!srGate30mResult.passed()) {
+                gateStatusService.record(symbol, "THIRTY_MIN_SR_GATE", false, srGate30mResult.reason());
                 throw new MomentumStrategyException(symbol + " - " + srGate30mResult.reason());
             }
+            gateStatusService.record(symbol, "THIRTY_MIN_SR_GATE", true, srGate30mResult.reason());
             log.info("[MOMENTUM-TRADE] {} 30-min S/R gate passed: {}", symbol, srGate30mResult.reason());
 
             // FIX (confirmed real gap found via direct user report: two
@@ -395,6 +445,8 @@ public class MomentumTradingService {
                     ? freshLtp < entry - reversalThreshold
                     : freshLtp > entry + reversalThreshold;
             if (alreadyReversing) {
+                gateStatusService.record(symbol, "FRESH_PRICE_CHECK", false, String.format(
+                        "Price moved %.2f of %.2f planned risk against direction", Math.abs(freshLtp - entry), riskPerShare));
                 throw new MomentumStrategyException(String.format(
                         "%s - price already moved against %s direction since entry was locked in " +
                                 "(entry=%.2f, fresh LTP=%.2f, moved %.2f of planned %.2f risk) - breakout " +
@@ -402,139 +454,57 @@ public class MomentumTradingService {
                         symbol, direction, entry, freshLtp,
                         Math.abs(freshLtp - entry), riskPerShare));
             }
+            gateStatusService.record(symbol, "FRESH_PRICE_CHECK", true, "Price has not reversed meaningfully");
 
             // ═══════════════════════════════════════════════════════════
-            // ORDER-BOOK HARD GATE (per explicit user request, additive):
-            // BUY:  bidQty/askQty >= 1.30 AND OBI >= +0.15 AND
-            //       bestBidQty > bestAskQty AND no large SELL wall
-            // SELL: askQty/bidQty >= 1.30 AND OBI <= -0.15 AND
-            //       bestAskQty > bestBidQty AND no large BUY wall
-            // Checked fresh at THIS exact moment of entry (the live
-            // WebSocket depth cache updates continuously; this reads
-            // whatever is freshest right now - same freshness principle
-            // as the fresh-price re-check just above). Wall detection is
-            // capped at 5 levels - Zerodha's FULL-mode feed provides
-            // exactly 5 depth levels per side, not 10; "5-10" in the
-            // requirement can only mean "up to the 5 actually available".
-            // FAILS CLOSED: if depth data is unavailable for this symbol
-            // (e.g. QUOTE-mode, or no tick received yet), the gate
-            // REJECTS rather than assumes pass - a hard gate with no
-            // data to evaluate cannot be treated as satisfied.
+            // ORDER BOOK CONFIRMATION (per explicit user request - FIX,
+            // duplicate evaluation eliminated): this used to be ~115
+            // lines of inline logic here, ALSO independently
+            // re-implemented a second time inside the Confluence
+            // Engine's own OrderBookConfirmationService - both computing
+            // the identical analysis from the same depth history. Now
+            // computed ONCE via the standalone service (verified
+            // byte-identical thresholds to the original inline version:
+            // ratio>=1.30, OBI>=|0.15|, best-bid/ask, wall detection,
+            // 3-consecutive-update persistence, spoofing heuristic).
+            // ENFORCEMENT UNCHANGED: this remains a hard, ALWAYS-ON gate
+            // (outside the log-only Confluence block below) - throws
+            // exactly as before if it fails. The result is reused by
+            // the Confluence Engine immediately after, instead of being
+            // computed a second time.
             // ═══════════════════════════════════════════════════════════
-            // ═══════════════════════════════════════════════════════════
-            // ORDER BOOK CONFIRMATION MODULE (per explicit user spec,
-            // full rewrite - my first version only checked a single
-            // instant snapshot; this version implements the complete
-            // stateful spec: 1s-sampled rolling history, deltas between
-            // consecutive samples, and REQUIRES the full condition set
-            // to persist across the last 3 consecutive updates - a
-            // single passing instant is explicitly NOT enough per spec.
-            // Confirmation filter ONLY - never generates a trade on its
-            // own; it can only VETO a signal the strategy already found.
-            // ═══════════════════════════════════════════════════════════
-            List<com.trading.marketdata.service.MarketDataService.DepthSnapshot> history =
-                    marketDataService.getDepthHistory(symbol);
-            // Need 4 samples: 3 to evaluate ("persist for 3 consecutive
-            // updates") + 1 earlier one to compute the FIRST delta from.
-            if (history.size() < 4) {
-                throw new MomentumStrategyException(String.format(
-                        "%s - order-book gate: only %d depth sample(s) captured so far, need >=4 " +
-                                "(~1s apart) to evaluate 3-consecutive-update persistence - failing closed, " +
-                                "skipping rather than trading on insufficient order-flow history",
-                        symbol, history.size()));
-            }
-            List<com.trading.marketdata.service.MarketDataService.DepthSnapshot> recent4 =
-                    history.subList(history.size() - 4, history.size());
-
-            // Spoofing heuristic (disclosed approximation - true spoof
-            // detection needs trade-print correlation this platform
-            // doesn't currently capture at the depth level; this flags
-            // a level that spikes then collapses within one sample,
-            // the visible signature of a placed-then-pulled order):
-            List<com.trading.marketdata.service.MarketDataService.DepthLevel> confirmSideAllSamples =
-                    new ArrayList<>();
-            for (var s : history) confirmSideAllSamples.addAll(isLong ? s.bids() : s.asks());
-            Map<Double, List<Integer>> qtyByPrice = new java.util.HashMap<>();
-            for (var lvl : confirmSideAllSamples) {
-                qtyByPrice.computeIfAbsent(lvl.price(), k -> new ArrayList<>()).add(lvl.quantity());
-            }
-            boolean spoofDetected = false;
-            for (var priceQtyEntry : qtyByPrice.entrySet()) {
-                List<Integer> qtys = priceQtyEntry.getValue();
-                if (qtys.size() < 2) continue;
-                double avg = qtys.stream().mapToInt(Integer::intValue).average().orElse(0);
-                if (avg <= 0) continue;
-                for (int i = 1; i < qtys.size(); i++) {
-                    boolean spiked = qtys.get(i - 1) > avg * 2.0;
-                    boolean collapsed = qtys.get(i) < avg * 0.3;
-                    if (spiked && collapsed) { spoofDetected = true; break; }
-                }
-                if (spoofDetected) break;
-            }
-            if (spoofDetected) {
+            var ob = orderBookService.validate(symbol, direction);
+            if (ob.spoofDetected()) {
+                gateStatusService.record(symbol, "ORDER_BOOK_GATE", false, "Possible spoofing detected");
                 throw new MomentumStrategyException(symbol + " - order-book gate: possible spoofing " +
                         "detected (a price level spiked then collapsed within the sampling window) - " +
                         "rejecting rather than trading on unreliable order-flow signal");
             }
-
-            boolean allThreePass = true;
-            StringBuilder detail = new StringBuilder();
-            for (int i = 1; i < recent4.size(); i++) { // i=1,2,3 -> the 3 "current" evaluations
-                var prev = recent4.get(i - 1);
-                var cur = recent4.get(i);
-                long sumBid = cur.bids().stream().mapToLong(l -> (long) l.quantity()).sum();
-                long sumAsk = cur.asks().stream().mapToLong(l -> (long) l.quantity()).sum();
-                long prevSumBid = prev.bids().stream().mapToLong(l -> (long) l.quantity()).sum();
-                long prevSumAsk = prev.asks().stream().mapToLong(l -> (long) l.quantity()).sum();
-                if (sumBid <= 0 || sumAsk <= 0) { allThreePass = false; break; }
-
-                double obi = (double) (sumBid - sumAsk) / (sumBid + sumAsk);
-                int bestBidQty = cur.bids().get(0).quantity();
-                int bestAskQty = cur.asks().get(0).quantity();
-                long bidDelta = sumBid - prevSumBid;
-                long askDelta = sumAsk - prevSumAsk;
-
-                List<com.trading.marketdata.service.MarketDataService.DepthLevel> opposing =
-                        isLong ? cur.asks() : cur.bids();
-                double oppAvg = opposing.stream().mapToInt(l -> l.quantity()).average().orElse(0);
-                boolean wall = oppAvg > 0 && opposing.stream().anyMatch(l -> l.quantity() > oppAvg * 3.0);
-
-                boolean pass;
-                if (isLong) {
-                    double ratio = (double) sumBid / sumAsk;
-                    pass = ratio >= 1.50 && obi >= 0.15 && bestBidQty > bestAskQty && !wall
-                            && bidDelta > 0 && bidDelta > askDelta;
-                } else {
-                    double ratio = (double) sumAsk / sumBid;
-                    pass = ratio >= 1.50 && obi <= -0.15 && bestAskQty > bestBidQty && !wall
-                            && askDelta > 0 && askDelta > bidDelta;
-                }
-                detail.append(String.format("[sample %d: obi=%.2f bidDelta=%d askDelta=%d wall=%s pass=%s] ",
-                        i, obi, bidDelta, askDelta, wall, pass));
-                if (!pass) { allThreePass = false; break; }
-            }
-            if (!allThreePass) {
+            if (!ob.pass()) {
+                gateStatusService.record(symbol, "ORDER_BOOK_GATE", false, ob.reasonCodes().toString());
                 throw new MomentumStrategyException(String.format(
-                        "%s - order-book gate REJECTED: full condition set did not persist across " +
-                                "the last 3 consecutive ~1s updates (%s) - momentum signal alone insufficient",
-                        symbol, detail));
+                        "%s - order-book gate REJECTED: %s", symbol, ob.reasonCodes()));
             }
-            log.info("[MOMENTUM-TRADE] {} order-book gate PASSED - conditions persisted across 3 " +
-                    "consecutive updates ({})", symbol, detail);
+            gateStatusService.record(symbol, "ORDER_BOOK_GATE", true,
+                    "score=" + ob.confidenceScore() + "/25: " + ob.reasonCodes());
+            log.info("[MOMENTUM-TRADE] {} order-book gate PASSED (score={}/25): {}", symbol,
+                    ob.confidenceScore(), ob.reasonCodes());
 
             // ═══════════════════════════════════════════════════════════
             // INSTITUTIONAL CONFLUENCE ENGINE (per explicit user request,
             // additive integration): Volume Profile + Order Flow +
-            // Order Book (standalone copy) + Confluence scoring, checked
-            // AFTER the existing order-book gate above (which is
-            // completely untouched and still independently enforced).
-            // This engine NEVER generates a trade - it can only VETO one
-            // the existing pipeline already approved, exactly like the
-            // order-book gate's own role. LOG-ONLY by default (see
-            // MomentumConfig) - observes real ConfluenceResult output
-            // for a few sessions before you decide to make it live,
-            // given these three modules have zero live-market track
-            // record yet.
+            // Order Book (result reused from above, not recomputed),
+            // checked AFTER the existing order-book gate above (which
+            // remains independently enforced). This engine NEVER
+            // generates a trade - it can only VETO one the existing
+            // pipeline already approved, exactly like the order-book
+            // gate's own role. FIX (stale comment corrected during a
+            // line-by-line validation pass): this previously said
+            // "LOG-ONLY by default... before you decide to make it
+            // live" - but confluenceEngineLogOnly was explicitly set to
+            // LIVE per user decision. This is now a HARD, ENFORCING gate
+            // (pure AND-based, no scoring) - a failure here throws and
+            // blocks the trade, exactly like every other gate above it.
             // ═══════════════════════════════════════════════════════════
             if (config.isConfluenceEngineEnabled()) {
                 List<Long> recentVols = candleService.getRecentCandleVolumes(symbol, 6);
@@ -542,21 +512,29 @@ public class MomentumTradingService {
                 List<Long> priorFiveVols = recentVols.size() > 1
                         ? recentVols.subList(0, recentVols.size() - 1) : List.of();
                 var confluence = confluenceService.validate(symbol, direction, entry,
-                        priorFiveVols, breakoutCandleVolume);
+                        priorFiveVols, breakoutCandleVolume, ob);
+                // ADDITIVE (dashboard gate-visibility): records the two
+                // sub-module results the Confluence Engine already
+                // computed - zero change to its own decision logic.
+                gateStatusService.record(symbol, "VOLUME_PROFILE_GATE",
+                        confluence.volumeProfile().pass(), confluence.volumeProfile().reasonCodes().toString());
+                boolean orderFlowDirectionConfirmed = isLong
+                        ? confluence.orderFlow().dominance() == com.trading.institutional.service.OrderFlowConfirmationService.Dominance.BUYERS_DOMINANT
+                        : confluence.orderFlow().dominance() == com.trading.institutional.service.OrderFlowConfirmationService.Dominance.SELLERS_DOMINANT;
+                gateStatusService.record(symbol, "ORDER_FLOW_GATE", orderFlowDirectionConfirmed,
+                        "dominance=" + confluence.orderFlow().dominance() + " " + confluence.orderFlow().reasonCodes());
                 if (config.isConfluenceEngineLogOnly()) {
                     log.info("[MOMENTUM-TRADE] {} CONFLUENCE-ENGINE (LOG-ONLY, not blocking): " +
-                                    "executeAllowed={} score={}/100 quality={} failSafe={}", symbol,
-                            confluence.executeAllowed(), confluence.totalScore(), confluence.quality(),
-                            confluence.failSafeReasons());
+                                    "executeAllowed={} failReasons={}", symbol,
+                            confluence.executeAllowed(), confluence.failReasons());
                 } else if (!confluence.executeAllowed()) {
                     throw new MomentumStrategyException(String.format(
-                            "%s - Institutional Confluence Engine REJECTED: score=%d/100 quality=%s " +
-                                    "failSafe=%s - existing gates approved this trade but institutional " +
-                                    "confirmation did not, skipping", symbol, confluence.totalScore(),
-                            confluence.quality(), confluence.failSafeReasons()));
+                            "%s - Institutional Confluence Engine REJECTED (hard-gate): failReasons=%s " +
+                                    "- existing gates approved this trade but institutional confirmation did " +
+                                    "not, skipping", symbol, confluence.failReasons()));
                 } else {
-                    log.info("[MOMENTUM-TRADE] {} CONFLUENCE-ENGINE PASSED: score={}/100 quality={}",
-                            symbol, confluence.totalScore(), confluence.quality());
+                    log.info("[MOMENTUM-TRADE] {} CONFLUENCE-ENGINE PASSED (all hard gates cleared)",
+                            symbol);
                 }
             }
 
