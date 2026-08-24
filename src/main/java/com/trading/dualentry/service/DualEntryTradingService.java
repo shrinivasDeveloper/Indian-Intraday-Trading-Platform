@@ -4,7 +4,6 @@ import com.trading.dualentry.config.DualEntryConfig;
 import com.trading.dualentry.domain.DualEntryTrade;
 import com.trading.dualentry.exception.DualEntryStrategyException;
 import com.trading.dualentry.repository.DualEntryTradeRepository;
-import com.trading.institutional.service.OrderFlowConfirmationService;
 import com.trading.marketdata.service.MarketDataService;
 import com.trading.momentumstockofday.domain.MomentumCandidate;
 import com.trading.momentumstockofday.service.MomentumCandleService;
@@ -63,13 +62,17 @@ public class DualEntryTradingService {
     private final CrossStrategyPositionRegistry positionRegistry;
     private final MomentumCandleService sharedGates; // ONLY the 3 verified side-effect-free methods used
     private final MarketDataService marketDataService;
-    private final OrderFlowConfirmationService orderFlowService;
+    private final DualEntryCandleService candleService; // for IB computation
+    private final com.trading.institutional.service.VolumeProfileConfirmationService volumeProfileService;
+    private final DualEntryGateStatusService gateStatusService;
 
     public DualEntryTradingService(KiteConnect kiteConnect, DualEntryConfig config,
                                    DualEntryTradeRepository repository, AccountMarginGuard marginGuard,
                                    CrossStrategyPositionRegistry positionRegistry,
                                    MomentumCandleService sharedGates, MarketDataService marketDataService,
-                                   OrderFlowConfirmationService orderFlowService) {
+                                   DualEntryCandleService candleService,
+                                   com.trading.institutional.service.VolumeProfileConfirmationService volumeProfileService,
+                                   DualEntryGateStatusService gateStatusService) {
         this.kiteConnect = kiteConnect;
         this.config = config;
         this.repository = repository;
@@ -77,7 +80,9 @@ public class DualEntryTradingService {
         this.positionRegistry = positionRegistry;
         this.sharedGates = sharedGates;
         this.marketDataService = marketDataService;
-        this.orderFlowService = orderFlowService;
+        this.candleService = candleService;
+        this.volumeProfileService = volumeProfileService;
+        this.gateStatusService = gateStatusService;
     }
 
     private record FillResult(boolean filled, double avgPrice, int filledQty) {}
@@ -126,6 +131,8 @@ public class DualEntryTradingService {
         boolean isPullback = "PULLBACK".equals(entryMode);
 
         try {
+            gateStatusService.initGatesPending(symbol);
+
             double ltp = fetchLtp(symbol);
             if (ltp <= 0) throw new DualEntryStrategyException("Could not fetch valid live price for " + symbol);
             double entry = isLong ? ltp * 1.0005 : ltp * 0.9995;
@@ -142,6 +149,7 @@ public class DualEntryTradingService {
             double dayHigh = dayHighLow[0], dayLow = dayHighLow[1];
             boolean priceBrokeLevel = isLong ? ltp > dayHigh : ltp < dayLow;
             if (!priceBrokeLevel) {
+                gateStatusService.record(symbol, "PRICE_BREAKOUT", false, "GATE1 FAILED");
                 throw new DualEntryStrategyException(String.format(
                         "%s - GATE1 FAILED: price %.2f has not broken the day's %s (%.2f)",
                         symbol, ltp, isLong ? "high" : "low", isLong ? dayHigh : dayLow));
@@ -153,12 +161,14 @@ public class DualEntryTradingService {
             double structuralStop = isLong ? consolLow - buffer : consolHigh + buffer;
             double structuralRisk = isLong ? entry - structuralStop : structuralStop - entry;
             if (structuralRisk <= 0) {
+                gateStatusService.record(symbol, "STRUCTURAL_RISK", false, "GATE2 FAILED");
                 throw new DualEntryStrategyException(symbol + " - GATE2 FAILED: structural risk non-positive");
             }
 
             // ── GATE 2: Skip Rule (Tier Ceiling) ──
             double tierRisk = entry * computeSlPct(entry);
             if (structuralRisk > tierRisk) {
+                gateStatusService.record(symbol, "SKIP_RULE", false, "GATE3 FAILED");
                 throw new DualEntryStrategyException(String.format(
                         "%s - GATE3 FAILED: structural risk %.2f exceeds tier ceiling %.2f", symbol, structuralRisk, tierRisk));
             }
@@ -167,6 +177,7 @@ public class DualEntryTradingService {
             double liveAtr5m = sharedGates.compute5MinAtr(symbol);
             double noiseFloor = liveAtr5m > 0 ? liveAtr5m * 0.5 : 0;
             if (noiseFloor > tierRisk) {
+                gateStatusService.record(symbol, "NOISE_FLOOR", false, "GATE4 FAILED");
                 throw new DualEntryStrategyException(String.format(
                         "%s - GATE4 FAILED: noise floor %.2f exceeds tier ceiling %.2f", symbol, noiseFloor, tierRisk));
             }
@@ -180,13 +191,17 @@ public class DualEntryTradingService {
             int riskBasedQty = (int) (riskAmt / riskPerShare);
             int affordableQty = (int) (config.getCapital() / entry);
             int qty = Math.min(riskBasedQty, affordableQty);
-            if (qty <= 0) throw new DualEntryStrategyException(symbol + " - GATE5 FAILED: computed quantity is 0");
+            if (qty <= 0) {
+                gateStatusService.record(symbol, "POSITION_SIZING", false, "GATE5 FAILED");
+                throw new DualEntryStrategyException(symbol + " - GATE5 FAILED: computed quantity is 0");
+            }
 
             // ── GATE 5: Margin Check (real Zerodha API) ──
             BigDecimal estimatedCost = getRealMarginRequired(symbol,
                     isLong ? Constants.TRANSACTION_TYPE_BUY : Constants.TRANSACTION_TYPE_SELL, qty, entry);
             var marginResult = marginGuard.checkSufficientMargin(estimatedCost, "DUAL_ENTRY_STRATEGY");
             if (!marginResult.sufficient()) {
+                gateStatusService.record(symbol, "MARGIN_CHECK", false, "GATE6 FAILED");
                 throw new DualEntryStrategyException(symbol + " - GATE6 FAILED: insufficient margin");
             }
             positionRegistry.checkAndWarnIfHeldElsewhere(symbol, "DUAL_ENTRY_STRATEGY");
@@ -196,18 +211,21 @@ public class DualEntryTradingService {
             // Momentum's own checkTrendFilters uses, hence independent
             // implementation here) ──
             if (!checkVwapEma20TrendFilter(symbol, isLong, isPullback)) {
+                gateStatusService.record(symbol, "TREND_FILTER", false, "GATE7 FAILED");
                 throw new DualEntryStrategyException(symbol + " - GATE7 FAILED: VWAP+EMA20 trend filter");
             }
 
             // ── GATE 7: Daily S/R Gate (genuine reuse - verified side-effect-free) ──
             var dailyGate = sharedGates.checkHigherTimeframeGate(symbol, direction, entry, riskPerShare);
             if (!dailyGate.passed()) {
+                gateStatusService.record(symbol, "DAILY_SR_GATE", false, "GATE8 FAILED");
                 throw new DualEntryStrategyException(symbol + " - GATE8 FAILED: " + dailyGate.reason());
             }
 
             // ── GATE 8: 30-Min S/R Gate (genuine reuse) ──
             var thirtyMinGate = sharedGates.check30MinuteHigherTimeframeGate(symbol, direction, entry, riskPerShare);
             if (!thirtyMinGate.passed()) {
+                gateStatusService.record(symbol, "THIRTY_MIN_SR_GATE", false, "GATE9 FAILED");
                 throw new DualEntryStrategyException(symbol + " - GATE9 FAILED: " + thirtyMinGate.reason());
             }
 
@@ -217,6 +235,7 @@ public class DualEntryTradingService {
             boolean alreadyReversing = isLong ? freshLtp < entry - reversalThreshold
                     : freshLtp > entry + reversalThreshold;
             if (alreadyReversing) {
+                gateStatusService.record(symbol, "FRESH_PRICE_CHECK", false, "GATE10 FAILED");
                 throw new DualEntryStrategyException(symbol + " - GATE10 FAILED: price already reversed");
             }
 
@@ -226,23 +245,101 @@ public class DualEntryTradingService {
             // the final values, superseding the conflicting spec
             // item #10) ──
             if (!checkOrderBookHardGate(symbol, isLong)) {
+                gateStatusService.record(symbol, "ORDER_BOOK_GATE", false, "GATE11/12 FAILED");
                 throw new DualEntryStrategyException(symbol + " - GATE11/12 FAILED: order-book hard gate");
             }
 
-            // ── GATE 12: Hard Order Flow Gate (genuine reuse -
-            // OrderFlowConfirmationService already implements exactly
-            // this: 11 mandatory conditions per direction, hard AND,
-            // zero scoring) ──
-            var orderFlowResult = orderFlowService.validateSignal(symbol, direction);
-            boolean orderFlowConfirmed = isLong
-                    ? orderFlowResult.dominance() == OrderFlowConfirmationService.Dominance.BUYERS_DOMINANT
-                    : orderFlowResult.dominance() == OrderFlowConfirmationService.Dominance.SELLERS_DOMINANT;
-            if (!orderFlowConfirmed) {
-                throw new DualEntryStrategyException(symbol + " - GATE13 FAILED: order-flow hard gate, dominance=" +
-                        orderFlowResult.dominance());
+            // ── GATE 13: Market Profile Gate (per explicit user
+            // request, NEW) - IB Breakout + POC Alignment ONLY,
+            // deliberately excluding any other Market Profile concept
+            // to avoid duplicating the Volume Profile gate below. ──
+            var ib = candleService.computeInitialBalance(symbol);
+            if (ib == null) {
+                gateStatusService.record(symbol, "MARKET_PROFILE_GATE", false, "GATE13 FAILED");
+                throw new DualEntryStrategyException(symbol + " - GATE13 FAILED: Initial Balance not yet available");
+            }
+            boolean ibBreakout = isLong ? entry > ib.ibHigh() : entry < ib.ibLow();
+            if (!ibBreakout) {
+                gateStatusService.record(symbol, "MARKET_PROFILE_GATE", false, "GATE13 FAILED");
+                throw new DualEntryStrategyException(String.format(
+                        "%s - GATE13 FAILED: price %.2f has not broken IB %s (%.2f)",
+                        symbol, entry, isLong ? "High" : "Low", isLong ? ib.ibHigh() : ib.ibLow()));
+            }
+            var vpMetricsForPoc = volumeProfileService.computeProfile(symbol);
+            if (vpMetricsForPoc == null) {
+                gateStatusService.record(symbol, "MARKET_PROFILE_GATE", false, "GATE13 FAILED");
+                throw new DualEntryStrategyException(symbol + " - GATE13 FAILED: no volume profile data for POC alignment");
+            }
+            var pocHistoryForAlignment = marketDataService.getDevelopingPocHistory(symbol);
+            boolean pocShifting = false;
+            if (pocHistoryForAlignment.size() > 3) {
+                double pocNow = pocHistoryForAlignment.get(pocHistoryForAlignment.size() - 1).poc();
+                double pocBefore = pocHistoryForAlignment.get(pocHistoryForAlignment.size() - 4).poc();
+                pocShifting = isLong ? pocNow > pocBefore : pocNow < pocBefore;
+            }
+            boolean pocAligned = isLong
+                    ? (vpMetricsForPoc.poc() < entry || pocShifting)
+                    : (vpMetricsForPoc.poc() > entry || pocShifting);
+            if (!pocAligned) {
+                gateStatusService.record(symbol, "MARKET_PROFILE_GATE", false, "GATE13 FAILED");
+                throw new DualEntryStrategyException(symbol + " - GATE13 FAILED: POC not aligned with " + direction);
             }
 
-            log.info("[DUAL-ENTRY-TRADE] {} ALL 13 GATES PASSED - placing {} order, mode={}",
+            // ── GATE 14: Volume Profile Gate (per explicit user
+            // request, REDUCED to 5 conditions) - reuses
+            // VolumeProfileConfirmationService.computeProfile() for
+            // the underlying POC/VAH/VAL/HVN math ONLY (a pure,
+            // side-effect-free computation, safe to call directly) -
+            // does NOT call its own validateBreakout() decision (which
+            // enforces a different, larger condition set). Every other
+            // Volume Profile condition from the original spec is
+            // deliberately NOT checked here, per explicit request. ──
+            boolean vp1 = isLong ? entry > vpMetricsForPoc.vah() : entry < vpMetricsForPoc.val();
+            boolean vp2 = pocShifting;
+            boolean vp3; // sufficient room to next HVN
+            if (isLong) {
+                vp3 = vpMetricsForPoc.hvnLevels().stream().filter(l -> l > entry)
+                        .min(Double::compareTo).map(nextHvn -> (nextHvn - entry) >= vpMetricsForPoc.bucketSize() * 3)
+                        .orElse(true); // no HVN above = no immediate resistance = room is sufficient
+            } else {
+                vp3 = vpMetricsForPoc.hvnLevels().stream().filter(l -> l < entry)
+                        .max(Double::compareTo).map(nextHvn -> (entry - nextHvn) >= vpMetricsForPoc.bucketSize() * 3)
+                        .orElse(true);
+            }
+            List<MomentumCandidate.Candle> recentCandlesForVp = sharedGates.getFiveMinRecentCandlesPublic(symbol, 6);
+            long latestVol = recentCandlesForVp.isEmpty() ? 0 : recentCandlesForVp.get(recentCandlesForVp.size() - 1).volume();
+            double avgVolForVp = recentCandlesForVp.size() > 1
+                    ? recentCandlesForVp.subList(0, recentCandlesForVp.size() - 1).stream()
+                    .mapToLong(MomentumCandidate.Candle::volume).average().orElse(0) : 0;
+            boolean vp4 = avgVolForVp > 0 && latestVol > avgVolForVp;
+            boolean vp5 = isLong ? entry > vpMetricsForPoc.vah() : entry < vpMetricsForPoc.val(); // accepted outside VA (same instant check - no rejection yet observed)
+            if (!(vp1 && vp2 && vp3 && vp4 && vp5)) {
+                gateStatusService.record(symbol, "VOLUME_PROFILE_GATE", false, "GATE14 FAILED");
+                throw new DualEntryStrategyException(String.format(
+                        "%s - GATE14 FAILED: Volume Profile (vah/val=%s pocShift=%s hvnRoom=%s volume=%s accepted=%s)",
+                        symbol, vp1, vp2, vp3, vp4, vp5));
+            }
+
+            // ── GATE 15: Order Flow Gate (per explicit user request,
+            // REDUCED to 5 conditions) - reads raw
+            // MarketDataService.getOrderFlowHistory() directly, NOT
+            // OrderFlowConfirmationService's own 11-condition decision.
+            // The shared OrderFlowConfirmationService class itself is
+            // completely untouched - still used unmodified by Momentum
+            // and unaffected by this change. ──
+            if (!checkReducedOrderFlowGate(symbol, isLong)) {
+                gateStatusService.record(symbol, "ORDER_FLOW_GATE", false, "GATE15 FAILED");
+                throw new DualEntryStrategyException(symbol + " - GATE15 FAILED: order-flow (reduced 5-condition) gate");
+            }
+
+            // Reaching this point means every gate above genuinely
+            // passed (any failure would have thrown already) - bulk
+            // record PASS for dashboard visibility.
+            for (String g : DualEntryGateStatusService.GATE_NAMES) {
+                gateStatusService.record(symbol, g, true, "Passed");
+            }
+
+            log.info("[DUAL-ENTRY-TRADE] {} ALL 15 GATES PASSED - placing {} order, mode={}",
                     symbol, direction, entryMode);
 
             String orderId = placeMarketOrder(symbol, isLong ? Constants.TRANSACTION_TYPE_BUY
@@ -327,6 +424,66 @@ public class DualEntryTradingService {
      *  the SAME shared MarketDataService.getDepthHistory() raw data
      *  already used by Momentum's own order-book gate - genuinely
      *  reused market data, independently-thresholded decision logic. */
+    /**
+     * GATE 15 (per explicit user request, REDUCED to 5 conditions):
+     * aggressive dominance, cumulative delta confirms, imbalance in
+     * trade direction, no significant opposing absorption, confirmed
+     * for 2-3 consecutive updates. Reads the SAME raw
+     * MarketDataService.getOrderFlowHistory() data OrderFlowConfirmationService
+     * itself uses - genuinely reused market data, independently
+     * reduced decision logic (the shared class itself, and Momentum's
+     * own use of it, are completely untouched).
+     */
+    private static final double OF_IMBALANCE_RATIO_THRESHOLD = 1.5;
+    private static final double OF_ABSORPTION_OPPOSING_MULTIPLE = 1.5;
+    private static final double OF_ABSORPTION_MAX_PRICE_MOVE_PCT = 0.0008;
+    private static final int OF_CONFIRM_LOOKBACK = 3; // "2-3 consecutive updates"
+
+    private boolean checkReducedOrderFlowGate(String symbol, boolean isLong) {
+        List<MarketDataService.OrderFlowSnapshot> history = marketDataService.getOrderFlowHistory(symbol);
+        if (history.size() < OF_CONFIRM_LOOKBACK + 1) return false;
+        List<MarketDataService.OrderFlowSnapshot> lastN = history.subList(
+                history.size() - OF_CONFIRM_LOOKBACK, history.size());
+
+        int confirmedCount = 0;
+        for (var snap : lastN) {
+            int idx = history.indexOf(snap);
+            var prev = idx > 0 ? history.get(idx - 1) : snap;
+
+            long delta = snap.buyVolume() - snap.sellVolume();
+            boolean deltaConfirms = isLong ? delta > 0 : delta < 0;
+
+            boolean cumDeltaConfirms = isLong
+                    ? snap.cumulativeDelta() > prev.cumulativeDelta()
+                    : snap.cumulativeDelta() < prev.cumulativeDelta();
+
+            double ratio = isLong
+                    ? (snap.sellVolume() > 0 ? (double) snap.buyVolume() / snap.sellVolume() : Double.MAX_VALUE)
+                    : (snap.buyVolume() > 0 ? (double) snap.sellVolume() / snap.buyVolume() : Double.MAX_VALUE);
+            boolean imbalanceConfirms = ratio >= OF_IMBALANCE_RATIO_THRESHOLD;
+
+            // No significant opposing absorption: opposing side didn't
+            // trade heavily (>=1.5x average) while price barely moved
+            // against the trade's favor.
+            double avgOpposing = lastN.stream()
+                    .mapToLong(s -> isLong ? s.sellVolume() : s.buyVolume()).average().orElse(0);
+            long thisOpposing = isLong ? snap.sellVolume() : snap.buyVolume();
+            double priceMovePct = prev.price() > 0 ? Math.abs(snap.price() - prev.price()) / prev.price() : 1.0;
+            boolean opposingAbsorption = avgOpposing > 0 && thisOpposing > avgOpposing * OF_ABSORPTION_OPPOSING_MULTIPLE
+                    && priceMovePct < OF_ABSORPTION_MAX_PRICE_MOVE_PCT
+                    && (isLong ? snap.price() <= prev.price() : snap.price() >= prev.price());
+            boolean noOpposingAbsorption = !opposingAbsorption;
+
+            if (deltaConfirms && cumDeltaConfirms && imbalanceConfirms && noOpposingAbsorption) {
+                confirmedCount++;
+            }
+        }
+        // "Confirmation is maintained for 2-3 consecutive updates" -
+        // require ALL of the last 3 samples to confirm (the strictest,
+        // unambiguous reading of "maintained").
+        return confirmedCount == OF_CONFIRM_LOOKBACK;
+    }
+
     private boolean checkOrderBookHardGate(String symbol, boolean isLong) {
         List<MarketDataService.DepthSnapshot> history = marketDataService.getDepthHistory(symbol);
         int need = config.getOrderBookConsecutiveSamples() + 1;

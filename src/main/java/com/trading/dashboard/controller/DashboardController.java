@@ -361,6 +361,108 @@ public class DashboardController {
         return ResponseEntity.ok(out);
     }
 
+    // ======================================================================
+    // DUAL ENTRY STRATEGY DASHBOARD (per explicit user request): own,
+    // fully isolated endpoints - zero shared state or code path with
+    // Momentum's own dashboard endpoints above.
+    // ======================================================================
+    @Autowired(required = false)
+    private com.trading.dualentry.config.DualEntryConfig dualEntryConfig;
+    @Autowired(required = false)
+    private com.trading.dualentry.scheduler.DualEntryScheduler dualEntryScheduler;
+    @Autowired(required = false)
+    private com.trading.dualentry.repository.DualEntryTradeRepository dualEntryTradeRepo;
+    @Autowired(required = false)
+    private com.trading.dualentry.service.DualEntryGateStatusService dualEntryGateStatusService;
+
+    @GetMapping("/dual-entry/status")
+    public ResponseEntity<Map<String, Object>> getDualEntryStatus() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (dualEntryConfig == null || dualEntryScheduler == null) {
+            out.put("available", false);
+            return ResponseEntity.ok(out);
+        }
+        out.put("available", true);
+        out.put("enabled", dualEntryConfig.isEnabled());
+        out.put("capital", dualEntryConfig.getCapital());
+        out.put("maxTradesPerDay", dualEntryConfig.getMaxTradesPerDay());
+        out.put("tradesToday", dualEntryScheduler.getTradesTodayCount());
+        out.put("hasActiveTrade", dualEntryScheduler.hasActiveTrade());
+        var candidates = dualEntryScheduler.getTodaysCandidates();
+        out.put("candidateCount", candidates.size());
+        List<Map<String, Object>> candidateList = new ArrayList<>();
+        for (var c : candidates) {
+            Map<String, Object> ci = new LinkedHashMap<>();
+            ci.put("symbol", c.getSymbol());
+            ci.put("sector", c.getSector());
+            ci.put("sectorRank", c.getSectorRank());
+            ci.put("direction", c.getDirection());
+            candidateList.add(ci);
+        }
+        out.put("candidates", candidateList);
+        out.put("timestamp", Instant.now().toString());
+        return ResponseEntity.ok(out);
+    }
+
+    @GetMapping("/dual-entry/trades/today")
+    public ResponseEntity<Map<String, Object>> getDualEntryTradesToday() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (dualEntryTradeRepo == null) {
+            out.put("available", false);
+            return ResponseEntity.ok(out);
+        }
+        out.put("available", true);
+        var trades = dualEntryTradeRepo.findToday();
+        List<Map<String, Object>> tradeList = new ArrayList<>();
+        for (var t : trades) {
+            Map<String, Object> ti = new LinkedHashMap<>();
+            ti.put("symbol", t.getSymbol());
+            ti.put("sector", t.getSector());
+            ti.put("sectorRank", t.getSectorRank());
+            ti.put("direction", t.getDirection());
+            ti.put("entryMode", t.getEntryMode());
+            ti.put("entryPrice", t.getEntryPrice());
+            ti.put("stopLoss", t.getStopLoss());
+            ti.put("target", t.getTarget());
+            ti.put("currentTrailStop", t.getCurrentTrailStop());
+            ti.put("trailingActive", t.isTrailingActive());
+            ti.put("quantity", t.getQuantity());
+            ti.put("status", t.getStatus());
+            ti.put("exitPrice", t.getExitPrice());
+            ti.put("exitReason", t.getExitReason());
+            tradeList.add(ti);
+        }
+        out.put("trades", tradeList);
+        return ResponseEntity.ok(out);
+    }
+
+    @GetMapping("/dual-entry/gate-status")
+    public ResponseEntity<Map<String, Object>> getDualEntryGateStatus() {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (dualEntryGateStatusService == null) {
+            out.put("available", false);
+            return ResponseEntity.ok(out);
+        }
+        out.put("available", true);
+        var snapshot = dualEntryGateStatusService.getAllStatus();
+        Map<String, Object> bySymbol = new LinkedHashMap<>();
+        for (var entry : snapshot.entrySet()) {
+            Map<String, Object> gates = new LinkedHashMap<>();
+            for (var g : entry.getValue().entrySet()) {
+                Map<String, Object> gateInfo = new LinkedHashMap<>();
+                gateInfo.put("state", g.getValue().state().name());
+                gateInfo.put("reason", g.getValue().reason());
+                gateInfo.put("updatedAt", g.getValue().updatedAt().toString());
+                gates.put(g.getKey(), gateInfo);
+            }
+            bySymbol.put(entry.getKey(), gates);
+        }
+        out.put("symbols", bySymbol);
+        out.put("gateNames", com.trading.dualentry.service.DualEntryGateStatusService.GATE_NAMES);
+        out.put("timestamp", Instant.now().toString());
+        return ResponseEntity.ok(out);
+    }
+
     @GetMapping("/hero-zero/expiry")
     public ResponseEntity<Map<String, Object>> getHeroZeroExpiry() {
         Map<String, Object> out = new LinkedHashMap<>();

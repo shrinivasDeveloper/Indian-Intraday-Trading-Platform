@@ -49,6 +49,11 @@ public class DualEntryScheduler {
     private final ReentrantLock tickLock = new ReentrantLock();
 
     private volatile List<MomentumCandidate> todaysCandidates = List.of();
+
+    /** Dashboard read-only accessor - additive, zero effect on scheduling. */
+    public List<MomentumCandidate> getTodaysCandidates() { return todaysCandidates; }
+    public int getTradesTodayCount() { return tradesToday.get(); }
+    public boolean hasActiveTrade() { return activeTrade.get() != null; }
     private final AtomicReference<DualEntryTrade> activeTrade = new AtomicReference<>();
     private final AtomicInteger tradesToday = new AtomicInteger(0);
     private final Set<String> tradedSymbolsToday = ConcurrentHashMap.newKeySet();

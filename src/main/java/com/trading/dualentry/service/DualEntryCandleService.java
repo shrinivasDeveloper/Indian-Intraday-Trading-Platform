@@ -204,4 +204,38 @@ public class DualEntryCandleService {
             return new PullbackResult(false, 0, 0, dirLabel, "Evaluation error: " + e.getMessage());
         }
     }
+
+    /**
+     * ADDITIVE (per explicit user request - Market Profile Gate:
+     * IB Breakout): computes the Initial Balance (first 60 minutes of
+     * trading, 9:15-10:15 IST = 12 five-min candles) high/low. Reuses
+     * the existing getFiveMinRecentCandlesPublic accessor - zero new
+     * market-data fetching. Returns null if insufficient candles exist
+     * yet (fails closed for the caller to interpret).
+     */
+    public record InitialBalance(double ibHigh, double ibLow) {}
+
+    private static final int IB_CANDLE_COUNT = 12; // 12 x 5min = 60 minutes
+
+    public InitialBalance computeInitialBalance(String symbol) {
+        List<MomentumCandidate.Candle> candles = sharedMarketData.getFiveMinRecentCandlesPublic(symbol, 100);
+        if (candles.size() < IB_CANDLE_COUNT) return null;
+
+        List<MomentumCandidate.Candle> sessionCandles = candles.stream()
+                .filter(c -> c.timestamp() != null && c.timestamp().contains("T"))
+                .sorted((a, b) -> a.timestamp().compareTo(b.timestamp()))
+                .toList();
+        if (sessionCandles.isEmpty()) return null;
+
+        String sessionDate = sessionCandles.get(0).timestamp().substring(0, 10);
+        List<MomentumCandidate.Candle> ibWindow = sessionCandles.stream()
+                .filter(c -> c.timestamp().startsWith(sessionDate))
+                .limit(IB_CANDLE_COUNT)
+                .toList();
+        if (ibWindow.size() < IB_CANDLE_COUNT) return null; // IB window not complete yet today
+
+        double ibHigh = ibWindow.stream().mapToDouble(MomentumCandidate.Candle::high).max().orElse(0);
+        double ibLow = ibWindow.stream().mapToDouble(MomentumCandidate.Candle::low).min().orElse(0);
+        return new InitialBalance(ibHigh, ibLow);
+    }
 }

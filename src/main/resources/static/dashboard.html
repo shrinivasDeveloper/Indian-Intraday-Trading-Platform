@@ -163,6 +163,7 @@
     <div class="tab" onclick="switchTab('herozero',this); hzLoad();" id="tab-herozero">Hero/Zero ⚡</div>
     <div class="tab" onclick="switchTab('heatmap',this); hmLoad();" id="tab-heatmap">Heatmap 🔥</div>
     <div class="tab" onclick="switchTab('momentum',this); mtLoad();" id="tab-momentum">Momentum 🚀</div>
+    <div class="tab" onclick="switchTab('dualentry',this); deLoad();" id="tab-dualentry">Dual Entry ⚡</div>
 </div>
 
 <!-- OVERVIEW -->
@@ -636,6 +637,177 @@
         #mt-gate-cards { display: block !important; }
     }
 </style>
+
+<div id="tc-dualentry" class="tc">
+    <div class="hdr"><h2>⚡ Dual Entry Strategy <span class="sub" id="de-status-badge"></span></h2></div>
+    <div class="cards">
+        <div class="card"><div class="ct">Candidates</div><div class="stat sb" id="de-candidate-count">—</div></div>
+        <div class="card"><div class="ct">Trades Today</div><div class="stat sb" id="de-trades-today">—</div></div>
+        <div class="card"><div class="ct">Capital</div><div class="stat sb" id="de-capital">—</div></div>
+        <div class="card"><div class="ct">Active Trade</div><div class="stat sb" id="de-has-active">—</div></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+        <div class="ct">📋 Watchlist (same selection as Momentum)</div>
+        <div style="overflow-x:auto">
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
+                <thead><tr style="color:var(--muted);text-align:left">
+                    <th style="padding:6px">Symbol</th><th style="padding:6px">Sector</th>
+                    <th style="padding:6px">Direction</th></tr></thead>
+                <tbody id="de-candidates-body"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="card" id="de-trade-card" style="display:none;margin-top:16px">
+        <div class="ct">📈 Today's Trade(s)</div>
+        <div id="de-trade-body"></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+        <div class="ct">🧩 Validation Gate Status <span class="sub" id="de-gate-updated"></span></div>
+        <div class="sub" style="padding:6px 0 12px">
+            Live per-gate result for each watchlist symbol's most recent entry attempt.
+            15 gates: Price Breakout, Structural Risk, Skip Rule, Noise Floor, Sizing,
+            Margin, Trend Filter, Daily S/R, 30-Min S/R, Fresh Price, Order Book,
+            Market Profile, Volume Profile, Order Flow.
+        </div>
+        <div id="de-gate-table-wrap" style="overflow-x:auto">
+            <table id="de-gate-table" style="width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap">
+                <thead><tr id="de-gate-header"></tr></thead>
+                <tbody id="de-gate-body"></tbody>
+            </table>
+        </div>
+        <div id="de-gate-cards" style="display:none"></div>
+    </div>
+</div>
+
+<style>
+    /* Dual Entry gate panel - reuses the SAME visual language as
+       Momentum's gate panel (mt-gate-*) but fully scoped IDs/classes
+       (de-gate-*) - zero collision, zero shared state. */
+    #de-gate-table th, #de-gate-table td {
+        padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: left;
+    }
+    #de-gate-table th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--card); }
+    .de-gate-pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+    .de-gate-pass { background: rgba(63,185,80,0.15); color: #3fb950; }
+    .de-gate-fail { background: rgba(248,81,73,0.15); color: #f85149; }
+    .de-gate-pending { background: rgba(139,148,158,0.15); color: var(--muted); }
+    .de-gate-symbol-card {
+        background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+        padding: 10px 12px; margin-bottom: 10px;
+    }
+    .de-gate-symbol-card .sym-name { font-weight: 700; margin-bottom: 6px; }
+    .de-gate-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 0; font-size: 12px; }
+    .de-gate-row .gname { color: var(--muted); }
+    @media (max-width: 720px) {
+        #de-gate-table-wrap { display: none; }
+        #de-gate-cards { display: block !important; }
+    }
+</style>
+<script>
+    // ============================================================
+    // DUAL ENTRY STRATEGY - completely independent tab. Own API
+    // namespace (/api/dashboard/dual-entry/*), own JS functions
+    // (de* prefix), zero shared state with Momentum's mt* functions.
+    // ============================================================
+    const DE_GATE_LABELS = {
+        PRICE_BREAKOUT: 'Price Breakout', STRUCTURAL_RISK: 'Struct Risk', SKIP_RULE: 'Skip Rule',
+        NOISE_FLOOR: 'Noise Floor', POSITION_SIZING: 'Sizing', MARGIN_CHECK: 'Margin',
+        TREND_FILTER: 'Trend', DAILY_SR_GATE: 'Daily S/R', THIRTY_MIN_SR_GATE: '30m S/R',
+        FRESH_PRICE_CHECK: 'Fresh Price', ORDER_BOOK_GATE: 'Order Book',
+        MARKET_PROFILE_GATE: 'Mkt Profile', VOLUME_PROFILE_GATE: 'Vol Profile', ORDER_FLOW_GATE: 'Order Flow'
+    };
+
+    function deGatePill(gate) {
+        if (!gate) return `<span class="de-gate-pill de-gate-pending">—</span>`;
+        const cls = gate.state === 'PASS' ? 'de-gate-pass' : gate.state === 'FAIL' ? 'de-gate-fail' : 'de-gate-pending';
+        const label = gate.state === 'PASS' ? '✓' : gate.state === 'FAIL' ? '✗' : '…';
+        return `<span class="de-gate-pill ${cls}" title="${(gate.reason || '').replace(/"/g, '&quot;')}">${label}</span>`;
+    }
+
+    async function deLoad() {
+        try {
+            const [statusRes, tradesRes, gateRes] = await Promise.all([
+                fetch('/api/dashboard/dual-entry/status'),
+                fetch('/api/dashboard/dual-entry/trades/today'),
+                fetch('/api/dashboard/dual-entry/gate-status')
+            ]);
+            const status = await statusRes.json();
+            const trades = await tradesRes.json();
+            const gateData = await gateRes.json();
+
+            if (!status.available) {
+                q('de-status-badge').textContent = '— strategy not deployed';
+                return;
+            }
+            q('de-status-badge').textContent = status.enabled ? '— LIVE' : '— disabled';
+            q('de-candidate-count').textContent = status.candidateCount ?? '—';
+            q('de-trades-today').textContent = `${status.tradesToday ?? 0}/${status.maxTradesPerDay ?? '—'}`;
+            q('de-capital').textContent = status.capital ? `₹${status.capital}` : '—';
+            q('de-has-active').textContent = status.hasActiveTrade ? 'Yes' : 'No';
+
+            q('de-candidates-body').innerHTML = (status.candidates || []).map(c => `
+                <tr><td style="padding:6px;font-weight:600">${c.symbol}</td>
+                    <td style="padding:6px">${c.sector} (#${c.sectorRank})</td>
+                    <td style="padding:6px;color:${c.direction === 'LONG' ? 'var(--green)' : 'var(--red)'}">${c.direction}</td></tr>
+            `).join('') || '<tr><td colspan="3" class="sub" style="padding:6px">No candidates yet today.</td></tr>';
+
+            const tCard = q('de-trade-card');
+            const tradeList = (trades.trades || []);
+            if (tradeList.length === 0) {
+                tCard.style.display = 'none';
+            } else {
+                tCard.style.display = 'block';
+                q('de-trade-body').innerHTML = tradeList.map(t => `
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;padding:8px 0;border-bottom:1px solid var(--border)">
+                        <div><div class="sub">Symbol</div><div style="font-weight:600">${t.symbol}</div></div>
+                        <div><div class="sub">Mode</div><div>${t.entryMode}</div></div>
+                        <div><div class="sub">Direction</div><div style="color:${t.direction === 'LONG' ? 'var(--green)' : 'var(--red)'};font-weight:600">${t.direction}</div></div>
+                        <div><div class="sub">Entry</div><div>₹${t.entryPrice ?? '—'}</div></div>
+                        <div><div class="sub">Stop-Loss</div><div>₹${t.stopLoss ?? '—'}</div></div>
+                        <div><div class="sub">Target</div><div>₹${t.target ?? '—'}</div></div>
+                        <div><div class="sub">Quantity</div><div>${t.quantity ?? '—'}</div></div>
+                        <div><div class="sub">Status</div><div>${t.status ?? '—'}</div></div>
+                        ${t.status === 'CLOSED' ? `<div><div class="sub">Exit</div><div>₹${t.exitPrice} (${t.exitReason})</div></div>` : ''}
+                    </div>
+                `).join('');
+            }
+
+            if (!gateData.available) {
+                q('de-gate-updated').textContent = '— gate service not available';
+                return;
+            }
+            const symbols = Object.keys(gateData.symbols || {});
+            const allGates = gateData.gateNames || [];
+            q('de-gate-updated').textContent = symbols.length ? `— live, ${symbols.length} symbol(s)` : '— no attempts yet today';
+
+            if (symbols.length === 0) {
+                q('de-gate-header').innerHTML = '';
+                q('de-gate-body').innerHTML = '';
+                q('de-gate-cards').innerHTML = '<div class="sub">No entry attempts yet today.</div>';
+            } else {
+                q('de-gate-header').innerHTML = '<th>Symbol</th>' + allGates.map(g => `<th>${DE_GATE_LABELS[g] || g}</th>`).join('');
+                q('de-gate-body').innerHTML = symbols.map(sym => {
+                    const gates = gateData.symbols[sym] || {};
+                    return `<tr><td style="font-weight:600">${sym}</td>` +
+                        allGates.map(g => `<td>${deGatePill(gates[g])}</td>`).join('') + '</tr>';
+                }).join('');
+                q('de-gate-cards').innerHTML = symbols.map(sym => {
+                    const gates = gateData.symbols[sym] || {};
+                    return `<div class="de-gate-symbol-card"><div class="sym-name">${sym}</div>` +
+                        allGates.map(g => `<div class="de-gate-row"><span class="gname">${DE_GATE_LABELS[g] || g}</span>${deGatePill(gates[g])}</div>`).join('') +
+                        `</div>`;
+                }).join('');
+            }
+        } catch (e) {
+            q('de-status-badge').textContent = '— load failed: ' + e.message;
+        }
+    }
+
+    setInterval(() => { const el = q('tc-dualentry'); if (el && el.classList.contains('active')) deLoad(); }, 30000);
+</script>
 <script>
     // ============================================================
     // MOMENTUM STOCK OF THE DAY - completely independent module.
