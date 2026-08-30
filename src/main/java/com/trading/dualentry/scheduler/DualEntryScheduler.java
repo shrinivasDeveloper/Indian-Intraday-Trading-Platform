@@ -57,7 +57,8 @@ public class DualEntryScheduler {
     private final AtomicReference<DualEntryTrade> activeTrade = new AtomicReference<>();
     private final AtomicInteger tradesToday = new AtomicInteger(0);
     private final Set<String> tradedSymbolsToday = ConcurrentHashMap.newKeySet();
-    private final AtomicBoolean scanDoneToday = new AtomicBoolean(false);
+    private volatile java.time.LocalDateTime lastScanTime = null;
+    private static final long RESCAN_INTERVAL_MINUTES = 15; // matches Momentum's own cadence exactly
     private volatile LocalDate lastResetDate = LocalDate.now(IST);
 
     public DualEntryScheduler(DualEntryConfig config, MomentumSelectionService selectionService,
@@ -79,7 +80,7 @@ public class DualEntryScheduler {
                 activeTrade.set(null);
                 tradesToday.set(0);
                 tradedSymbolsToday.clear();
-                scanDoneToday.set(false);
+                lastScanTime = null;
                 lastResetDate = today;
                 log.info("[DUAL-ENTRY-SCHEDULER] Daily reset complete");
             }
@@ -95,10 +96,34 @@ public class DualEntryScheduler {
                 return;
             }
 
-            if (!scanDoneToday.get() && !now.isBefore(config.getSelectionTime())) {
-                todaysCandidates = selectionService.selectCandidates();
-                scanDoneToday.set(true);
-                log.info("[DUAL-ENTRY-SCHEDULER] Selection complete - {} candidate(s)", todaysCandidates.size());
+            boolean dueForRescan = lastScanTime == null
+                    || java.time.Duration.between(lastScanTime, java.time.LocalDateTime.now(IST)).toMinutes()
+                    >= RESCAN_INTERVAL_MINUTES;
+            if (dueForRescan && !now.isBefore(config.getSelectionTime())) {
+                List<MomentumCandidate> fresh = selectionService.selectCandidates();
+                lastScanTime = java.time.LocalDateTime.now(IST);
+                // FIX (watchlist-mismatch fix, per explicit user request):
+                // pattern-aware retention, same philosophy as Momentum's
+                // own scheduler - keep candidates currently showing an
+                // actively-forming pattern instead of discarding them on
+                // every rescan. Checked freshly here (live call) rather
+                // than via a stored flag, since Dual Entry's own candle
+                // service is deliberately side-effect-free and never
+                // mutates the shared MomentumCandidate object.
+                List<MomentumCandidate> kept = todaysCandidates.stream()
+                        .filter(c -> !tradedSymbolsToday.contains(c.getSymbol()))
+                        .filter(c -> candleService.evaluateBreakout(c).validConsolidation()
+                                || candleService.evaluatePullback(c).triggered())
+                        .toList();
+                java.util.Set<String> keptSymbols = kept.stream()
+                        .map(MomentumCandidate::getSymbol).collect(java.util.stream.Collectors.toSet());
+                List<MomentumCandidate> merged = new java.util.ArrayList<>(kept);
+                for (MomentumCandidate f : fresh) {
+                    if (!keptSymbols.contains(f.getSymbol())) merged.add(f);
+                }
+                todaysCandidates = merged;
+                log.info("[DUAL-ENTRY-SCHEDULER] Rescan complete - {} kept, {} total candidate(s)",
+                        kept.size(), merged.size());
                 return;
             }
 
