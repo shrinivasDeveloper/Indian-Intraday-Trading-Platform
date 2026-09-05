@@ -42,6 +42,7 @@ public class DualEntryCandleService {
 
     private final DualEntryConfig config;
     private final MomentumCandleService sharedMarketData; // read-only accessor use ONLY
+    private final com.trading.marketdata.service.MarketDataService marketDataService; // for live-price breakout check
 
     public record BreakoutResult(boolean validConsolidation, boolean breakoutTriggered,
                                  double consolidationHigh, double consolidationLow, String note) {}
@@ -91,9 +92,23 @@ public class DualEntryCandleService {
                         .mapToDouble(c -> (double) c.volume()).average().orElse(0);
                 double marginBuffer = consolAvgRange * 0.3;
 
+                // FIX (per explicit user request - "live price breakout
+                // level not 5 minute candle breakout"): use the LIVE
+                // price for the crossing condition, not the candle's
+                // close - this was the structural reason signals could
+                // sit unfired for up to 5 minutes even after price
+                // genuinely broke the level, since the old check only
+                // re-evaluated once the current candle finished
+                // forming. Reuses MarketDataService's already-safe,
+                // shared live-price cache. Falls back to the candle's
+                // close only if no live price is cached yet for this
+                // symbol (fail-safe, not fail-blocking).
+                var livePrices = marketDataService.getLastPricesSimple();
+                double livePrice = livePrices.containsKey(symbol)
+                        ? livePrices.get(symbol).doubleValue() : breakoutCandle.close();
                 boolean priceBreakout = isLong
-                        ? breakoutCandle.close() > dayHigh + marginBuffer
-                        : breakoutCandle.close() < dayLow - marginBuffer;
+                        ? livePrice > dayHigh + marginBuffer
+                        : livePrice < dayLow - marginBuffer;
 
                 double breakoutRange = breakoutCandle.high() - breakoutCandle.low();
                 boolean rangeExpanded = consolAvgRange > 0 && breakoutRange >= consolAvgRange * 1.5;
@@ -107,8 +122,15 @@ public class DualEntryCandleService {
                 boolean hasGenuinePriorMove = true; // fail-open if insufficient history, matching Momentum
                 int idxBeforeWindow = recent.size() - windowSize - 1;
                 if (idxBeforeWindow >= 2) {
-                    double preMoveStart = recent.get(idxBeforeWindow - 2).close();
-                    double preMoveEnd = recent.get(idxBeforeWindow).close();
+                    // FIX (per explicit user request, confirmed real bug):
+                    // now spans the FULL available pre-consolidation
+                    // history, matching Momentum's own proven formula
+                    // exactly - not just a fixed, narrow 2-candle (10-
+                    // minute) window, which was meaningfully stricter
+                    // than intended and under-triggering genuine setups.
+                    List<MomentumCandidate.Candle> preWindow = recent.subList(0, idxBeforeWindow);
+                    double preMoveStart = preWindow.get(0).open();
+                    double preMoveEnd = preWindow.get(preWindow.size() - 1).close();
                     double priorMove = isLong ? preMoveEnd - preMoveStart : preMoveStart - preMoveEnd;
                     hasGenuinePriorMove = consolAvgRange <= 0 || priorMove >= consolAvgRange;
                 }
